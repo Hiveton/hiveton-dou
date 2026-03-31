@@ -80,7 +80,6 @@ void ui_swith_to_standby_screen(void)
 {
     ui_dispatch_request_screen_switch(UI_SCREEN_HOME);
 }
-
 /* 屏幕对象占位符 */
 void* standby_screen = NULL;
 void* main_container = NULL;

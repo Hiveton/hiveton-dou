@@ -4,6 +4,7 @@ config ASIC
    
 config TOUCH_IRQ_PIN
     int
+    default 42 if BSP_USING_BOARD_SF32LB52_LCD_N16R8
     default 31
 
 config LCD_PWM_BACKLIGHT_INTERFACE_NAME
@@ -21,4 +22,3 @@ config LCD_BACKLIGHT_CONTROL_PIN
 config RGBLED_CONTROL_PIN
     int
     default 32  
-
