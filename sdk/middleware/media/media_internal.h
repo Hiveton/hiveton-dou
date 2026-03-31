@@ -104,6 +104,7 @@ typedef struct
     uint8_t                 *main_ptr;
     void                    *decode_handle;
     uint8_t                 *decode_out;
+    uint8_t                 *tws_out;
 } ezip_audio_cache_t;
 
 typedef struct
@@ -150,7 +151,6 @@ typedef struct ffmpeg_decoder_tag
     ezip_audio_cache_t      ezip_audio_cache;
     float                   period_float;
     uint32_t                total_time_in_seconds;
-    uint32_t                total_frames;
     uint32_t                frame_index;
     uint32_t                last_seconds;
     uint32_t                seek_to_second;

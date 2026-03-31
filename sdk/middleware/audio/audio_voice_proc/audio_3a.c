@@ -849,11 +849,6 @@ void audio_3a_module_free(audio_3a_t *p_3a_env)
 }
 
 extern uint32_t bt_connect_get_peer_type(void);
-
-RT_WEAK void hfp_opened_for_xiaozhi(uint32_t samplerate)
-{
-}
-
 void audio_3a_open(uint32_t samplerate, uint8_t is_bt_voice, uint8_t disable_uplink_agc)
 {
     audio_3a_t *thiz = &g_audio_3a_env;
@@ -909,7 +904,6 @@ void audio_3a_open(uint32_t samplerate, uint8_t is_bt_voice, uint8_t disable_upl
         if (is_bt_voice)
             bt_voice_open(samplerate);
 #endif
-        hfp_opened_for_xiaozhi(g_audio_3a_env.samplerate);
     }
 }
 
@@ -987,37 +981,6 @@ uint8_t audio_3a_dnlink_buf_is_full(uint8_t size)
     }
 }
 
-void xiaozhi_to_hfp(uint8_t *fifo, uint16_t fifo_size)
-{
-    audio_3a_t *p_3a_env = &g_audio_3a_env;
-    uint16_t putsize, getsize;
-
-    if (p_3a_env->state == 0)
-    {
-        return;
-    }
-
-    if (p_3a_env->samplerate == 8000)
-    {
-        RT_ASSERT(fifo_size == 120);
-#ifdef AUDIO_BT_AUDIO
-        msbc_encode_process(fifo, 120);
-#endif
-    }
-    else
-    {
-        RT_ASSERT(fifo_size == 240);
-#ifdef AUDIO_BT_AUDIO
-        msbc_encode_process(fifo, 240);
-#endif
-    }
-}
-
-RT_WEAK int hfp_to_xiaozhi(uint32_t samplerate, uint8_t *data, uint8_t data_len)
-{
-    return 0;
-}
-
 void audio_3a_downlink(uint8_t *fifo, uint8_t size)
 {
     audio_3a_t *p_3a_env = &g_audio_3a_env;
@@ -1027,12 +990,6 @@ void audio_3a_downlink(uint8_t *fifo, uint8_t size)
         LOG_I("3a_w downlink error: closed");
         return;
     }
-
-    if (hfp_to_xiaozhi(g_audio_3a_env.samplerate, fifo, size))
-    {
-        return;
-    }
-
 #ifdef AUDIO_MEM_ALLOC
     uint8_t  *data1 = audio_mem_malloc(320);
     uint8_t  *data2 = audio_mem_malloc(320);

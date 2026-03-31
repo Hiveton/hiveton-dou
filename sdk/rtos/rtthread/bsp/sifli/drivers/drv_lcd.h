@@ -173,4 +173,3 @@ typedef struct _sf_graphic_lcdc_layer_t
 #endif /* (LCDC_DPI_MAX_WIDTH >= LCD_HOR_RES_MAX) */
 
 #endif
-

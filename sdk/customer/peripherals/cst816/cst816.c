@@ -351,9 +351,9 @@ static rt_err_t init(void)
 
     if ((fw_ret != RT_EOK) || (fw_ver == 0x00) || (fw_ver == 0xFF))
     {
-        /* Avoid hard-fail during early boot; keep system alive even when TP probe is unstable. */
-        LOG_W("cst816 fw read unstable: fw_ret=%d id_ret=%d fw=0x%x id=0x%x",
+        LOG_E("cst816 init failed: fw_ret=%d id_ret=%d fw=0x%x id=0x%x",
               fw_ret, id_ret, fw_ver, id);
+        return -RT_ERROR;
     }
 
     if ((id_ret != RT_EOK) || (id == 0x00) || (id == 0xFF))

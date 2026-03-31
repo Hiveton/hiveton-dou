@@ -15,6 +15,8 @@
 
 #include <string.h>
 #include "spi_msd.h"
+#include "bf0_hal.h"
+#include "drv_io.h"
 
 #ifndef MSD_SPI_BUS_NAME
     #define MSD_SPI_BUS_NAME "spi1"
@@ -1952,6 +1954,16 @@ rt_err_t msd_reinit(void)
 
 int rt_spi_msd_init(void)
 {
+#if defined(SF32LB52X)
+    HAL_PIN_Set(PAD_PA24, SPI1_DIO, PIN_NOPULL, 1);
+    HAL_PIN_Set(PAD_PA25, SPI1_DI, PIN_PULLDOWN, 1);
+    HAL_PIN_Set(PAD_PA28, SPI1_CLK, PIN_NOPULL, 1);
+    HAL_PIN_Set(PAD_PA29, SPI1_CS, PIN_NOPULL, 1);
+#if defined(MSD_SPI_TF_INSERT_DETE_PIN) && (MSD_SPI_TF_INSERT_DETE_PIN == 33)
+    HAL_PIN_Set(PAD_PA33, GPIO_A33, PIN_PULLUP, 1);
+#endif
+#endif
+
     rt_device_t spi_bus = rt_device_find("sdcard");
     if (spi_bus == RT_NULL)
     {
@@ -1970,12 +1982,16 @@ int rt_spi_msd_init(void)
     rt_pin_mode(MSD_SPI_TF_INSERT_DETE_PIN, PIN_MODE_INPUT);
     int card_state = rt_pin_read(MSD_SPI_TF_INSERT_DETE_PIN);
     rt_thread_mdelay(10);
+    rt_kprintf("[SD] DET pin %d initial=%d stable=%d\n",
+               MSD_SPI_TF_INSERT_DETE_PIN,
+               card_state,
+               rt_pin_read(MSD_SPI_TF_INSERT_DETE_PIN));
     if (card_state == rt_pin_read(MSD_SPI_TF_INSERT_DETE_PIN))
     {
         if (card_state)
         {
-            rt_kprintf("[SD] no card (pin %d), skip msd_init\n", MSD_SPI_TF_INSERT_DETE_PIN);
-            return RT_EOK;
+            rt_kprintf("[SD] DET indicates no card on pin %d, continue probing for compatibility\n",
+                       MSD_SPI_TF_INSERT_DETE_PIN);
         }
     }
 #endif /* MSD_SPI_TF_INSERT_DETE_PIN */

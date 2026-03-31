@@ -51,37 +51,37 @@ extern "C" {
 #define IMG_DESC_FMT_EZIP       4
 
 #if defined(SOC_SF32LB52X) || defined(SOC_SF32LB56X)
-#define IMG_DESC_USING_FFMPEG_YUV420P_BUFFER 1
+    #define IMG_DESC_USING_FFMPEG_YUV420P_BUFFER 1
 #else
-#define IMG_DESC_USING_FFMPEG_YUV420P_BUFFER 0
+    #define IMG_DESC_USING_FFMPEG_YUV420P_BUFFER 0
 #endif
 
 #if IMG_DESC_USING_FFMPEG_YUV420P_BUFFER
-#define IMG_DESC_FMT            IMG_DESC_FMT_YUV420P
-#define IMG_PIXEL_SIZE          2
-#define IMG_LV_FMT              LV_IMG_CF_YUV420_PLANAR2
+    #define IMG_DESC_FMT            IMG_DESC_FMT_YUV420P
+    #define IMG_PIXEL_SIZE          2
+    #define IMG_LV_FMT              LV_IMG_CF_YUV420_PLANAR2
 #else
-#if LV_COLOR_DEPTH == 24 && defined (BSP_USING_PC_SIMULATOR)
-#define IMG_DESC_FMT        IMG_DESC_FMT_RGB888
-#define IMG_PIXEL_SIZE      (LV_COLOR_SIZE>>3)
-#define IMG_LV_FMT          LV_IMG_CF_TRUE_COLOR
-#elif defined(SOC_SF32LB58X) //HW jpeg not support RGB888 on 58x
-#define IMG_DESC_FMT        IMG_DESC_FMT_ARGB8888
-#define IMG_PIXEL_SIZE      4
-#ifndef DISABLE_LVGL_V8
-#define IMG_LV_FMT      LV_IMG_CF_RGBA8888
-#else
-#define IMG_LV_FMT      LV_IMG_CF_ARGB8888
-#endif
-#else
-#define IMG_DESC_FMT        IMG_DESC_FMT_RGB565
-#define IMG_PIXEL_SIZE      2
-#ifdef  BSP_USING_PC_SIMULATOR
-#define IMG_LV_FMT          LV_IMG_CF_TRUE_COLOR
-#else
-#define IMG_LV_FMT          LV_IMG_CF_RGB565
-#endif
-#endif
+    #if LV_COLOR_DEPTH == 24 && defined (BSP_USING_PC_SIMULATOR)
+        #define IMG_DESC_FMT        IMG_DESC_FMT_RGB888
+        #define IMG_PIXEL_SIZE      (LV_COLOR_SIZE>>3)
+        #define IMG_LV_FMT          LV_IMG_CF_TRUE_COLOR
+    #elif defined(SOC_SF32LB58X) //HW jpeg not support RGB888 on 58x
+        #define IMG_DESC_FMT        IMG_DESC_FMT_ARGB8888
+        #define IMG_PIXEL_SIZE      4
+        #ifndef DISABLE_LVGL_V8
+            #define IMG_LV_FMT      LV_IMG_CF_RGBA8888
+        #else
+            #define IMG_LV_FMT      LV_IMG_CF_ARGB8888
+        #endif
+    #else
+        #define IMG_DESC_FMT        IMG_DESC_FMT_RGB565
+        #define IMG_PIXEL_SIZE      2
+        #ifdef  BSP_USING_PC_SIMULATOR
+            #define IMG_LV_FMT          LV_IMG_CF_TRUE_COLOR
+        #else
+            #define IMG_LV_FMT          LV_IMG_CF_RGB565
+        #endif
+    #endif
 #endif
 
 typedef enum
@@ -110,6 +110,7 @@ typedef struct
 typedef enum
 {
     e_src_localfile,
+    e_network_frames_stream, //audio/video not demuxed, should demux in decoder
 } ffmpeg_src_e;
 
 typedef enum

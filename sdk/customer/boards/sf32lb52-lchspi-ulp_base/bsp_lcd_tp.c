@@ -29,9 +29,7 @@ void BSP_LCD_PowerDown(void)
     BSP_GPIO_Set(LCD_RESET_PIN, 0, 1);//reset
     BSP_GPIO_Set(LCD_VADD_EN, 0, 1); //
     // BSP_GPIO_Set(38, 0, 1);//The sensor is powered by VSYS_1,Wrist lifting requires the use of sensors.
-#ifndef RT_USING_SPI_MSD
     BSP_GPIO_Set(26, 0, 1); //3v3
-#endif /* RT_USING_SPI_MSD*/
 
     BSP_GPIO_Set(42, 0, 1);  //Audio
 
@@ -49,7 +47,7 @@ void BSP_LCD_PowerDown(void)
     HAL_PIN_Set(PAD_PA11, GPIO_A11, PIN_PULLDOWN, 1);
 
     HAL_PIN_Set(PAD_PA42, GPIO_A42, PIN_PULLDOWN, 1);
-#endif /* LCD_USING_CO5300*/
+#endif
 }
 
 void BSP_LCD_PowerUp(void)

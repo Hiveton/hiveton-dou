@@ -29,37 +29,14 @@
                 }
             },
             {
-                "offset": "0x001A0000",
-                "max_size": "0x00058000",
-                "tags": [
-                    "DFU_FLASH_CODE"
-                ],
-                "img": "dfu",
-                "exec": "dfu",
-                "ftab": {
-                    "name": "dfu",
-                    "address": [
-                        "base",
-                        "xip"
-                    ]
-                }
-            },
-            {
-                "offset": "0x001F8000",
-                "max_size": "0x00050000",
-                "tags": [
-                    "DFU_DOWNLOAD_REGION"
-                ]
-            },
-            {
-                "offset": "0x00248000", 
+                "offset": "0x001a0000", 
                 "max_size": "0x00004000", 
                 "tags": [
                     "KVDB_DFU_REGION"
                 ]
             }, 
             {
-                "offset": "0x0024C000", 
+                "offset": "0x001a4000", 
                 "max_size": "0x00004000", 
                 "tags": [
                     "KVDB_BLE_REGION"

@@ -308,6 +308,15 @@ static void _draw_epic_letter(lv_draw_unit_t *draw_unit, lv_draw_glyph_dsc_t *gl
 
             int ret = drv_epic_cont_blend(input_layers, input_layer_cnt, &output_canvas);
             LV_ASSERT(0 == ret);
+
+            /*
+             * tiny_ttf glyph bitmaps are cache-backed and can be reused as soon
+             * as this callback returns. EPIC continuous blend is async, so wait
+             * here before the next glyph/page transition can overwrite the
+             * current bitmap and leave random fuzzy text on screen.
+             */
+            ret = drv_epic_wait_done();
+            LV_ASSERT(0 == ret);
         }
         else if (glyph_draw_dsc->format == LV_FONT_GLYPH_FORMAT_IMAGE)
         {

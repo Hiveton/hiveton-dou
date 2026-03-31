@@ -282,6 +282,10 @@ static void LCD_Init(LCDC_HandleTypeDef *hlcdc)
     memcpy(&lcdc_int_cfg, &lcdc_int_cfg_qadspi, sizeof(lcdc_int_cfg));
 #endif /* BSP_LCDC_USING_QADSPI */
 
+    HAL_PIN_Set(PAD_PA01, GPIO_A1, PIN_NOPULL, 1);
+    BSP_GPIO_Set(1, 1, 1);
+    rt_kprintf("co5300_bl[init]: PA1 gpio high\n");
+
     LCD_Drv_Init(hlcdc);
 }
 

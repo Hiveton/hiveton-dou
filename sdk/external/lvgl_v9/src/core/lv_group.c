@@ -63,7 +63,9 @@ lv_group_t * lv_group_create(void)
     group->frozen         = 0;
     group->focus_cb       = NULL;
     group->edge_cb        = NULL;
-    group->editing        = 0;
+    /* Keep groups in edit mode by default so encoder/touch flows don't require
+     * an extra confirmation click before interacting with editable widgets. */
+    group->editing        = 1;
     group->refocus_policy = LV_GROUP_REFOCUS_POLICY_PREV;
     group->wrap           = 1;
     group->user_data      = NULL;

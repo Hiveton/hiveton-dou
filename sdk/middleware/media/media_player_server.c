@@ -16,6 +16,7 @@
 #define USING_FAST_YUV2RGB      1
 
 #define NETWORK_READ_STACK_SIZE (13 * 1024)
+#define FFMPEG_OPEN_AYNC        1
 #define refcount                1
 
 #define SIFLI_MEDIA_MAGIC1      "siflizip"
@@ -26,11 +27,6 @@
 #define lock()      _lock(thiz->network_queue)
 #define unlock()    _unlock(thiz->network_queue)
 
-
-#define EVT_INIT_OK         (1<<0)
-#define EVT_INIT_FAILED     (1<<1)
-
-static ffmpeg_handle g_player = NULL;
 /*
     ffmpeg_thread_stack in sram for fast decode speed, see link sct file
 */
@@ -40,9 +36,13 @@ uint32_t ffmpeg_thread_stack[4 * 1024]; //video & audio stack
 #define ffmpeg_audio_dec_thread_stack   &ffmpeg_thread_stack[0]
 #define ffmpeg_video_dec_thread_stack   &ffmpeg_thread_stack[ffmpeg_audio_dec_thread_stack_size/4]
 
+#define EVT_INIT_OK         (1<<0)
+#define EVT_INIT_FAILED     (1<<1)
+
+static ffmpeg_handle g_player = NULL;
 
 static void drop_all_avpacket(os_message_queue_t q);
-static void clean_up(ffmpeg_handle thiz, uint8_t free_thiz);
+static void clean_up(ffmpeg_handle thiz);
 #ifdef BSP_USING_PC_SIMULATOR
 extern uint32_t lv_img_decode_flash_read(uint32_t addr, uint8_t *buf, int size);
 #else
@@ -592,14 +592,19 @@ static void media_read_thread(void *p)
 #endif /*DEBUG_IO_SPEED*/
     int read_ret;
     ffmpeg_handle thiz = p;
-    LOG_I("%s:thiz=%p", __FUNCTION__, thiz);
+    LOG_I("%s", __FUNCTION__);
 
+#if FFMPEG_OPEN_AYNC
     int ret;
     if (thiz->cfg.src == e_src_localfile)
     {
         LOG_E("mediaplayer_start %s fmt=%d", thiz->cfg.file_path, thiz->cfg.fmt);
         ffmeg_mem_init();
         ret = mediaplayer_start(thiz, 1);
+    }
+    else if (thiz->cfg.src == e_network_frames_stream)
+    {
+        ret = mediaplayer_start(thiz, 0);
     }
     else
     {
@@ -613,6 +618,7 @@ static void media_read_thread(void *p)
         return;
     }
     os_event_flags_set(thiz->evt_init, EVT_INIT_OK);
+#endif
 
     while (thiz->is_ok)
     {
@@ -816,7 +822,7 @@ static void media_read_thread(void *p)
         drop_all_avpacket(thiz->av_pkt_queue_audio);
     }
 
-    clean_up(thiz, 1);
+    clean_up(thiz);
 
     LOG_I("media exit");
 }
@@ -829,7 +835,7 @@ static void drop_all_avpacket(os_message_queue_t q)
 
 }
 
-static void clean_up(ffmpeg_handle thiz, uint8_t free_thiz)
+static void clean_up(ffmpeg_handle thiz)
 {
     if (thiz->evt_video)
     {
@@ -921,18 +927,11 @@ static void clean_up(ffmpeg_handle thiz, uint8_t free_thiz)
 
     media_cache_deinit(&thiz->video_cache, VIDEO_BUFFER_CAPACITY);
 
-    if (free_thiz)
-    {
-        rt_free(thiz);
-    }
+    rt_free(thiz);
 
     ffmpeg_memleak_check();
 
-    if (free_thiz)
-    {
-        g_player = NULL;
-    }
-
+    g_player = NULL;
 }
 
 static int read_packet(void *opaque, uint8_t *buf, int buf_size)
@@ -1051,28 +1050,13 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
         av_seek_frame(thiz->fmt_ctx, 0, 0, AVSEEK_FLAG_BACKWARD);
     }
 
-    int video_stream_index = -1;
-
     for (int i = 0; i < thiz->fmt_ctx->nb_streams; i++)
     {
-        if (thiz->fmt_ctx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO)
-        {
-            if (-1 == video_stream_index)
-                video_stream_index = i;
-            continue;
-        }
-        if (thiz->fmt_ctx->streams[i]->codec->codec_type == AVMEDIA_TYPE_AUDIO)
+        if (thiz->fmt_ctx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO
+                || thiz->fmt_ctx->streams[i]->codec->codec_type == AVMEDIA_TYPE_AUDIO)
             continue;
         LOG_I("unsupport codec=%d", thiz->fmt_ctx->streams[i]->codec->codec_type);
     }
-
-    if (-1 != video_stream_index)
-    {
-        AVStream *video_stream = thiz->fmt_ctx->streams[video_stream_index];
-        thiz->total_frames = video_stream->nb_frames;
-    }
-
-    int stream_find = 0;
 
     // Get video parameters
     if (open_codec_context(&thiz->video_stream_idx, thiz->fmt_ctx, AVMEDIA_TYPE_VIDEO) >= 0)
@@ -1080,7 +1064,6 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
         AVStream *video_stream = thiz->fmt_ctx->streams[thiz->video_stream_idx];
         thiz->video_dec_ctx = video_stream->codec;
         thiz->video_dec_ctx->skip_loop_filter = AVDISCARD_NONKEY;
-        stream_find = 1;
 
         LOG_I("video codec: format=%d", thiz->video_dec_ctx->pix_fmt);
 
@@ -1122,7 +1105,7 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
         {
             thiz->gpu_pic_fmt = e_sifli_fmt_argb8888;
         }
-        LOG_I("video codec: %s stream w=%d h=%d,period=%ld,frames=%ld", name, thiz->width, thiz->height, thiz->period, thiz->total_frames);
+        LOG_I("video codec: %s stream w=%d h=%d,period=%ld", name, thiz->width, thiz->height, thiz->period);
     }
     else
         LOG_E("cannot find video stream\n");
@@ -1134,18 +1117,10 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
         thiz->audio_dec_ctx = audio_stream->codec;
         thiz->audio_channel = thiz->audio_dec_ctx->channels;
         thiz->audio_samplerate = thiz->audio_dec_ctx->sample_rate;
-        stream_find = 1;
         LOG_I("audio codec: fmt=%d", thiz->audio_dec_ctx->sample_fmt);
     }
     else
-    {
         LOG_E("cannot find audio stream\n");
-    }
-
-    if (0 == stream_find)
-    {
-        goto Exit;
-    }
 
     thiz->audio_frame = av_frame_alloc();
     if (!thiz->audio_frame)
@@ -1196,11 +1171,27 @@ static int mediaplayer_start(ffmpeg_handle thiz, bool is_file)
         }
     }
 
+#if !FFMPEG_OPEN_AYNC
+    rt_uint32_t stack_size = 4096;
+    rt_uint8_t  priority = av_read_pkt_task_prio;
+    if (thiz->is_network_file)
+    {
+        stack_size = NETWORK_READ_STACK_SIZE;
+        priority = network_read_task_prio;
+    }
+    // Start file read thread;
+    thiz->av_pkt_read_thread = rt_thread_create("ffmpeg_read", media_read_thread, thiz,
+                               stack_size,
+                               priority,
+                               RT_THREAD_TICK_DEFAULT);
+    RT_ASSERT(thiz->av_pkt_read_thread != NULL);
+    rt_thread_startup(thiz->av_pkt_read_thread);
+#endif
 
     LOG_I("mediaplayer_start ok");
     return RT_EOK;
 Exit:
-    clean_up(thiz, 0);
+    clean_up(thiz);
     LOG_I("mediaplayer_start failed");
     return RT_EIO;
 }
@@ -1804,6 +1795,7 @@ int ffmpeg_open(ffmpeg_handle *return_hanlde, ffmpeg_config_t *cfg, uint32_t use
     }
 
 
+#if FFMPEG_OPEN_AYNC
     os_event_create(thiz->evt_init);
     RT_ASSERT(thiz->evt_init);
 
@@ -1842,6 +1834,25 @@ int ffmpeg_open(ffmpeg_handle *return_hanlde, ffmpeg_config_t *cfg, uint32_t use
     }
     os_event_delete(thiz->evt_init);
     thiz->evt_init = NULL;
+
+#else
+    if (cfg->src == e_src_localfile)
+    {
+        LOG_E("mediaplayer_start %s fmt=%d", cfg->file_path, cfg->fmt);
+        ffmeg_mem_init();
+        ret = mediaplayer_start(thiz, 1);
+    }
+    else if (cfg->src == e_network_frames_stream)
+    {
+        ret = mediaplayer_start(thiz, 0);
+    }
+    else
+    {
+        ret = -1;
+        LOG_E("under development");
+        RT_ASSERT(0);
+    }
+#endif
 
     if (ret != RT_EOK)
     {

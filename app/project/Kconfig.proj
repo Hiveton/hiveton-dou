@@ -16,13 +16,22 @@ config CONFIG_IOT_PROTOCOL_MCP
     bool "using mcp protocol"
 	default y 
 
+config RT_USING_SPI_MSD
+	default y
+
+config MSD_SPI_TF_INSERT_DETE_PIN
+	default 33
+
+config DFS_FILESYSTEMS_MAX
+	default 4
+
 comment "------------Project configuration-----------"
 
 
 
 config BLUETOOTH_NAME
     string "Bluetooth device name"
-    default "sifli-pan"
+    default "ink"
     help
         Specify the Bluetooth device name for the application.
 
@@ -30,7 +39,7 @@ config BT_NAME_MAC_ENABLE
     bool "Append the MAC address to the Bluetooth name"
     default n
     help
-        Append the MAC address to the Bluetooth name, such as "sifli-pan-12:34:56:78:9a:bc".
+        Append the MAC address to the Bluetooth name, such as "ink-12:34:56:78:9a:bc".
 
 # KWS
 config KWS_ENABLE_DEFAULT
@@ -38,23 +47,3 @@ config KWS_ENABLE_DEFAULT
     default n
     help
         Enable KWS (Keyword Spotting) by default in the application. 
-
-
-# EZIP
-config EZIP_BINARY_MODE
-    bool "Enable EZIP binary mode"
-    depends on BSP_USING_BOARD_SF32LB52_NANO_A128R16
-    default y
-    help
-        Enable EZIP binary mode for image resources.
-# TINY_TTF
-config TINY_TTF_MODE
-    bool "Enable Tiny TTF font support"
-    depends on BSP_USING_BOARD_SF32LB52_NANO_A128R16
-    default y
-    help
-        Enable Tiny TTF font support for the application.
-
-config LOW_POWER_NO_SHUTDOWN
-    bool "low power dont shutdown"
-    default n

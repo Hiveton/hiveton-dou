@@ -1,9 +1,3 @@
-/*
- * SPDX-FileCopyrightText: 2019-2026 SiFli Technologies(Nanjing) Co., Ltd
- *
- * SPDX-License-Identifier: Apache-2.0
- */
-
 #ifndef AUDIO_SERVER_H
 #define AUDIO_SERVER_H  1
 #include <rtthread.h>
@@ -109,8 +103,6 @@ typedef struct
     uint32_t read_cache_size;
     uint8_t  read_channnel_num;
     uint8_t  read_bits_per_sample;
-
-    uint8_t  is_micbias_only;
 } audio_parameter_t;
 
 
@@ -127,7 +119,6 @@ typedef enum
     AUDIO_DEVICE_PDM1          = 5,
     AUDIO_DEVICE_PDM2          = 6,
     AUDIO_DEVICE_BLE_BAP_SINK  = 7, //local is ble audio src, output to ble bap sink device
-    AUDIO_DEVICE_XIAOZHI       = 8,
     AUDIO_DEVICE_NUMBER
 } audio_device_e;
 

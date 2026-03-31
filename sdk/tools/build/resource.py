@@ -1865,10 +1865,7 @@ echo "$input"
 
 '''
     
-    if os.getenv("LEGACY_ENV"):
-        uart_comment += MakeLine('echo "Legacy mode is not supported on Linux/macOS"')
-    else:
-        uart_comment += MakeLine(f'sftool -p "$input" -c {device} -m {memory.lower()} write_flash {download_list}\n')
+    uart_comment += MakeLine(f'sftool -p "$input" -c {device} -m {memory.lower()} write_flash {download_list}\n')
     
     uart_sh_path = os.path.join(main_env['build_dir'], 'uart_download.sh')
     uart_f = open(uart_sh_path, 'w')
