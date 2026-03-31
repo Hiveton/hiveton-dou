@@ -1,2 +1,5 @@
 source "$SIFLI_SDK/customer/boards/sf32lb52-lcd_base/Kconfig.board"
 
+config TOUCH_IRQ_PIN
+    int
+    default 42 if BSP_USING_BOARD_SF32LB52_LCD_N16R8
