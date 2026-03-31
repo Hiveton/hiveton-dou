@@ -417,13 +417,15 @@ static void enable_low_power(LCD_DrvTypeDef *p_drvlcd)
 
     LOG_D("LCDC Enter lowpower mode");
 
-    if (p_drvlcd->auto_lowpower)
+    if (!p_drvlcd->auto_lowpower)
     {
-        err = HAL_LCDC_Enter_LP(&p_drvlcd->hlcdc);
-        if (HAL_OK != err)
-        {
-            LOG_E("Enter lowpower mode err %d", err);
-        }
+        return;
+    }
+
+    err = HAL_LCDC_Enter_LP(&p_drvlcd->hlcdc);
+    if (HAL_OK != err)
+    {
+        LOG_E("Enter lowpower mode err %d", err);
     }
     LOG_D("LCDC Enter lowpower mode done.");
 }
@@ -433,6 +435,12 @@ static void disable_low_power(LCD_DrvTypeDef *p_drvlcd)
     HAL_StatusTypeDef err;
 
     LOG_D("LCDC Exit lowpower mode");
+
+    if (!p_drvlcd->auto_lowpower)
+    {
+        return;
+    }
+
     err = HAL_LCDC_Exit_LP(&p_drvlcd->hlcdc);
     if (HAL_OK != err)
     {
@@ -2461,7 +2469,11 @@ static int rt_hw_lcd_init(void)
     }
 
     drv_lcd.status = LCD_STATUS_NONE;
+#ifdef LCD_USING_ST7789_GTM024_08_SPI8P
+    drv_lcd.auto_lowpower = 0;
+#else
     drv_lcd.auto_lowpower = 1;
+#endif
     drv_lcd.draw_lock = 0;
     drv_lcd.rotate = LCD_ROTATE_0_DEGREE;
     drv_lcd.assert_timeout = 1;
@@ -3255,4 +3267,3 @@ static rt_err_t lcd_ctrl(int argc, char **argv)
 }
 MSH_CMD_EXPORT(lcd_ctrl, lcd control);
 #endif /* RT_USING_FINSH */
-
