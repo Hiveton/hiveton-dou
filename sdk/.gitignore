@@ -14,6 +14,8 @@ Kconfig.tmp
 .venv
 _*/
 **/packages/
+!rtos/env/packages/
+!rtos/env/packages/**
 .project.toml
 # Allow tracking everything under tools/build
 !tools/build/
