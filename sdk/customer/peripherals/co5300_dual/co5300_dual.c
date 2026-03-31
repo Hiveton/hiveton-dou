@@ -13,7 +13,6 @@
 #include "board.h"
 #include "drv_io.h"
 #include "drv_lcd.h"
-#include "drivers/rt_drv_pwm.h"
 #define DBG_TAG               "co5300"
 #define DBG_LVL               DBG_INFO
 #include <rtdbg.h>
@@ -86,9 +85,6 @@
 #define RIGHT_LCD_CS_PIN 39   //定义两个屏幕的片选引脚：
 #define BSP_LCD_PIN_1 25
 #define RIGHT_LCD_RESET_PIN 29
-#define LCD_BACKLIGHT_PWM_DEV_NAME "pwm2"
-#define LCD_BACKLIGHT_PWM_CHANNEL 4
-#define LCD_BACKLIGHT_PWM_PERIOD_NS (50 * 1000)
 
 
 
@@ -125,8 +121,6 @@ static uint16_t right_lcd_pin_pin = RIGHT_LCD_CS_PIN;
 static uint16_t Region_Xpos0, Region_Ypos0, Region_Xpos1, Region_Ypos1;
 static uint16_t current_lcd_cs_pin;
 static LCDC_InitTypeDef lcdc_int_cfg;
-static struct rt_device_pwm *g_lcd_backlight_pwm = RT_NULL;
-static rt_bool_t g_lcd_backlight_pwm_opened = RT_FALSE;
 
 static void LCD_WriteReg(LCDC_HandleTypeDef *hlcdc, uint16_t LCD_Reg, uint8_t *Parameters, uint32_t NbParameters);
 static uint32_t LCD_ReadData(LCDC_HandleTypeDef *hlcdc, uint16_t RegValue, uint8_t ReadSize);
@@ -134,8 +128,6 @@ static void LCD_ReadMode(LCDC_HandleTypeDef *hlcdc, bool enable);
 static uint32_t LCD_ReadID(LCDC_HandleTypeDef *hlcdc);
 static void LCD_SetRegion(LCDC_HandleTypeDef *hlcdc, uint16_t Xpos0, uint16_t Ypos0, uint16_t Xpos1, uint16_t Ypos1);
 static void LCD_WriteReg_both(LCDC_HandleTypeDef *hlcdc, uint16_t LCD_Reg, uint8_t *Parameters, uint32_t NbParameters);
-static void LCD_SetBacklightPwm(uint8_t br);
-static void LCD_LogBacklightState(const char *tag);
 
 /**
   * @brief  spi read/write mode
@@ -169,106 +161,6 @@ static void LCD_Clear(LCDC_HandleTypeDef *hlcdc)
     HAL_LCDC_SendLayerData2Reg(hlcdc, ((0x32 << 24) | (REG_WRITE_RAM << 8)), 4);
     HAL_LCDC_LayerEnable(hlcdc, HAL_LCDC_LAYER_DEFAULT);
 
-}
-
-static void LCD_LogBacklightState(const char *tag)
-{
-    rt_kprintf("co5300_bl[%s]: PAD_PA01=0x%08x GPTIM1_PINR=0x%08x pwm=%p opened=%d\n",
-               tag,
-               hwp_hpsys_pinmux->PAD_PA01,
-               hwp_hpsys_cfg->GPTIM1_PINR,
-               g_lcd_backlight_pwm,
-               g_lcd_backlight_pwm_opened);
-}
-
-static void LCD_SetBacklightPwm(uint8_t br)
-{
-    rt_err_t result;
-    rt_uint32_t pulse;
-
-    if (br > 100)
-    {
-        br = 100;
-    }
-
-    MODIFY_REG(hwp_hpsys_cfg->GPTIM1_PINR,
-               HPSYS_CFG_GPTIM1_PINR_CH4_PIN_Msk,
-               MAKE_REG_VAL(PAD_PA01 - PAD_PA00,
-                            HPSYS_CFG_GPTIM1_PINR_CH4_PIN_Msk,
-                            HPSYS_CFG_GPTIM1_PINR_CH4_PIN_Pos));
-    HAL_PIN_Set(PAD_PA01, PA01_TIM, PIN_NOPULL, 1);
-    LCD_LogBacklightState("pwm-enter");
-
-    if (g_lcd_backlight_pwm == RT_NULL)
-    {
-        g_lcd_backlight_pwm = (struct rt_device_pwm *)rt_device_find(LCD_BACKLIGHT_PWM_DEV_NAME);
-        if (g_lcd_backlight_pwm == RT_NULL)
-        {
-            LOG_E("backlight pwm device %s not found", LCD_BACKLIGHT_PWM_DEV_NAME);
-            HAL_PIN_Set(PAD_PA01, GPIO_A1, PIN_NOPULL, 1);
-            rt_pin_mode(BSP_LCD_PIN, PIN_MODE_OUTPUT);
-            rt_pin_write(BSP_LCD_PIN, br > 0 ? PIN_HIGH : PIN_LOW);
-            LCD_LogBacklightState("fallback-no-dev");
-            return;
-        }
-    }
-
-    if (!g_lcd_backlight_pwm_opened)
-    {
-        result = rt_device_open((rt_device_t)g_lcd_backlight_pwm, RT_DEVICE_OFLAG_RDWR);
-        if ((result != RT_EOK) && (result != -RT_EBUSY))
-        {
-            LOG_E("backlight pwm open failed %d", result);
-            HAL_PIN_Set(PAD_PA01, GPIO_A1, PIN_NOPULL, 1);
-            rt_pin_mode(BSP_LCD_PIN, PIN_MODE_OUTPUT);
-            rt_pin_write(BSP_LCD_PIN, br > 0 ? PIN_HIGH : PIN_LOW);
-            LCD_LogBacklightState("fallback-open");
-            return;
-        }
-        g_lcd_backlight_pwm_opened = RT_TRUE;
-    }
-
-    pulse = (LCD_BACKLIGHT_PWM_PERIOD_NS * br) / 100;
-    result = rt_pwm_set(g_lcd_backlight_pwm,
-                        LCD_BACKLIGHT_PWM_CHANNEL,
-                        LCD_BACKLIGHT_PWM_PERIOD_NS,
-                        pulse);
-    if (result != RT_EOK)
-    {
-        LOG_E("backlight pwm set failed %d br=%u pulse=%u", result, br, pulse);
-        HAL_PIN_Set(PAD_PA01, GPIO_A1, PIN_NOPULL, 1);
-        rt_pin_mode(BSP_LCD_PIN, PIN_MODE_OUTPUT);
-        rt_pin_write(BSP_LCD_PIN, br > 0 ? PIN_HIGH : PIN_LOW);
-        LCD_LogBacklightState("fallback-set");
-        return;
-    }
-
-    if (br == 0)
-    {
-        result = rt_pwm_disable(g_lcd_backlight_pwm, LCD_BACKLIGHT_PWM_CHANNEL);
-        if (result != RT_EOK)
-        {
-            LOG_E("backlight pwm disable failed %d", result);
-            HAL_PIN_Set(PAD_PA01, GPIO_A1, PIN_NOPULL, 1);
-            rt_pin_mode(BSP_LCD_PIN, PIN_MODE_OUTPUT);
-            rt_pin_write(BSP_LCD_PIN, PIN_LOW);
-            LCD_LogBacklightState("fallback-disable");
-        }
-        return;
-    }
-
-    result = rt_pwm_enable(g_lcd_backlight_pwm, LCD_BACKLIGHT_PWM_CHANNEL);
-    if (result != RT_EOK)
-    {
-        LOG_E("backlight pwm enable failed %d", result);
-        HAL_PIN_Set(PAD_PA01, GPIO_A1, PIN_NOPULL, 1);
-        rt_pin_mode(BSP_LCD_PIN, PIN_MODE_OUTPUT);
-        rt_pin_write(BSP_LCD_PIN, br > 0 ? PIN_HIGH : PIN_LOW);
-        LCD_LogBacklightState("fallback-enable");
-        return;
-    }
-
-    LCD_LogBacklightState("pwm-ok");
 }
 
 
@@ -374,7 +266,6 @@ static void LCD_Init(LCDC_HandleTypeDef *hlcdc)
     HAL_PIN_Set(PAD_PA01, GPIO_A1, PIN_NOPULL, 1);
     rt_pin_mode(BSP_LCD_PIN, PIN_MODE_OUTPUT);
     rt_pin_write(BSP_LCD_PIN, PIN_HIGH);
-    LCD_LogBacklightState("init-gpio-high");
 
     HAL_PIN_Set(PAD_PA25, GPIO_A25, PIN_NOPULL, 1);
     rt_pin_mode(BSP_LCD_PIN_1, PIN_MODE_OUTPUT);
@@ -762,10 +653,7 @@ static void  LCD_SetBrightness(LCDC_HandleTypeDef *hlcdc, uint8_t br)
 {
 
     uint8_t bright = (uint8_t)((int)REG_BRIGHTNESS_MAX * br / 100);
-    HAL_PIN_Set(PAD_PA01, GPIO_A1, PIN_NOPULL, 1);
-    rt_pin_mode(BSP_LCD_PIN, PIN_MODE_OUTPUT);
-    rt_pin_write(BSP_LCD_PIN, br > 0 ? PIN_HIGH : PIN_LOW);
-    LCD_LogBacklightState("set-brightness-gpio");
+    rt_kprintf("co5300_dual_bl[brightness-reg]: br=%u reg=%u\n", br, bright);
     LCD_WriteReg_both(hlcdc, REG_WBRIGHT, &bright, 1);
 }
 

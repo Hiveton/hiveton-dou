@@ -124,6 +124,7 @@ void xz_prepare_tls_allocator(void)
         return;
     }
 
+#if defined(MBEDTLS_PLATFORM_MEMORY)
     if (mbedtls_platform_set_calloc_free(xz_mbedtls_calloc,
                                          xz_mbedtls_free) == 0)
     {
@@ -134,6 +135,10 @@ void xz_prepare_tls_allocator(void)
     {
         rt_kprintf("xiaozhi tls allocator setup failed\n");
     }
+#else
+    s_xiaozhi_tls_allocator_ready = RT_TRUE;
+    rt_kprintf("xiaozhi tls allocator skipped (MBEDTLS_PLATFORM_MEMORY disabled)\n");
+#endif
 }
 
 static void xz_fill_device_address(bd_addr_t *addr)

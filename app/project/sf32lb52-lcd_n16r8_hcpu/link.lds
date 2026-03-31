@@ -590,13 +590,13 @@ SECTIONS
 
   .rom3 :
   {
-    KEEP(*(.ROM3_IMG_EZIP_HEADER*))
-    KEEP(*(.ROM3_IMG_EZIP*))
+    *(.ROM3_IMG_EZIP_HEADER*)
+    *(.ROM3_IMG_EZIP*)
   } > ROM3
 
   .rom2 :
   {
-    KEEP(*(.font_data))
+    *(.font_data)
   } > ROM2
 #endif
 }
