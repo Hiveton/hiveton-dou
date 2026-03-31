@@ -4,6 +4,9 @@
 #ifdef BSP_USING_LCD
 #define LCD_RESET_PIN           (0)         // GPIO_A00
 #ifdef BSP_USING_BOARD_SF32LB52_LCD_N16R8
+#define LCD_POWER_EN_PIN        (10)        // GPIO_A10, shared LCD/TP power rail
+#endif
+#ifdef BSP_USING_BOARD_SF32LB52_LCD_N16R8
 #define TP_RESET                (0)         // Shared with LCD reset
 #else
 #define TP_RESET                (9)         // GPIO_A09
@@ -46,6 +49,11 @@ extern void BSP_PIN_Touch(void);
 void BSP_TP_PowerUp(void)
 {
     // TODO: Setup TP power up pin
+#ifdef BSP_USING_BOARD_SF32LB52_LCD_N16R8
+    HAL_PIN_Set(PAD_PA10, GPIO_A10, PIN_NOPULL, 1);
+    BSP_GPIO_Set(LCD_POWER_EN_PIN, 1, 1);
+    HAL_Delay_us(500);
+#endif
     BSP_PIN_Touch();
     BSP_GPIO_Set(TP_RESET,  1, 1);
 }
@@ -54,6 +62,9 @@ void BSP_TP_PowerDown(void)
 {
     // TODO: Setup TP power down pin
     BSP_GPIO_Set(TP_RESET,  0, 1);
+#ifdef BSP_USING_BOARD_SF32LB52_LCD_N16R8
+    BSP_GPIO_Set(LCD_POWER_EN_PIN, 0, 1);
+#endif
 }
 void BSP_TP_Reset(uint8_t high1_low0)
 {
