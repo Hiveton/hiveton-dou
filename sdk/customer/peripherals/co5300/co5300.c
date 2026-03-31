@@ -500,6 +500,7 @@ static void LCD_SetColorMode(LCDC_HandleTypeDef *hlcdc, uint16_t color_mode)
 static void  LCD_SetBrightness(LCDC_HandleTypeDef *hlcdc, uint8_t br)
 {
     uint8_t bright = (uint8_t)((int)REG_BRIGHTNESS_MAX * br / 100);
+    rt_kprintf("co5300_bl[brightness-reg]: br=%u reg=%u\n", br, bright);
     LCD_WriteReg(hlcdc, REG_WBRIGHT, &bright, 1);
 }
 

@@ -653,6 +653,7 @@ static void  LCD_SetBrightness(LCDC_HandleTypeDef *hlcdc, uint8_t br)
 {
 
     uint8_t bright = (uint8_t)((int)REG_BRIGHTNESS_MAX * br / 100);
+    rt_kprintf("co5300_dual_bl[brightness-reg]: br=%u reg=%u\n", br, bright);
     LCD_WriteReg_both(hlcdc, REG_WBRIGHT, &bright, 1);
 }
 
@@ -715,4 +716,3 @@ LCD_DRIVER_EXPORT(co5300, LCD_ID, &lcdc_int_cfg,
                   REG_LCD_PIXEL_WIDTH,
                   REG_LCD_PIXEL_HEIGHT,
                   2);
-
