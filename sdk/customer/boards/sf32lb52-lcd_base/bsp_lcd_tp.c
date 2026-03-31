@@ -34,6 +34,8 @@ void BSP_LCD_PowerUp(void)
 {
     // TODO: LCD power up
     HAL_Delay_us(500);      // lcd power on finish ,need 500us
+    HAL_PIN_Set(PAD_PA10, GPIO_A10, PIN_NOPULL, 1);
+    BSP_GPIO_Set(10, 1, 1);
     BSP_PIN_LCD();
 #ifdef LCD_USING_CO5300
     BSP_GPIO_Set(LCD_VADD_EN, 1, 1); //POwer up VADD EN
