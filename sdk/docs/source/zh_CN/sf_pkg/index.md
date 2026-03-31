@@ -1,0 +1,29 @@
+# SF-PKG 使用指南
+
+与 [RT-PKG](../app_note/rt-pkg.md) 类似，SF-PKG 也是一个包管理器。但 SF-PKG 底层采用 [Conan](https://conan.io/) 作为包管理工具，支持丰富的包管理功能，方便创建、上传和下载驱动包，并支持语义化版本管理。
+
+## 使用前准备
+
+- 进入有效的 SDK 工程目录
+- 执行 `.\export.ps1`（Windows）或 `./export.sh`（Linux/macOS）初始化环境
+
+## 常用命令速查表
+
+| 命令                                                   | 说明             |
+| ------------------------------------------------------ | ---------------- |
+| `sdk.py sf-pkg-login -u <用户名> -t <令牌>`            | 登录 sf-pkg 系统 |
+| `sdk.py sf-pkg-new --name <包名>`                      | 创建新的包配置   |
+| `sdk.py sf-pkg-build --version <版本号>`               | 构建包           |
+| `sdk.py sf-pkg-upload --name <包名>/<版本号>@<用户名>` | 上传包到服务器   |
+| `sdk.py sf-pkg-remove --name <包名>`                   | 清除本地缓存     |
+| `sdk.py sf-pkg-init`                                   | 初始化依赖配置   |
+| `sdk.py sf-pkg-install`                                | 安装依赖包       |
+| `conan search "<包名>/*" -r=artifactory`               | 搜索可用的包     |
+
+```{toctree}
+:titlesonly:
+
+use
+create
+faq
+```

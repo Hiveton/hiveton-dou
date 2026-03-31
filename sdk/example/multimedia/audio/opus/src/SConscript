@@ -1,0 +1,19 @@
+import os
+from building import *
+
+# Get current directory
+cwd = GetCurrentDir()
+
+# Add source code
+src = Glob('*.c')
+
+CPPPATH = []
+CPPPATH += [os.path.join(cwd, '../../../../../external/opus-1.4/include')]
+CPPPATH += [os.path.join(cwd, '../../../../../external/opus-1.4/src')]
+CPPPATH += [os.path.join(cwd, '../../../../../external/opus-1.4/silk')]
+CPPPATH += [os.path.join(cwd, '../../../../../external/opus-1.4/celt')]
+CPPPATH += [os.path.join(cwd, '../../../../../external/opus-1.4')]
+
+group = DefineGroup('Applications', src, depend = [''], CPPPATH = CPPPATH)
+
+Return('group')

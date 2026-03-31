@@ -1,0 +1,9 @@
+# Host
+
+```{toctree}
+:titlesonly:
+:glob:
+
+*/*
+
+```

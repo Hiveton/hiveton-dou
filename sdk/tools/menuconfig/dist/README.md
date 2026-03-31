@@ -1,0 +1,1 @@
+This `sdk.py.exe` is only used by ENV tool. For shell toolchain, `sdk.py.exe` would be installed by `install.ps1` script in user's tool folder.

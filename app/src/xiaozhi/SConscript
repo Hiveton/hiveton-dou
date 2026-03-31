@@ -1,0 +1,49 @@
+from building import *
+import os
+
+cwd = GetCurrentDir()
+
+src = [
+    'xiaozhi_service.c',
+    'xiaozhi_stubs.c',
+    'xiaozhi_websocket.c',
+    'xiaozhi_audio.c',
+    'xiaozhi_client_public.c',
+    'xiaozhi_mqtt.c',
+    'kws/app_recorder_process.c',
+    'kws/bsp_et_asr_ctrl.c',
+    'kws/et_asr_default_state.c',
+    'kws/et_decoder_patch.c',
+    'kws/et_keyword.c',
+    'kws/et_thres_list.c',
+    'kws/et_weights.c',
+    'iot/iot_c_api.cc',
+    'iot/screen.cc',
+    'iot/speaker.cc',
+    'iot/thing.cc',
+    'iot/thing_manager.cc',
+    'mcp/mcp_api.cc',
+    'mcp/mcp_server.cc',
+    'mcp/rgbled_mcp.cc',
+    'weather/weather.c',
+]
+
+# 添加KWS库 - 只使用库名，路径在LIBPATH中
+libs = ['etasr_watch_sifli567']
+
+# 添加头文件路径
+cpppath = [
+    cwd,
+    os.path.join(cwd, 'kws'),
+    os.path.join(cwd, 'iot'),
+    os.path.join(cwd, 'mcp'),
+    os.path.join(cwd, 'weather'),
+]
+
+# 库文件路径
+libpath = [os.path.join(cwd, 'kws')]
+
+# 创建组
+group = DefineGroup('xiaozhi', src, depend=[''], CPPPATH=cpppath, LIBS=libs, LIBPATH=libpath)
+
+Return('group')

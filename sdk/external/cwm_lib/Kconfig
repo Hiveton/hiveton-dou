@@ -1,0 +1,3 @@
+config USING_CWM_LIB
+    bool "Enable Cwm Lib"
+    default n

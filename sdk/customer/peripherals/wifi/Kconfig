@@ -1,0 +1,14 @@
+menuconfig BSP_WIFI_SWT6621
+    bool "Enable swt 6621 wifi mode"
+    default n
+    if BSP_WIFI_SWT6621
+        config WIFI_WAKEUP_OUT_PIN
+            int "SWT6621 WAKEUP OUT pin number"
+            default 2
+        config WIFI_WAKEUP_IN_PIN
+            int "SWT6621 WAKEUP IN pin number" 
+            default 5
+        config WIFI_POWER_PIN
+            int "SWT6621 POWER pin number"
+            default 53
+    endif

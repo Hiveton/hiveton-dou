@@ -1,0 +1,142 @@
+name: Build and Upload Documentation
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/*'
+    paths:
+      - 'docs/**'
+    tags:
+      - '*'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build-docs:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        variant: [52x, 56x, 58x, 55x]
+    outputs:
+      version: ${{ steps.determine-version.outputs.VERSION }}
+    steps:
+      - name: Determine version tag
+        id: determine-version
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "VERSION=latest" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" =~ refs/heads/release/(.*) ]]; then
+            VERSION=${BASH_REMATCH[1]}
+            echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" =~ refs/tags/(.*) ]]; then
+            VERSION=${BASH_REMATCH[1]}
+            echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=unknown" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          cache: 'pip'
+
+      - name: Install dependencies
+        working-directory: ./docs
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Install doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y doxygen
+
+      - name: Build zh_CN documentation for ${{ matrix.variant }}
+        working-directory: ./docs
+        env:
+          SIFLI_DOC_VERSION: ${{ steps.determine-version.outputs.VERSION }}
+        run: python generate_docs.py --lang=zh_CN ${{ matrix.variant }}
+      
+      - name: Build en documentation for ${{ matrix.variant }}
+        working-directory: ./docs
+        env:
+          SIFLI_DOC_VERSION: ${{ steps.determine-version.outputs.VERSION }}
+        run: python generate_docs.py --lang=en ${{ matrix.variant }}
+
+      # Upload Chinese documents to COS
+      - name: Upload zh_CN documentation for ${{ matrix.variant }} to COS
+        uses: OpenSiFli/SiFliMirrorSync@v1
+        with:
+          secret_id: ${{ secrets.COS_DOCS_SECRET_ID }}
+          secret_key: ${{ secrets.COS_DOCS_SECRET_KEY }}
+          region: ${{ secrets.COS_DOCS_REGION }}
+          bucket: ${{ secrets.COS_DOCS_BUCKET }}
+          prefix: projects/sdk/${{ steps.determine-version.outputs.VERSION }}/sf32lb${{ matrix.variant }}/
+          artifacts: docs/build/zh_CN/${{ matrix.variant }}/html/
+          delete_remote: true
+
+      # Upload English documents to COS
+      - name: Upload en documentation for ${{ matrix.variant }} to COS
+        uses: OpenSiFli/SiFliMirrorSync@v1
+        with:
+          secret_id: ${{ secrets.COS_DOCS_SECRET_ID }}
+          secret_key: ${{ secrets.COS_DOCS_SECRET_KEY }}
+          region: ${{ secrets.COS_DOCS_REGION }}
+          bucket: ${{ secrets.COS_DOCS_BUCKET }}
+          prefix: projects/sdk/${{ steps.determine-version.outputs.VERSION }}/en/sf32lb${{ matrix.variant }}/
+          artifacts: docs/build/en/${{ matrix.variant }}/html/
+          delete_remote: true
+
+      - name: Upload ${{ matrix.variant }} documentation artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-${{ matrix.variant }}
+          path: docs/build_${{ matrix.variant }}/html/
+          retention-days: 1
+
+  archive:
+    needs: [build-docs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all documentation artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: docs-*
+          merge-multiple: false
+
+      - name: Archive all documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-${{ needs.build-docs.outputs.version }}
+          path: |
+            docs-52x/
+            docs-56x/
+            docs-58x/
+            docs-55x/
+          retention-days: 7
+
+  finalize:
+    needs: [build-docs]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Upload version.json and refresh the CDN
+      - name: Upload version.json and purge CDN cache
+        uses: OpenSiFli/SiFliMirrorSync@v1
+        with:
+          secret_id: ${{ secrets.COS_DOCS_SECRET_ID }}
+          secret_key: ${{ secrets.COS_DOCS_SECRET_KEY }}
+          region: ${{ secrets.COS_DOCS_REGION }}
+          bucket: ${{ secrets.COS_DOCS_BUCKET }}
+          prefix: projects/sdk/
+          artifacts: docs/version.json
+          delete_remote: false
+          flush_url: https://docs.sifli.com/projects/sdk/

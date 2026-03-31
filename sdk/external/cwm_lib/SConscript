@@ -1,0 +1,18 @@
+import os
+from building import *
+
+# get current dir path
+cwd = GetCurrentDir()
+src  = []
+inc  = [cwd]
+objs = []
+path = [cwd]
+lib = []
+
+src = src + Glob('./*.c')
+
+lib = ['CWM_LIB_FULL']
+
+# add group to IDE project
+objs = DefineGroup('cyw_lib', src, depend = ['USING_CWM_LIB'], CPPPATH = inc, LIBS = lib, LIBPATH = inc)
+Return('objs')

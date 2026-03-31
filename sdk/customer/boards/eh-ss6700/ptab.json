@@ -1,0 +1,37 @@
+[
+    {"version": "2"},
+    {
+        "mem": "flash3", 
+        "base": "0x14000000", 
+        "regions": [
+            {
+                "offset": "0x00000000", 
+                "max_size": "0x00200000", 
+                "name": "main",
+                "type": ["app_img", "app_exec"]
+            }, 
+            {
+                "offset": "0x00200000", 
+                "max_size": "0x00400000", 
+                "name": "fs_root",
+                "tags": [
+                    "FS_REGION"
+                ]
+            }, 
+            {
+                "offset": "0x00600000", 
+                "max_size": "0x00004000", 
+                "tags": [
+                    "KVDB_DFU_REGION"
+                ]
+            }, 
+            {
+                "offset": "0x00604000", 
+                "max_size": "0x00004000", 
+                "tags": [
+                    "KVDB_BLE_REGION"
+                ]
+            }
+        ]
+    }
+]

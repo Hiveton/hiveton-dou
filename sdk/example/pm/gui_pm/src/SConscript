@@ -1,0 +1,25 @@
+from building import *
+import rtconfig
+
+# get current dir path
+cwd = GetCurrentDir()
+
+# init src and inc vars
+src = []
+inc = [cwd]
+list = os.listdir(cwd)
+objs = []
+
+src = src + Glob('./*.c')
+
+# add group to IDE project
+
+if GetDepend('RT_USING_SENSOR') and GetDepend('SENSOR_USING_6D'):
+    objs = DefineGroup('sensor_algo', src, depend = [''], CPPPATH = inc)
+    for d in list:
+        path = os.path.join(cwd, d)
+        if os.path.isfile(os.path.join(path, 'SConscript')):
+            objs = objs + SConscript(os.path.join(d, 'SConscript'))
+
+Return('objs')
+

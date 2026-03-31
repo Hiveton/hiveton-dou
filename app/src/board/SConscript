@@ -1,0 +1,8 @@
+from building import *
+
+cwd = GetCurrentDir()
+
+src = Glob('sf32lb52-lcd_n16r8.cc')
+group = DefineGroup('board', src, depend=[], CPPPATH=[])
+
+Return('group')

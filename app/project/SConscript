@@ -1,0 +1,38 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+objs = []
+list = os.listdir(cwd)
+
+# Add SDK
+Import('SIFLI_SDK')
+objs.extend(SConscript(os.path.join(SIFLI_SDK, 'SConscript'), variant_dir="sifli_sdk", duplicate=0))
+
+# Add LCPU Patch
+objs.extend(SConscript(os.path.join(SIFLI_SDK, 'example/rom_bin/lcpu_general_ble_img/SConscript'), variant_dir="lcpu_patch", duplicate=0))
+
+# Add application source code
+objs.extend(SConscript(cwd+'/../src/SConscript', variant_dir="src", duplicate=0))
+
+if GetDepend('TINY_TTF_MODE'):
+    pass # TINY_TTF_MODE enabled, no additional font processing needed
+else:
+    # 字体自动转换(ttf转c数组)
+    objs.extend(SConscript(cwd+'/../font/SConscript', variant_dir="font", duplicate=0))
+
+if GetDepend('EZIP_BINARY_MODE'):
+    # Set the output directory of SConscript to asset_ezip, but it does not participate in the obj build.
+    SConscript(cwd+'/../asset/SConscript', variant_dir="asset_ezip", duplicate=0)
+else:
+    # Add image resource (C arrays) - output to build directory with name "asset"
+    # The folder name "asset" is specified here as the variant_dir
+    objs.extend(SConscript(cwd+'/../asset/SConscript', variant_dir="asset", duplicate=0))
+
+
+# Add peripherals source
+#objs.extend(SConscript(cwd+'/../peripherals/SConscript', variant_dir="peripherals", duplicate=0))
+
+#不同板子的硬件接口
+objs.extend(SConscript(cwd+'/../src/board/SConscript', variant_dir="hardware", duplicate=0))
+Return('objs')

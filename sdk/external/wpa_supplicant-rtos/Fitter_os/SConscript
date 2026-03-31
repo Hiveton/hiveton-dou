@@ -1,0 +1,31 @@
+from building import *
+
+cwd  = GetCurrentDir()
+
+src  = [
+    "FreeRTOS/portable/rt-thread/port.c",
+    "FreeRTOS/event_groups.c",
+    "FreeRTOS/list.c",
+    "FreeRTOS/queue.c",
+    "FreeRTOS/tasks.c",
+    "FreeRTOS/timers.c",
+    "osa/fsl_os_abstraction_free_rtos.c",
+    "lists/fsl_component_generic_list.c",
+]
+
+path = [
+    cwd,
+    cwd + '/FreeRTOS/include',
+    cwd + '/FreeRTOS/include/freertos',
+    cwd + '/FreeRTOS/portable/rt-thread',
+    cwd + '/osa',
+    cwd + '/lists',
+]
+
+CPPDEFINES = [
+    'SDK_OS_FREE_RTOS',
+]
+
+group = DefineGroup('freertos', src, depend = ['PKG_USING_OS_FREERTOS'], CPPPATH = path, CPPDEFINES=CPPDEFINES)
+
+Return('group')

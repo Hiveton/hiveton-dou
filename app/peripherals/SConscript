@@ -1,0 +1,17 @@
+# for module compiling
+import os
+from building import *
+
+cwd  = GetCurrentDir()
+objs = []
+list = os.listdir(cwd)
+if GetDepend(['BSP_USING_RTTHREAD']):
+    if not GetDepend(['BSP_USING_PC_SIMULATOR']):
+        if not GetDepend(['BSP_USING_BUILTIN_LCD']):
+            # include all subfolder
+            for d in list:
+                path = os.path.join(cwd, d)
+                if os.path.isfile(os.path.join(path, 'SConscript')):
+                    objs = objs + SConscript(os.path.join(d, 'SConscript'))
+    
+Return('objs')

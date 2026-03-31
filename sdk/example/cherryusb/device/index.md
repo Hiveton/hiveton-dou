@@ -1,0 +1,9 @@
+# Device
+
+```{toctree}
+:titlesonly:
+:glob:
+
+*/*
+
+```

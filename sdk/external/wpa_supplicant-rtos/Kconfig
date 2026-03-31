@@ -1,0 +1,11 @@
+config PKG_USING_WPA_SUPPLICANT
+    bool "Enable WPA Supplicant"
+    default n
+    if PKG_USING_WPA_SUPPLICANT
+        config PKG_USING_WPA_NET_NAME
+            string "wpa net device name"
+            default "m0"
+        config PKG_USING_OS_FREERTOS
+            bool "Enable seamless adaptation to Freertos system"
+    default y
+    endif

@@ -1,0 +1,20 @@
+*.bak
+*.un~
+*.*~
+*.scvd
+*.old
+*.uvoptx
+/**/build_*/
+/**/build/
+/**/*.pyc
+.sconsign.dblite
+.DS_Store
+.idea
+Kconfig.tmp
+.venv
+_*/
+**/packages/
+.project.toml
+# Allow tracking everything under tools/build
+!tools/build/
+!tools/build/**

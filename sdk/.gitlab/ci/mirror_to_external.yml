@@ -1,0 +1,33 @@
+mirror_to_external:
+  stage: mirror
+  image: $CI_DOCKER_BASE_REGISTRY:latest
+  tags:
+    - docker
+  variables:
+    GIT_SUBMODULE_STRATEGY: recursive
+  before_script:
+    # 设置SSH配置和私钥
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | base64 -d > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - echo -e "Host *\n\tStrictHostKeyChecking no\n\tIdentityFile ~/.ssh/id_rsa\n\n" > ~/.ssh/config
+    - git config --global user.email "$GIT_CI_USER_NAME"
+    - git config --global user.name "$GIT_CI_USER_EMAIL"
+    # 添加目标仓库作为远程仓库
+    - git remote add mirror $TARGET_REPO_SSH_URL
+  script:
+    - echo "正在推送到外部仓库..."
+    - git fetch --tags --force
+    - git branch -a
+    - |
+      echo "推送当前分支 $CI_COMMIT_REF_NAME 到外部仓库..."
+      git push mirror origin/$CI_COMMIT_REF_NAME:$TARGET_BRANCH_NAME
+
+    - echo "推送完成"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "api" && $MIRROR_EXTERNAL'
+      when: always
+    - if: '$CI_PIPELINE_SOURCE == "web" && $MIRROR_EXTERNAL'
+      when: always
+    - when: never

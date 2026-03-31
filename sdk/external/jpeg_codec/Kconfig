@@ -1,0 +1,6 @@
+config USING_JPEG_ENC
+    bool "Enable JPEG Accelerator Encoder"
+    default n
+config USING_JPEG_DEC
+    bool "Enable Jpeg Accelerator Decoder"
+    default n

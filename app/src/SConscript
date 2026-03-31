@@ -1,0 +1,39 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+src = [
+    os.path.join(cwd, 'app_audio_mem.c'),
+    os.path.join(cwd, 'main.c'),
+    os.path.join(cwd, 'audio_manager.c'),
+    os.path.join(cwd, 'ui', 'home_screen.c'),
+    os.path.join(cwd, 'ui', 'ui.c'),
+    os.path.join(cwd, 'ui', 'ui_dispatch.c'),
+    os.path.join(cwd, 'ui', 'ui_helpers.c'),
+    os.path.join(cwd, 'ui', 'ui_runtime_adapter.c'),
+]
+src.extend(Glob(os.path.join(cwd, 'ui', 'screens', '*.c')))
+
+cpppath = [
+    cwd,
+    os.path.join(cwd, 'board'),
+    os.path.join(cwd, 'ui'),
+    os.path.join(cwd, 'ui', 'fonts'),
+    os.path.join(cwd, 'ui', 'screens'),
+    os.path.join(cwd, 'xiaozhi'),
+    os.path.join(cwd, 'xiaozhi', 'kws'),
+    os.path.join(cwd, '..', '..', 'sdk', 'middleware', 'audio', 'include'),
+    os.path.join(cwd, '..', '..', 'sdk', 'middleware', 'audio', 'audio_port'),
+]
+
+group = DefineGroup('Applications',
+                    src,
+                    depend=[''],
+                    CPPPATH=cpppath)
+
+# Load xiaozhi module group
+xiaozhi_group = SConscript(os.path.join(cwd, 'xiaozhi', 'SConscript'))
+if xiaozhi_group:
+    group = group + xiaozhi_group
+
+Return('group')

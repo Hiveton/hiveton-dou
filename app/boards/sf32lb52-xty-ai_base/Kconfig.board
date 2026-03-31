@@ -1,0 +1,65 @@
+config ASIC
+    bool 
+    default y 
+   
+config TOUCH_IRQ_PIN
+    int
+    default 41
+
+config LCD_PWM_BACKLIGHT_INTERFACE_NAME
+    string
+    default "pwm2"
+
+config LCD_PWM_BACKLIGHT_CHANEL_NUM
+    int
+    default 4
+
+config LCD_BACKLIGHT_CONTROL_PIN
+    int
+    default 1
+    
+config RGBLED_CONTROL_PIN
+    int
+    default 32  
+
+config PA_EN_LEVEL
+    bool "Set to true if the PA level is high when the PA_EN pin is high."
+    default y
+
+config PA_EN_PIN
+    int "The pin number for the PA_EN control."
+    default 26
+
+
+# LCD configuration
+if !BSP_USING_BUILTIN_LCD && BF0_HCPU
+    config LCD_USING_ST7789
+        bool
+        default y
+
+    choice
+        prompt "Built-in LCD module driver"
+        default LCD_USING_SPI_ST7789
+
+        config LCD_USING_SPI_ST7789
+            bool "1.69 rect SPI LCD(240x280)"
+            select LCD_USING_ST7789
+            select BSP_LCDC_USING_SPI_DCX_1DATA
+
+    endchoice
+
+    config LCD_HOR_RES_MAX
+        int
+        default 280 if LCD_USING_SPI_ST7789
+
+
+    config LCD_VER_RES_MAX
+        int
+        default 240 if LCD_USING_SPI_ST7789
+
+
+    config LCD_DPI
+        int
+        default 320 if LCD_USING_SPI_ST7789
+
+endif
