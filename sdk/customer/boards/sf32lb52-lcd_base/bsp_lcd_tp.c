@@ -62,9 +62,6 @@ void BSP_TP_PowerDown(void)
 {
     // TODO: Setup TP power down pin
     BSP_GPIO_Set(TP_RESET,  0, 1);
-#ifdef BSP_USING_BOARD_SF32LB52_LCD_N16R8
-    BSP_GPIO_Set(LCD_POWER_EN_PIN, 0, 1);
-#endif
 }
 void BSP_TP_Reset(uint8_t high1_low0)
 {
