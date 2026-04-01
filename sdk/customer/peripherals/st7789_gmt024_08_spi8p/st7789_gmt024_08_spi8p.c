@@ -27,13 +27,13 @@
 #define EPD_MONO_FRAME_SIZE (EPD_WIDTH * EPD_HEIGHT / 8)  /* 1bpp */
 #define EPD_SELF_TEST_PATTERN 0
 #define EPD_USE_SCAN_MODE3 1
-#define EPD_ENABLE_WINDOW_CMDS 0
+#define EPD_ENABLE_WINDOW_CMDS 1
 /* Scan total and visible window can differ (per UC8179 reference code). */
 #define EPD_SCAN_SRC_PIXELS EPD_SRC_PIXELS
 /* Vendor sample uses total gate scan 600 with visible window starting at Y=72 (0x48). */
 #define EPD_SCAN_GATE_PIXELS 600
 #define EPD_WIN_X_START 0
-#define EPD_WIN_Y_START 72
+#define EPD_WIN_Y_START 0
 #define EPD_WIN_WIDTH EPD_WIDTH
 #define EPD_WIN_HEIGHT EPD_HEIGHT
 
@@ -238,7 +238,7 @@ static void EPD_SetBacklight(uint8_t br)
  * Test switches for intermittent artifact diagnosis.
  * Set these to 0 to restore the previous production behavior.
  */
-#define EPD_TEST_FORCE_FULL_REFRESH 1
+#define EPD_TEST_FORCE_FULL_REFRESH 0
 #define EPD_TEST_STRICT_BUSY_WAIT 1
 
 #define REG_LUT_VCOM 0x20
@@ -247,6 +247,7 @@ static void EPD_SetBacklight(uint8_t br)
 #define REG_LUT_W2K 0x23
 #define REG_LUT_K2K 0x24
 #define REG_LUT_OPT 0x2A
+#define REG_WRITE_OLD_DATA 0x10
 #define REG_WRITE_NEW_DATA 0x13
 #define REG_AUTO_REFRESH 0x17
 #define REG_PWR_ON_MEASURE 0x05
@@ -279,6 +280,7 @@ static uint16_t s_dirty_x1 = 0;
 static uint16_t s_dirty_y1 = 0;
 static uint8_t s_partial_refresh_count = 0;
 static uint8_t s_epd_stats_dump_count = 0;
+static rt_mutex_t s_epd_flush_mutex = RT_NULL;
 
 static LCDC_InitTypeDef lcdc_int_cfg = {
     .lcd_itf = LCDC_INTF_SPI_DCX_1DATA,
@@ -347,6 +349,36 @@ L2_NON_RET_BSS_SECT_END
 static uint8_t framebuffer_initialized = 0;
 
 static rt_sem_t epd_busy_sem = RT_NULL;
+
+static void epd_flush_mutex_init(void)
+{
+    if (s_epd_flush_mutex != RT_NULL)
+    {
+        return;
+    }
+
+    s_epd_flush_mutex = rt_mutex_create("epd_flush", RT_IPC_FLAG_PRIO);
+    if (s_epd_flush_mutex == RT_NULL)
+    {
+        rt_kprintf("EPD flush mutex create failed\n");
+    }
+}
+
+static void epd_flush_lock(void)
+{
+    if (s_epd_flush_mutex != RT_NULL)
+    {
+        rt_mutex_take(s_epd_flush_mutex, RT_WAITING_FOREVER);
+    }
+}
+
+static void epd_flush_unlock(void)
+{
+    if (s_epd_flush_mutex != RT_NULL)
+    {
+        rt_mutex_release(s_epd_flush_mutex);
+    }
+}
 
 static unsigned int epd_ticks_to_ms(rt_tick_t ticks)
 {
@@ -583,7 +615,7 @@ static void EPD_GetEffectiveUpdateRegion(LCDC_HandleTypeDef *hlcdc,
 }
 
 static uint8_t EPD_ShouldFlushCurrentROI(LCDC_HandleTypeDef *hlcdc,
-                                         uint16_t upd_x1, uint16_t upd_y1)
+                                         uint16_t src_x1, uint16_t src_y1)
 {
     if (hlcdc == NULL)
     {
@@ -592,8 +624,8 @@ static uint8_t EPD_ShouldFlushCurrentROI(LCDC_HandleTypeDef *hlcdc,
 
     if ((hlcdc->roi.x0 <= hlcdc->roi.x1) && (hlcdc->roi.y0 <= hlcdc->roi.y1))
     {
-        return (upd_x1 >= (uint16_t)hlcdc->roi.x1) &&
-               (upd_y1 >= (uint16_t)hlcdc->roi.y1);
+        return (src_x1 >= (uint16_t)hlcdc->roi.x1) &&
+               (src_y1 >= (uint16_t)hlcdc->roi.y1);
     }
 
     return 1;
@@ -1110,7 +1142,9 @@ static void EPD_SetPartialWindow(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
 static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
                                         uint16_t y0, uint16_t x1, uint16_t y1)
 {
+    uint8_t *old_region;
     uint8_t *new_region;
+    uint32_t old_len;
     uint32_t new_len;
     rt_tick_t refresh_start;
     rt_tick_t refresh_end;
@@ -1134,6 +1168,22 @@ static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
     EPD_Gray2ToMonoDither();
     EPD_SetPartialWindow(hlcdc, x0, y0, x1, y1);
 
+    old_region = EPD_AllocMonoRegionBuffer(mixed_framebuffer_prev_mono, x0, y0, x1,
+                                           y1, &old_len);
+    if (old_region == RT_NULL)
+    {
+        rt_kprintf("EPD partial old region alloc failed, fallback to full refresh\n");
+        EPD_FrameBuffer_Flush(hlcdc);
+        return;
+    }
+
+    /*
+     * EPD_AllocMonoRegionBuffer reuses one static workspace.
+     * Send old data first, then refill workspace with new data.
+     */
+    s_epd_refresh_fallback_ms = EPD_PARTIAL_REFRESH_FALLBACK_MS;
+    EPD_SendCommandDataBuf(hlcdc, REG_WRITE_OLD_DATA, old_region, (uint16_t)old_len);
+
     new_region = EPD_AllocMonoRegionBuffer(mixed_framebuffer_mono, x0, y0, x1,
                                            y1, &new_len);
     if (new_region == RT_NULL)
@@ -1142,9 +1192,15 @@ static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
         EPD_FrameBuffer_Flush(hlcdc);
         return;
     }
-
-    s_epd_refresh_fallback_ms = EPD_PARTIAL_REFRESH_FALLBACK_MS;
-    EPD_SendCommandDataBuf(hlcdc, 0x13, new_region, (uint16_t)new_len);
+    if (old_len != new_len)
+    {
+        rt_kprintf("EPD partial region size mismatch old=%lu new=%lu, fallback to full refresh\n",
+                   (unsigned long)old_len,
+                   (unsigned long)new_len);
+        EPD_FrameBuffer_Flush(hlcdc);
+        return;
+    }
+    EPD_SendCommandDataBuf(hlcdc, REG_WRITE_NEW_DATA, new_region, (uint16_t)new_len);
     refresh_start = rt_tick_get();
     EPD_Refresh(hlcdc);
     refresh_end = rt_tick_get();
@@ -1290,11 +1346,13 @@ static void LCD_ReadMode(LCDC_HandleTypeDef *hlcdc, bool enable)
 
 static void LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc, uint8_t Mode)
 {
+    (void)Mode;
     memcpy(&hlcdc->Init, &lcdc_int_cfg, sizeof(LCDC_InitTypeDef));
     HAL_LCDC_Init(hlcdc);
     rt_pin_mode(0, PIN_MODE_OUTPUT);
     rt_pin_mode(2, PIN_MODE_INPUT);
     epd_sem_init();
+    epd_flush_mutex_init();
     EPD_Reset(hlcdc);
 
 
@@ -1424,6 +1482,7 @@ static void LCD_WritePixel(LCDC_HandleTypeDef *hlcdc, uint16_t Xpos,
         return;
     }
     rt_kprintf("EPD single pixel: (%d,%d)\n", Xpos, Ypos);
+    epd_flush_lock();
     // 更新帧缓冲区单个像素
     if (g_input_color_mode == RTGRAPHIC_PIXEL_FORMAT_RGB565 ||
         g_input_color_mode == LCDC_PIXEL_FORMAT_RGB565)
@@ -1435,6 +1494,7 @@ static void LCD_WritePixel(LCDC_HandleTypeDef *hlcdc, uint16_t Xpos,
         EPD_FrameBuffer_UpdateRegion(RGBCode, Xpos, Ypos, Xpos, Ypos);
     }
     EPD_MarkDirtyLogicalRegion(Xpos, Ypos, Xpos, Ypos);
+    epd_flush_unlock();
     
     // 注意: 单像素写入不会立即刷新屏幕，需要调用者手动触发刷新
     // 如果需要立即刷新，取消下面的注释
@@ -1458,6 +1518,7 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc,
         rt_kprintf("EPD multiple pixels param error\n");
         return;
     }
+    epd_flush_lock();
     EPD_GetEffectiveUpdateRegion(hlcdc, Xpos0, Ypos0, Xpos1, Ypos1,
                                  &upd_x0, &upd_y0, &upd_x1, &upd_y1);
     rt_kprintf("EPD multiple pixels src:(%d,%d)-(%d,%d) roi:(%d,%d)-(%d,%d)\n",
@@ -1482,7 +1543,7 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc,
                                                 upd_x1, upd_y1);
     }
     EPD_MarkDirtyLogicalRegion(upd_x0, upd_y0, upd_x1, upd_y1);
-    should_flush_now = EPD_ShouldFlushCurrentROI(hlcdc, upd_x1, upd_y1);
+    should_flush_now = EPD_ShouldFlushCurrentROI(hlcdc, Xpos1, Ypos1);
 
     if (!should_flush_now)
     {
@@ -1545,6 +1606,7 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc,
     {
         hlcdc->XferCpltCallback(hlcdc);
     }
+    epd_flush_unlock();
 }
 static void LCD_WriteReg(LCDC_HandleTypeDef *hlcdc, uint16_t LCD_Reg,
                          uint8_t *Parameters, uint32_t NbParameters)
