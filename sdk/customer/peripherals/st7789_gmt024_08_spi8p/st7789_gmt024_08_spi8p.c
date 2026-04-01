@@ -234,6 +234,12 @@ static void EPD_SetBacklight(uint8_t br)
 #define EPD_PARTIAL_REFRESH_FALLBACK_MS 700
 #define EPD_FAST_FULL_REFRESH_FALLBACK_MS 820
 #define EPD_GC_FULL_REFRESH_FALLBACK_MS 950
+/*
+ * Test switches for intermittent artifact diagnosis.
+ * Set these to 0 to restore the previous production behavior.
+ */
+#define EPD_TEST_FORCE_FULL_REFRESH 1
+#define EPD_TEST_STRICT_BUSY_WAIT 1
 
 #define REG_LUT_VCOM 0x20
 #define REG_LUT_W2W 0x21
@@ -512,6 +518,13 @@ static uint8_t EPD_ShouldUsePartialWindow(uint16_t x0, uint16_t y0,
 static uint8_t EPD_ShouldUseFullRefresh(uint16_t x0, uint16_t y0, uint16_t x1,
                                         uint16_t y1)
 {
+#if EPD_TEST_FORCE_FULL_REFRESH
+    (void)x0;
+    (void)y0;
+    (void)x1;
+    (void)y1;
+    return 1;
+#else
     if (x0 > x1 || y0 > y1)
     {
         return 1;
@@ -523,6 +536,7 @@ static uint8_t EPD_ShouldUseFullRefresh(uint16_t x0, uint16_t y0, uint16_t x1,
     }
 
     return 0;
+#endif
 }
 
 static void EPD_GetEffectiveUpdateRegion(LCDC_HandleTypeDef *hlcdc,
@@ -901,7 +915,6 @@ static void EPD_FrameBuffer_Flush(LCDC_HandleTypeDef *hlcdc)
     
     // 刷新显示
     s_epd_refresh_fallback_ms = EPD_GC_FULL_REFRESH_FALLBACK_MS;
-    s_epd_refresh_fallback_ms = EPD_FAST_FULL_REFRESH_FALLBACK_MS;
     refresh_start = rt_tick_get();
     EPD_Refresh(hlcdc);
     refresh_end = rt_tick_get();
@@ -1211,6 +1224,7 @@ static void EPD_ReadBusy(void)
 
     while (rt_pin_read(2) == 0)
     {
+#if !EPD_TEST_STRICT_BUSY_WAIT
         if (is_refresh_stage)
         {
             rt_kprintf("EPD busy fallback delay stage=%s wait=%lu ms pin=%d\n",
@@ -1220,11 +1234,18 @@ static void EPD_ReadBusy(void)
             rt_thread_mdelay((rt_int32_t)s_epd_refresh_fallback_ms);
             break;
         }
+#endif
         if ((rt_tick_get() - start) > timeout)
         {
             if (is_idle_stage)
             {
                 rt_kprintf("EPD busy idle skip stage=%s pin=%d\n",
+                           s_epd_busy_stage != RT_NULL ? s_epd_busy_stage : "?",
+                           rt_pin_read(2));
+            }
+            else if (is_refresh_stage)
+            {
+                rt_kprintf("EPD busy refresh timeout! stage=%s pin=%d\n",
                            s_epd_busy_stage != RT_NULL ? s_epd_busy_stage : "?",
                            rt_pin_read(2));
             }
