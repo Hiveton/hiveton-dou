@@ -33,7 +33,7 @@ void ui_Weather_Toggle_screen_init(void)
     ui_Weather_Toggle = ui_create_screen_base();
     ui_build_standard_screen(&page, ui_Weather_Toggle, "天气开关", UI_SCREEN_SETTINGS);
 
-    panel = ui_create_card(page.content, 0, 0, 582, 653, UI_SCREEN_NONE, false, 0);
+    panel = ui_create_card(page.content, 0, 0, 528, 653, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(panel, 2, 0);
 
     ui_create_label(panel,
@@ -46,13 +46,13 @@ void ui_Weather_Toggle_screen_init(void)
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     false);
-    ui_create_button(panel, 398, 92, 88, 40, "开启", 18, UI_SCREEN_NONE, true);
-    create_toggle_divider(panel, 48, 146, 486);
+    ui_create_button(panel, 352, 92, 88, 40, "开启", 18, UI_SCREEN_NONE, true);
+    create_toggle_divider(panel, 44, 146, 440);
     ui_create_label(panel,
                     "关闭后首页不显示天气入口，但天气功能仍可从设置页进入。",
                     48,
                     160,
-                    486,
+                    440,
                     58,
                     18,
                     LV_TEXT_ALIGN_LEFT,

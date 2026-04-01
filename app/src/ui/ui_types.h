@@ -29,8 +29,8 @@ typedef enum
 
 enum
 {
-    UI_FIGMA_WIDTH = 582,
-    UI_FIGMA_HEIGHT = 791
+    UI_FIGMA_WIDTH = 528,
+    UI_FIGMA_HEIGHT = 792
 };
 
 #endif

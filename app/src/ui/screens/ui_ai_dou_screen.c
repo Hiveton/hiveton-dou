@@ -332,13 +332,13 @@ static void update_network_status(void)
 
     if (network_ready == 1) {
         text = "已连接";
-        lv_obj_set_style_text_color(s_network_label, lv_color_hex(0x00AA00), 0);
+        lv_obj_set_style_text_color(s_network_label, lv_color_hex(0x000000), 0);
     } else if (xiaozhi_service_get_state() != XZ_SERVICE_IDLE) {
         text = "连接中";
-        lv_obj_set_style_text_color(s_network_label, lv_color_hex(0xAAAA00), 0);
+        lv_obj_set_style_text_color(s_network_label, lv_color_hex(0x000000), 0);
     } else {
         text = "未连接";
-        lv_obj_set_style_text_color(s_network_label, lv_color_hex(0xAA0000), 0);
+        lv_obj_set_style_text_color(s_network_label, lv_color_hex(0x000000), 0);
     }
 
     ai_set_label_if_changed(s_network_label, s_ai_network_cache,
@@ -515,13 +515,13 @@ void ui_AI_Dou_screen_init(void)
     
     /* 网络状态标签（右上角） */
     s_network_label = lv_label_create(ui_AI_Dou);
-    lv_obj_set_pos(s_network_label, 480, 20);
+    lv_obj_set_pos(s_network_label, 426, 20);
     lv_obj_set_style_text_font(s_network_label, ui_font_get(16), 0);
     ai_set_label_if_changed(s_network_label, s_ai_network_cache,
                             sizeof(s_ai_network_cache), "检查中...");
     update_network_status();
     
-    face = ui_create_card(page.content, 201, 34, 180, 180, UI_SCREEN_NONE, false, 90);
+    face = ui_create_card(page.content, 174, 34, 180, 180, UI_SCREEN_NONE, false, 90);
     s_ai_face_container = face;
     lv_obj_set_style_border_width(face, 0, 0);
     lv_obj_set_style_bg_opa(face, LV_OPA_TRANSP, 0);
@@ -529,12 +529,12 @@ void ui_AI_Dou_screen_init(void)
     ai_set_face_if_changed(&funny2);
     lv_obj_center(s_ai_face_img);
 
-    dialog_card = ui_create_card(page.content, 52, 250, 478, 190, UI_SCREEN_NONE, false, 0);
+    dialog_card = ui_create_card(page.content, 24, 250, 480, 190, UI_SCREEN_NONE, false, 0);
     s_ai_mouth_label = ui_create_label(dialog_card,
                                        "初始化中...",
                                        0,
                                        20,
-                                       478,
+                                       480,
                                        39,
                                        30,
                                        LV_TEXT_ALIGN_CENTER,
@@ -542,9 +542,9 @@ void ui_AI_Dou_screen_init(void)
                                        false);
     s_ai_copy_label = ui_create_label(dialog_card,
                                       "正在启动AI服务...",
-                                      28,
+                                      24,
                                       76,
-                                      422,
+                                      432,
                                       84,
                                       19,
                                       LV_TEXT_ALIGN_CENTER,
@@ -552,7 +552,7 @@ void ui_AI_Dou_screen_init(void)
                                       true);
     
     talk_button = ui_create_button(page.content,
-                                   191,
+                                   164,
                                    475,
                                    200,
                                    64,
@@ -565,9 +565,9 @@ void ui_AI_Dou_screen_init(void)
     lv_obj_add_event_cb(talk_button, ai_talk_button_event_cb, LV_EVENT_CLICKED, NULL);
     ui_create_label(page.content,
                     "点击一次开始录音，再点击一次停止并发送给小智。也可直接说\"你好小智\"唤醒。",
-                    78,
+                    52,
                     555,
-                    426,
+                    424,
                     32,
                     15,
                     LV_TEXT_ALIGN_CENTER,

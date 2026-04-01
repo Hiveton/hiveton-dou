@@ -9,13 +9,13 @@ static void create_time_menu_card(lv_obj_t *parent,
                                   const char *subtitle,
                                   ui_screen_id_t target)
 {
-    lv_obj_t *card = ui_create_card(parent, 24, y, 534, 112, target, false, 0);
+    lv_obj_t *card = ui_create_card(parent, 24, y, 480, 112, target, false, 0);
 
     ui_create_label(card,
                     title,
                     24,
                     34,
-                    486,
+                    432,
                     34,
                     26,
                     LV_TEXT_ALIGN_LEFT,
@@ -25,7 +25,7 @@ static void create_time_menu_card(lv_obj_t *parent,
                     subtitle,
                     24,
                     79,
-                    486,
+                    432,
                     21,
                     17,
                     LV_TEXT_ALIGN_LEFT,

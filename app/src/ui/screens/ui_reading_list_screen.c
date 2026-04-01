@@ -585,12 +585,12 @@ static void ui_reading_create_card(lv_obj_t *parent, uint16_t slot_index, int y)
 {
     ui_reading_card_refs_t *refs = &s_reading_cards[slot_index];
 
-    refs->card = ui_create_card(parent, 24, y, 534, 121, UI_SCREEN_NONE, false, 0);
+    refs->card = ui_create_card(parent, 24, y, 480, 121, UI_SCREEN_NONE, false, 0);
     refs->title_label = ui_create_label(refs->card,
                                         "",
                                         22,
                                         31,
-                                        490,
+                                        436,
                                         31,
                                         26,
                                         LV_TEXT_ALIGN_LEFT,
@@ -600,7 +600,7 @@ static void ui_reading_create_card(lv_obj_t *parent, uint16_t slot_index, int y)
                                        "",
                                        22,
                                        71,
-                                       490,
+                                       436,
                                        20,
                                        17,
                                        LV_TEXT_ALIGN_LEFT,
@@ -780,8 +780,8 @@ void ui_Reading_List_screen_init(void)
         ui_reading_create_card(page.content, i, s_card_y_positions[i]);
     }
 
-    s_reading_prev_button = ui_create_button(page.content, 334, 585, 108, 46, "上翻", 20, UI_SCREEN_NONE, false);
-    s_reading_next_button = ui_create_button(page.content, 450, 585, 108, 46, "下翻", 20, UI_SCREEN_NONE, false);
+    s_reading_prev_button = ui_create_button(page.content, 304, 585, 96, 46, "上翻", 20, UI_SCREEN_NONE, false);
+    s_reading_next_button = ui_create_button(page.content, 408, 585, 96, 46, "下翻", 20, UI_SCREEN_NONE, false);
     lv_obj_add_event_cb(s_reading_prev_button, ui_reading_prev_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_reading_next_button, ui_reading_next_event_cb, LV_EVENT_CLICKED, NULL);
 

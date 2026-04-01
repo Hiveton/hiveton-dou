@@ -593,18 +593,19 @@ static void ui_status_update_panel_visuals(void)
     {
         bool filled = bt_state != UI_STATUS_BLUETOOTH_DISCONNECTED;
 
-        ui_apply_basic_object_style(s_status_panel.bluetooth_card, filled, 0, 2);
+        LV_UNUSED(filled);
+        ui_apply_basic_object_style(s_status_panel.bluetooth_card, false, 0, 2);
 
         if (s_status_panel.bluetooth_title_label != NULL)
         {
             lv_obj_set_style_text_color(s_status_panel.bluetooth_title_label,
-                                        filled ? lv_color_hex(0xFFFFFF) : lv_color_hex(0x000000),
+                                        lv_color_hex(0x000000),
                                         0);
         }
         if (s_status_panel.bluetooth_subtitle_label != NULL)
         {
             lv_obj_set_style_text_color(s_status_panel.bluetooth_subtitle_label,
-                                        filled ? lv_color_hex(0xD8D8D8) : lv_color_hex(0x666666),
+                                        lv_color_hex(0x000000),
                                         0);
         }
 
@@ -1148,6 +1149,16 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
     lv_obj_t *label;
     lv_obj_t *button;
     lv_obj_t *touch_zone;
+    int32_t inner_x;
+    int32_t inner_w;
+    int32_t slider_w;
+    int32_t status_gap;
+    int32_t status_card_w;
+    int32_t status_right_x;
+    int32_t toast_w;
+    int32_t toast_x;
+    int32_t confirm_w;
+    int32_t confirm_x;
 
     if (root == NULL || parent == NULL)
     {
@@ -1159,6 +1170,16 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
     ui_apply_basic_object_style(panel, false, 0, 2);
     lv_obj_set_pos(panel, ui_px_x(panel_x), ui_px_y(panel_y));
     lv_obj_set_size(panel, ui_px_w(panel_w), ui_px_h(316));
+    inner_x = 22;
+    inner_w = panel_w - (inner_x * 2);
+    slider_w = inner_w - 72;
+    status_gap = 14;
+    status_card_w = (inner_w - status_gap) / 2;
+    status_right_x = inner_x + status_card_w + status_gap;
+    toast_w = 418;
+    toast_x = (int32_t)(s_screen_width - toast_w) / 2;
+    confirm_w = 310;
+    confirm_x = (int32_t)(s_screen_width - confirm_w) / 2;
 
     ui_create_label(panel,
                     "快捷状态",
@@ -1173,10 +1194,10 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
 
     line = lv_obj_create(panel);
     ui_apply_basic_object_style(line, true, 0, 0);
-    lv_obj_set_pos(line, ui_px_x(22), ui_px_y(52));
-    lv_obj_set_size(line, ui_px_w(502), ui_px_h(2));
+    lv_obj_set_pos(line, ui_px_x(inner_x), ui_px_y(52));
+    lv_obj_set_size(line, ui_px_w(inner_w), ui_px_h(2));
 
-    slider_box = ui_create_card(panel, 22, 70, 502, 144, UI_SCREEN_NONE, false, 0);
+    slider_box = ui_create_card(panel, inner_x, 70, inner_w, 144, UI_SCREEN_NONE, false, 0);
 
     ui_create_label(slider_box,
                     "屏幕亮度",
@@ -1190,7 +1211,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                     false);
     s_status_panel.brightness_value_label = ui_create_label(slider_box,
                                                             "3 / 5",
-                                                            360,
+                                                            inner_w - 142,
                                                             18,
                                                             110,
                                                             28,
@@ -1202,7 +1223,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
     ui_status_create_slider_visual(slider_box,
                                    24,
                                    58,
-                                   430,
+                                   slider_w,
                                    1U,
                                    5U,
                                    s_status_panel.brightness_steps,
@@ -1220,7 +1241,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                     false);
     s_status_panel.volume_value_label = ui_create_label(slider_box,
                                                         "5 / 10",
-                                                        338,
+                                                        inner_w - 164,
                                                         90,
                                                         132,
                                                         28,
@@ -1232,13 +1253,13 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
     ui_status_create_slider_visual(slider_box,
                                    24,
                                    130,
-                                   430,
+                                   slider_w,
                                    0U,
                                    10U,
                                    s_status_panel.volume_steps,
                                    UI_STATUS_SLIDER_VOLUME);
 
-    s_status_panel.bluetooth_card = ui_create_card(panel, 22, 232, 230, 64, UI_SCREEN_NONE, false, 0);
+    s_status_panel.bluetooth_card = ui_create_card(panel, inner_x, 232, status_card_w, 64, UI_SCREEN_NONE, false, 0);
     s_status_panel.bluetooth_title_label = ui_create_label(s_status_panel.bluetooth_card,
                                                            "蓝牙",
                                                            18,
@@ -1260,15 +1281,15 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                                                               false,
                                                               false);
     touch_zone = ui_status_create_touch_zone(panel,
-                                             22,
+                                             inner_x,
                                              232,
-                                             230,
+                                             status_card_w,
                                              64,
                                              ui_status_bluetooth_card_event_cb,
                                              NULL);
     lv_obj_move_foreground(touch_zone);
 
-    s_status_panel.network_card = ui_create_card(panel, 294, 232, 230, 64, UI_SCREEN_NONE, true, 0);
+    s_status_panel.network_card = ui_create_card(panel, status_right_x, 232, status_card_w, 64, UI_SCREEN_NONE, true, 0);
     label = ui_create_label(s_status_panel.network_card,
                             "网络状态",
                             18,
@@ -1293,8 +1314,8 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
 
     s_status_panel.toast = lv_obj_create(root);
     ui_apply_basic_object_style(s_status_panel.toast, true, ui_px_h(20), 0);
-    lv_obj_set_pos(s_status_panel.toast, ui_px_x(82), ui_px_y(80));
-    lv_obj_set_size(s_status_panel.toast, ui_px_w(418), ui_px_h(40));
+    lv_obj_set_pos(s_status_panel.toast, ui_px_x(toast_x), ui_px_y(80));
+    lv_obj_set_size(s_status_panel.toast, ui_px_w(toast_w), ui_px_h(40));
     lv_obj_add_flag(s_status_panel.toast, LV_OBJ_FLAG_HIDDEN);
     s_status_panel.toast_label = ui_create_label(s_status_panel.toast,
                                                  "蓝牙连接成功",
@@ -1309,8 +1330,8 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
 
     s_status_panel.confirm = lv_obj_create(root);
     ui_apply_basic_object_style(s_status_panel.confirm, false, 0, 2);
-    lv_obj_set_pos(s_status_panel.confirm, ui_px_x(136), ui_px_y(224));
-    lv_obj_set_size(s_status_panel.confirm, ui_px_w(310), ui_px_h(128));
+    lv_obj_set_pos(s_status_panel.confirm, ui_px_x(confirm_x), ui_px_y(224));
+    lv_obj_set_size(s_status_panel.confirm, ui_px_w(confirm_w), ui_px_h(128));
     if (!s_status_panel.confirm_visible)
     {
         lv_obj_add_flag(s_status_panel.confirm, LV_OBJ_FLAG_HIDDEN);
@@ -1529,14 +1550,12 @@ void ui_helpers_reset_font_cache(void)
 
 lv_coord_t ui_px_x(int32_t value)
 {
-    ui_refresh_metrics();
-    return ui_scale_value(value, UI_FIGMA_WIDTH, s_screen_width);
+    return (lv_coord_t)value;
 }
 
 lv_coord_t ui_px_y(int32_t value)
 {
-    ui_refresh_metrics();
-    return ui_scale_value(value, UI_FIGMA_HEIGHT, s_screen_height);
+    return (lv_coord_t)value;
 }
 
 lv_coord_t ui_px_w(int32_t value)
@@ -1551,19 +1570,11 @@ lv_coord_t ui_px_h(int32_t value)
 
 uint16_t ui_scaled_font_size(uint16_t figma_size)
 {
-    uint32_t scaled_x;
-    uint32_t scaled_y;
-    uint32_t scaled;
-
-    ui_refresh_metrics();
-    scaled_x = (uint32_t)figma_size * (uint32_t)s_screen_width / UI_FIGMA_WIDTH;
-    scaled_y = (uint32_t)figma_size * (uint32_t)s_screen_height / UI_FIGMA_HEIGHT;
-    scaled = scaled_x < scaled_y ? scaled_x : scaled_y;
-    if (scaled < 10U)
+    if (figma_size < 10U)
     {
-        scaled = 10U;
+        return 10U;
     }
-    return (uint16_t)scaled;
+    return figma_size;
 }
 
 lv_font_t *ui_font_get_actual(uint16_t actual_size)
@@ -1638,6 +1649,7 @@ lv_obj_t *ui_create_label(lv_obj_t *parent,
                           bool wrap)
 {
     lv_obj_t *label = lv_label_create(parent);
+    (void)inverted;
 
     lv_label_set_text(label, text != NULL ? text : "");
     lv_label_set_long_mode(label, wrap ? LV_LABEL_LONG_WRAP : LV_LABEL_LONG_CLIP);
@@ -1649,9 +1661,7 @@ lv_obj_t *ui_create_label(lv_obj_t *parent,
     }
     lv_obj_set_pos(label, ui_px_x(x), ui_px_y(y));
     lv_obj_set_style_text_font(label, ui_font_get(figma_font_size), 0);
-    lv_obj_set_style_text_color(label,
-                                inverted ? lv_color_hex(0xFFFFFF) : lv_color_hex(0x000000),
-                                0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0x000000), 0);
     lv_obj_set_style_text_align(label, align, 0);
     lv_obj_set_style_bg_opa(label, LV_OPA_TRANSP, 0);
     return label;
@@ -1669,8 +1679,9 @@ lv_obj_t *ui_create_button(lv_obj_t *parent,
 {
     lv_obj_t *button = lv_button_create(parent);
     lv_obj_t *label;
+    (void)filled;
 
-    ui_apply_basic_object_style(button, filled, 0, 2);
+    ui_apply_basic_object_style(button, false, 0, 2);
     lv_obj_set_pos(button, ui_px_x(x), ui_px_y(y));
     lv_obj_set_size(button, ui_px_w(w), ui_px_h(h));
     if (target != UI_SCREEN_NONE)
@@ -1681,9 +1692,7 @@ lv_obj_t *ui_create_button(lv_obj_t *parent,
     label = lv_label_create(button);
     lv_label_set_text(label, text != NULL ? text : "");
     lv_obj_set_style_text_font(label, ui_font_get(figma_font_size), 0);
-    lv_obj_set_style_text_color(label,
-                                filled ? lv_color_hex(0xFFFFFF) : lv_color_hex(0x000000),
-                                0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0x000000), 0);
     lv_obj_center(label);
     return button;
 }
@@ -1927,31 +1936,31 @@ void ui_build_standard_screen_ex(ui_screen_scaffold_t *scaffold,
     section = lv_obj_create(screen);
     ui_apply_basic_object_style(section, false, 0, 0);
     lv_obj_set_pos(section, 0, ui_px_y(68));
-    lv_obj_set_size(section, s_screen_width, ui_px_h(723));
+    lv_obj_set_size(section, s_screen_width, s_screen_height - ui_px_y(68));
 
     title_bar = lv_obj_create(section);
     ui_apply_basic_object_style(title_bar, false, 0, 0);
     lv_obj_set_style_border_side(title_bar, LV_BORDER_SIDE_BOTTOM, 0);
     lv_obj_set_style_border_width(title_bar, 2, 0);
-    lv_obj_set_size(title_bar, ui_px_w(582), ui_px_h(58));
+    lv_obj_set_size(title_bar, s_screen_width, ui_px_h(58));
 
     ui_create_label(title_bar,
                     title,
-                    108,
+                    96,
                     13,
-                    366,
+                    s_screen_width - 192,
                     32,
                     UI_STANDARD_NAV_FONT_SIZE,
                     LV_TEXT_ALIGN_CENTER,
                     false,
                     false);
-    ui_create_nav_button(title_bar, 0, 0, 108, 58, "返回", back_target);
-    ui_create_nav_button(title_bar, 474, 0, 108, 58, "主页", UI_SCREEN_HOME);
+    ui_create_nav_button(title_bar, 0, 0, 96, 58, "返回", back_target);
+    ui_create_nav_button(title_bar, s_screen_width - 96, 0, 96, 58, "主页", UI_SCREEN_HOME);
 
     content = lv_obj_create(section);
     ui_apply_basic_object_style(content, false, 0, 0);
     lv_obj_set_pos(content, 0, ui_px_y(58));
-    lv_obj_set_size(content, ui_px_w(582), ui_px_h(665));
+    lv_obj_set_size(content, s_screen_width, s_screen_height - ui_px_y(68 + 58));
 
     scaffold->content = content;
 }
@@ -2006,7 +2015,7 @@ void ui_build_status_detail_content(lv_obj_t *screen, lv_obj_t *parent)
     s_status_panel.root = screen;
     s_status_panel.mask = NULL;
 
-    ui_status_build_panel_widgets(screen, parent, 24, 24, 534);
+    ui_status_build_panel_widgets(screen, parent, 24, 24, 480);
     ui_status_hide_toast();
     ui_status_sync_now();
     ui_status_update_panel_visuals();

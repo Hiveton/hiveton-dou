@@ -24,7 +24,7 @@
 #define UI_READING_DETAIL_LOAD_THREAD_TICK 10
 #define UI_READING_DETAIL_LOAD_TIMER_MS 30U
 #define UI_READING_DETAIL_PROGRESS_TIMER_MS 200U
-#define UI_READING_DETAIL_TEXT_WIDTH 514
+#define UI_READING_DETAIL_TEXT_WIDTH 460
 #define UI_READING_DETAIL_TEXT_HEIGHT 558
 #define UI_READING_DETAIL_TEXT_FONT 20
 #define UI_READING_DETAIL_TEXT_LINE_SPACE 2
@@ -1410,7 +1410,7 @@ void ui_Reading_Detail_screen_init(void)
     rt_kprintf("reading_detail: init title=%s\n", title);
     ui_build_standard_screen(&page, ui_Reading_Detail, title, UI_SCREEN_READING_LIST);
 
-    reading_box = ui_create_card(page.content, 24, 12, 534, 572, UI_SCREEN_NONE, false, 0);
+    reading_box = ui_create_card(page.content, 24, 12, 480, 572, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(reading_box, 0, 0);
     lv_obj_set_style_bg_opa(reading_box, LV_OPA_TRANSP, 0);
     s_reading_detail_refs.content_label = ui_create_label(reading_box,
@@ -1455,7 +1455,7 @@ void ui_Reading_Detail_screen_init(void)
                                                        false,
                                                        false);
     s_reading_detail_refs.prev_button = ui_create_button(page.content, 198, 603, 175, 40, "上一页", 20, UI_SCREEN_NONE, false);
-    s_reading_detail_refs.next_button = ui_create_button(page.content, 383, 603, 175, 40, "下一页", 20, UI_SCREEN_NONE, true);
+    s_reading_detail_refs.next_button = ui_create_button(page.content, 329, 603, 175, 40, "下一页", 20, UI_SCREEN_NONE, true);
     lv_obj_add_event_cb(s_reading_detail_refs.prev_button, ui_reading_detail_prev_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_reading_detail_refs.next_button, ui_reading_detail_next_event_cb, LV_EVENT_CLICKED, NULL);
 

@@ -20,7 +20,7 @@ void ui_Recorder_screen_init(void)
                     "00:00",
                     0,
                     88,
-                    582,
+                    528,
                     88,
                     90,
                     LV_TEXT_ALIGN_CENTER,
@@ -30,14 +30,14 @@ void ui_Recorder_screen_init(void)
                     "点击下方按钮开始录音",
                     0,
                     194,
-                    582,
+                    528,
                     25,
                     20,
                     LV_TEXT_ALIGN_CENTER,
                     false,
                     false);
 
-    record_button = ui_create_card(page.content, 201, 246, 180, 180, UI_SCREEN_NONE, true, 90);
+    record_button = ui_create_card(page.content, 174, 246, 180, 180, UI_SCREEN_NONE, true, 90);
     ui_create_label(record_button,
                     "录音",
                     0,
@@ -50,7 +50,7 @@ void ui_Recorder_screen_init(void)
                     false);
 
     ui_create_button(page.content,
-                     315,
+                     261,
                      507,
                      118,
                      48,

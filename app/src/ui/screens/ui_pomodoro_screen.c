@@ -16,7 +16,7 @@ void ui_Pomodoro_screen_init(void)
     ui_Pomodoro = ui_create_screen_base();
     ui_build_standard_screen(&page, ui_Pomodoro, "番茄时间", UI_SCREEN_TIME_MANAGE);
 
-    ring = ui_create_card(page.content, 121, 64, 340, 340, UI_SCREEN_NONE, false, 170);
+    ring = ui_create_card(page.content, 94, 64, 340, 340, UI_SCREEN_NONE, false, 170);
     ui_create_label(ring,
                     "当前专注",
                     2,
@@ -48,8 +48,8 @@ void ui_Pomodoro_screen_init(void)
                     false,
                     false);
 
-    ui_create_button(page.content, 149, 509, 118, 48, "开始", 20, UI_SCREEN_NONE, true);
-    ui_create_button(page.content, 315, 509, 118, 48, "重置", 20, UI_SCREEN_NONE, false);
+    ui_create_button(page.content, 122, 509, 118, 48, "开始", 20, UI_SCREEN_NONE, true);
+    ui_create_button(page.content, 288, 509, 118, 48, "重置", 20, UI_SCREEN_NONE, false);
 }
 
 void ui_Pomodoro_screen_destroy(void)

@@ -28,14 +28,14 @@ typedef struct
 
 static const ui_home_tile_t s_home_tiles[] = {
     {18, 58, &home_reading, "阅读", UI_SCREEN_READING_LIST},
-    {200, 58, &home_pet, "宠物管理", UI_SCREEN_PET},
-    {382, 58, &home_ai, "AI小豆", UI_SCREEN_AI_DOU},
+    {186, 58, &home_pet, "宠物管理", UI_SCREEN_PET},
+    {354, 58, &home_ai, "AI小豆", UI_SCREEN_AI_DOU},
     {18, 256, &home_clock, "时间管理", UI_SCREEN_TIME_MANAGE},
-    {200, 256, &home_weather, "天气", UI_SCREEN_WEATHER},
-    {382, 256, &home_calendar, "日历", UI_SCREEN_CALENDAR},
+    {186, 256, &home_weather, "天气", UI_SCREEN_WEATHER},
+    {354, 256, &home_calendar, "日历", UI_SCREEN_CALENDAR},
     {18, 454, &home_record, "录音", UI_SCREEN_RECORDER},
-    {200, 454, &home_music, "音乐", UI_SCREEN_MUSIC_LIST},
-    {382, 454, &home_settings, "设置", UI_SCREEN_SETTINGS},
+    {186, 454, &home_music, "音乐", UI_SCREEN_MUSIC_LIST},
+    {354, 454, &home_settings, "设置", UI_SCREEN_SETTINGS},
 };
 
 static lv_obj_t *create_home_hotspot(lv_obj_t *parent,
@@ -85,7 +85,7 @@ void ui_Home_screen_init(void)
     lv_obj_set_style_bg_opa(section, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(section, 0, 0);
     lv_obj_set_pos(section, 0, ui_px_y(68));
-    lv_obj_set_size(section, ui_px_w(582), ui_px_h(723));
+    lv_obj_set_size(section, ui_px_w(528), ui_px_h(724));
 
     for (i = 0; i < sizeof(s_home_tiles) / sizeof(s_home_tiles[0]); ++i)
     {
@@ -93,17 +93,17 @@ void ui_Home_screen_init(void)
         lv_obj_t *zone = create_home_hotspot(section,
                                              tile->x,
                                              tile->y,
-                                             182,
+                                             156,
                                              198,
                                              tile->target);
-        lv_obj_t *icon = ui_create_image_slot(zone, 51, 28, 80, 80);
+        lv_obj_t *icon = ui_create_image_slot(zone, 38, 28, 80, 80);
 
         lv_img_set_src(icon, tile->icon);
         ui_create_label(zone,
                         tile->label,
                         0,
                         122,
-                        182,
+                        156,
                         30,
                         24,
                         LV_TEXT_ALIGN_CENTER,

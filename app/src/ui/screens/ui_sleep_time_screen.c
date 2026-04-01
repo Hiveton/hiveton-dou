@@ -33,14 +33,14 @@ void ui_Sleep_Time_screen_init(void)
     ui_Sleep_Time = ui_create_screen_base();
     ui_build_standard_screen(&page, ui_Sleep_Time, "助眠时间", UI_SCREEN_SETTINGS);
 
-    panel = ui_create_card(page.content, 0, 0, 582, 653, UI_SCREEN_NONE, false, 0);
+    panel = ui_create_card(page.content, 0, 0, 528, 653, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(panel, 2, 0);
 
     ui_create_label(panel,
                     "夜间提醒将在设定时间后降低操作噪音与亮度。",
                     48,
                     92,
-                    482,
+                    432,
                     29,
                     18,
                     LV_TEXT_ALIGN_LEFT,
@@ -58,18 +58,18 @@ void ui_Sleep_Time_screen_init(void)
                     false);
     ui_create_label(panel,
                     "22:30",
-                    428,
+                    378,
                     141,
-                    106,
+                    102,
                     42,
                     24,
                     LV_TEXT_ALIGN_RIGHT,
                     false,
                     false);
-    create_divider(panel, 48, 194, 486);
+    create_divider(panel, 44, 194, 440);
 
-    ui_create_button(panel, 48, 209, 486, 50, "提前 10 分钟", 20, UI_SCREEN_NONE, false);
-    ui_create_button(panel, 48, 269, 486, 50, "延后 10 分钟", 20, UI_SCREEN_NONE, false);
+    ui_create_button(panel, 44, 209, 440, 50, "提前 10 分钟", 20, UI_SCREEN_NONE, false);
+    ui_create_button(panel, 44, 269, 440, 50, "延后 10 分钟", 20, UI_SCREEN_NONE, false);
 }
 
 void ui_Sleep_Time_screen_destroy(void)

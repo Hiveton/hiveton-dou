@@ -260,10 +260,10 @@ static void ui_calendar_render(void)
         if (is_selected)
         {
             lv_obj_set_style_bg_opa(cell->card, LV_OPA_COVER, 0);
-            lv_obj_set_style_bg_color(cell->card, lv_color_hex(0x000000), 0);
+            lv_obj_set_style_bg_color(cell->card, lv_color_hex(0xFFFFFF), 0);
             lv_obj_set_style_border_width(cell->card, 2, 0);
             lv_obj_set_style_border_color(cell->card, lv_color_hex(0x000000), 0);
-            lv_obj_set_style_text_color(cell->day_label, lv_color_hex(0xFFFFFF), 0);
+            lv_obj_set_style_text_color(cell->day_label, lv_color_hex(0x000000), 0);
         }
         else
         {
@@ -271,9 +271,7 @@ static void ui_calendar_render(void)
             lv_obj_set_style_bg_color(cell->card, lv_color_hex(0xFFFFFF), 0);
             lv_obj_set_style_border_width(cell->card, is_today ? 2 : 1, 0);
             lv_obj_set_style_border_color(cell->card, lv_color_hex(0x000000), 0);
-            lv_obj_set_style_text_color(cell->day_label,
-                                        in_current_month ? lv_color_hex(0x000000) : lv_color_hex(0x8C8C8C),
-                                        0);
+            lv_obj_set_style_text_color(cell->day_label, lv_color_hex(0x000000), 0);
         }
     }
 
@@ -430,7 +428,7 @@ void ui_Calendar_screen_init(void)
 
     {
         lv_obj_t *prev_button = ui_create_nav_button(page.content, 24, 14, 42, 42, "<", UI_SCREEN_NONE);
-        lv_obj_t *next_button = ui_create_nav_button(page.content, 516, 14, 42, 42, ">", UI_SCREEN_NONE);
+        lv_obj_t *next_button = ui_create_nav_button(page.content, 462, 14, 42, 42, ">", UI_SCREEN_NONE);
         lv_obj_add_event_cb(prev_button, ui_calendar_prev_event_cb, LV_EVENT_CLICKED, NULL);
         lv_obj_add_event_cb(next_button, ui_calendar_next_event_cb, LV_EVENT_CLICKED, NULL);
     }
@@ -484,12 +482,12 @@ void ui_Calendar_screen_init(void)
         }
     }
 
-    summary_card = ui_create_card(page.content, 24, 534, 534, 78, UI_SCREEN_NONE, false, 0);
+    summary_card = ui_create_card(page.content, 24, 534, 480, 78, UI_SCREEN_NONE, false, 0);
     s_calendar_refs.summary_label = ui_create_label(summary_card,
                                                     "",
                                                     18,
                                                     14,
-                                                    320,
+                                                    284,
                                                     24,
                                                     20,
                                                     LV_TEXT_ALIGN_LEFT,
@@ -499,7 +497,7 @@ void ui_Calendar_screen_init(void)
                                                    "",
                                                    18,
                                                    44,
-                                                   320,
+                                                   284,
                                                    18,
                                                    15,
                                                    LV_TEXT_ALIGN_LEFT,

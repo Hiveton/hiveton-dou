@@ -51,7 +51,7 @@ void ui_Brightness_screen_init(void)
     ui_Brightness = ui_create_screen_base();
     ui_build_standard_screen(&page, ui_Brightness, "屏幕亮度", UI_SCREEN_SETTINGS);
 
-    panel = ui_create_card(page.content, 0, 0, 582, 653, UI_SCREEN_NONE, false, 0);
+    panel = ui_create_card(page.content, 0, 0, 528, 653, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(panel, 2, 0);
 
     ui_create_label(panel,
@@ -66,17 +66,17 @@ void ui_Brightness_screen_init(void)
                     false);
     ui_create_label(panel,
                     "3 / 5",
-                    430,
+                    376,
                     92,
-                    104,
+                    98,
                     42,
                     24,
                     LV_TEXT_ALIGN_RIGHT,
                     false,
                     false);
 
-    create_brightness_track(panel, 50, 162, 486);
-    create_brightness_fill(panel, 54, 166, 286);
+    create_brightness_track(panel, 44, 162, 440);
+    create_brightness_fill(panel, 48, 166, 260);
 }
 
 void ui_Brightness_screen_destroy(void)

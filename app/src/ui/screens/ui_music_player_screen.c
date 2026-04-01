@@ -41,7 +41,7 @@ void ui_Music_Player_screen_init(void)
     ui_Music_Player = ui_create_screen_base();
     ui_build_standard_screen(&page, ui_Music_Player, "音乐播放器", UI_SCREEN_MUSIC_LIST);
 
-    disc = ui_create_card(page.content, 171, 56, 240, 240, UI_SCREEN_NONE, false, 120);
+    disc = ui_create_card(page.content, 144, 56, 240, 240, UI_SCREEN_NONE, false, 120);
     inner_disc = ui_create_card(disc, 89, 89, 62, 62, UI_SCREEN_NONE, false, 31);
     lv_obj_set_style_border_width(inner_disc, 2, 0);
 
@@ -49,7 +49,7 @@ void ui_Music_Player_screen_init(void)
                     "雨巷留声",
                     0,
                     324,
-                    582,
+                    528,
                     42,
                     32,
                     LV_TEXT_ALIGN_CENTER,
@@ -59,7 +59,7 @@ void ui_Music_Player_screen_init(void)
                     "木心朗读集",
                     0,
                     370,
-                    582,
+                    528,
                     23,
                     18,
                     LV_TEXT_ALIGN_CENTER,
@@ -67,13 +67,13 @@ void ui_Music_Player_screen_init(void)
                     false);
 
     ui_create_label(page.content, "00:36", 48, 448, 62, 19, 15, LV_TEXT_ALIGN_LEFT, false, false);
-    ui_create_label(page.content, "03:28", 472, 448, 62, 19, 15, LV_TEXT_ALIGN_RIGHT, false, false);
+    ui_create_label(page.content, "03:28", 418, 448, 62, 19, 15, LV_TEXT_ALIGN_RIGHT, false, false);
     create_bar(page.content, 110, 455, 362, 8, false);
     create_bar(page.content, 110, 455, 138, 8, true);
 
-    ui_create_button(page.content, 82, 528, 126, 52, "上一首", 20, UI_SCREEN_NONE, false);
-    ui_create_button(page.content, 228, 528, 126, 52, "播放", 20, UI_SCREEN_NONE, true);
-    ui_create_button(page.content, 374, 528, 126, 52, "下一首", 20, UI_SCREEN_NONE, false);
+    ui_create_button(page.content, 55, 528, 126, 52, "上一首", 20, UI_SCREEN_NONE, false);
+    ui_create_button(page.content, 201, 528, 126, 52, "播放", 20, UI_SCREEN_NONE, true);
+    ui_create_button(page.content, 347, 528, 126, 52, "下一首", 20, UI_SCREEN_NONE, false);
 }
 
 void ui_Music_Player_screen_destroy(void)

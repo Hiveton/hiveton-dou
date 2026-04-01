@@ -13,13 +13,13 @@ static void create_datetime_row(lv_obj_t *parent,
     lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
-    lv_obj_set_pos(row, ui_px_x(50), ui_px_y(y));
-    lv_obj_set_size(row, ui_px_w(484), ui_px_h(84));
+    lv_obj_set_pos(row, ui_px_x(44), ui_px_y(y));
+    lv_obj_set_size(row, ui_px_w(440), ui_px_h(84));
 
     ui_create_label(row, name, 8, 23, 18, 25, 20, LV_TEXT_ALIGN_LEFT, false, false);
-    ui_create_button(row, 152, 23, 42, 42, "-", 24, UI_SCREEN_NONE, false);
-    ui_create_label(row, value, 216, 23, 56, 39, 30, LV_TEXT_ALIGN_CENTER, false, false);
-    ui_create_button(row, 324, 23, 42, 42, "+", 24, UI_SCREEN_NONE, false);
+    ui_create_button(row, 140, 23, 42, 42, "-", 24, UI_SCREEN_NONE, false);
+    ui_create_label(row, value, 198, 23, 56, 39, 30, LV_TEXT_ALIGN_CENTER, false, false);
+    ui_create_button(row, 300, 23, 42, 42, "+", 24, UI_SCREEN_NONE, false);
 }
 
 void ui_Datetime_screen_init(void)
@@ -36,9 +36,9 @@ void ui_Datetime_screen_init(void)
 
     ui_create_label(page.content,
                     "当前设备时间",
-                    50,
+                    44,
                     62,
-                    482,
+                    440,
                     20,
                     16,
                     LV_TEXT_ALIGN_LEFT,
@@ -46,9 +46,9 @@ void ui_Datetime_screen_init(void)
                     false);
     ui_create_label(page.content,
                     "2026 / 01 / 14 15 : 30",
-                    50,
+                    44,
                     102,
-                    482,
+                    440,
                     39,
                     30,
                     LV_TEXT_ALIGN_LEFT,

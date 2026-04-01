@@ -22,13 +22,13 @@ static void create_music_card(lv_obj_t *parent,
                               int y,
                               const ui_music_item_t *item)
 {
-    lv_obj_t *card = ui_create_card(parent, 24, y, 534, 121, UI_SCREEN_MUSIC_PLAYER, false, 0);
+    lv_obj_t *card = ui_create_card(parent, 24, y, 480, 121, UI_SCREEN_MUSIC_PLAYER, false, 0);
 
     ui_create_label(card,
                     item->title,
                     20,
                     29,
-                    490,
+                    436,
                     31,
                     24,
                     LV_TEXT_ALIGN_LEFT,
@@ -38,7 +38,7 @@ static void create_music_card(lv_obj_t *parent,
                     item->meta,
                     20,
                     69,
-                    490,
+                    436,
                     19,
                     15,
                     LV_TEXT_ALIGN_LEFT,
@@ -75,8 +75,8 @@ void ui_Music_List_screen_init(void)
         create_music_card(page.content, 40 + (int)(i * 139), &s_music_items[i]);
     }
 
-    ui_create_button(page.content, 334, 585, 108, 46, "上翻", 26, UI_SCREEN_NONE, false);
-    ui_create_button(page.content, 450, 585, 108, 46, "下翻", 26, UI_SCREEN_NONE, false);
+    ui_create_button(page.content, 304, 585, 96, 46, "上翻", 26, UI_SCREEN_NONE, false);
+    ui_create_button(page.content, 408, 585, 96, 46, "下翻", 26, UI_SCREEN_NONE, false);
 }
 
 void ui_Music_List_screen_destroy(void)
