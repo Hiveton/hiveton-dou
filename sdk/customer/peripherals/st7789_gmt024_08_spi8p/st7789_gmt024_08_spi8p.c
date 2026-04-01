@@ -240,6 +240,13 @@ static void EPD_SetBacklight(uint8_t br)
  */
 #define EPD_TEST_FORCE_FULL_REFRESH 0
 #define EPD_TEST_STRICT_BUSY_WAIT 1
+/*
+ * Mono conversion quality switch:
+ * 0 = hard threshold (sharper text, less edge noise)
+ * 1 = Bayer dithering (smoother gradients, may look grainy on text)
+ */
+#define EPD_MONO_USE_DITHER 0
+#define EPD_MONO_THRESHOLD_LEVEL 2U
 
 #define REG_LUT_VCOM 0x20
 #define REG_LUT_W2W 0x21
@@ -486,6 +493,40 @@ static void EPD_Gray2ToMonoDither(void)
             }
         }
     }
+}
+
+static void EPD_Gray2ToMonoThreshold(void)
+{
+    memset(mixed_framebuffer_mono, 0xFF, sizeof(mixed_framebuffer_mono));
+
+    for (uint16_t y = 0; y < EPD_HEIGHT; y++)
+    {
+        for (uint16_t x = 0; x < EPD_WIDTH; x++)
+        {
+            uint8_t lv = epd_get_gray2_pixel(x, y); /* 0=black ... 3=white */
+            uint8_t is_white = (lv >= EPD_MONO_THRESHOLD_LEVEL) ? 1U : 0U;
+            uint32_t byte_idx = (uint32_t)y * (EPD_WIDTH / 8) + (x / 8);
+            uint8_t bit_pos = (uint8_t)(7 - (x % 8));
+
+            if (is_white)
+            {
+                mixed_framebuffer_mono[byte_idx] |= (uint8_t)(1u << bit_pos);
+            }
+            else
+            {
+                mixed_framebuffer_mono[byte_idx] &= (uint8_t)~(1u << bit_pos);
+            }
+        }
+    }
+}
+
+static void EPD_Gray2ToMono(void)
+{
+#if EPD_MONO_USE_DITHER
+    EPD_Gray2ToMonoDither();
+#else
+    EPD_Gray2ToMonoThreshold();
+#endif
 }
 
 static void EPD_MarkDirtyPhysicalRegion(uint16_t x0, uint16_t y0, uint16_t x1,
@@ -934,7 +975,7 @@ static void EPD_FrameBuffer_Flush(LCDC_HandleTypeDef *hlcdc)
 #endif
     
     // 使用Layer方式发送帧缓冲区数据
-    EPD_Gray2ToMonoDither();
+    EPD_Gray2ToMono();
     if (s_epd_stats_dump_count < 3U)
     {
         epd_debug_dump_stats("flush_gc");
@@ -974,7 +1015,7 @@ static void EPD_FrameBuffer_FlushFast(LCDC_HandleTypeDef *hlcdc)
     EPD_SetFullWindow(hlcdc);
 #endif
 
-    EPD_Gray2ToMonoDither();
+    EPD_Gray2ToMono();
     if (s_epd_stats_dump_count < 3U)
     {
         epd_debug_dump_stats("flush_fast");
@@ -1165,7 +1206,7 @@ static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
 
     EPD_ReadBusy();
     EPD_LoadLUT(hlcdc, 2);
-    EPD_Gray2ToMonoDither();
+    EPD_Gray2ToMono();
     EPD_SetPartialWindow(hlcdc, x0, y0, x1, y1);
 
     old_region = EPD_AllocMonoRegionBuffer(mixed_framebuffer_prev_mono, x0, y0, x1,
@@ -1666,7 +1707,7 @@ static void LCD_SetBrightness(LCDC_HandleTypeDef *hlcdc, uint8_t br)
 
 static void epd_stat(void)
 {
-    EPD_Gray2ToMonoDither();
+    EPD_Gray2ToMono();
     epd_debug_dump_stats("shell");
 }
 MSH_CMD_EXPORT(epd_stat, dump epd framebuffer statistics);
