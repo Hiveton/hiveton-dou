@@ -26,10 +26,20 @@
 #define UI_READING_DETAIL_PROGRESS_TIMER_MS 200U
 #define UI_READING_DETAIL_TEXT_WIDTH 460
 #define UI_READING_DETAIL_TEXT_HEIGHT 558
-#define UI_READING_DETAIL_TEXT_FONT 20
-#define UI_READING_DETAIL_TEXT_LINE_SPACE 2
+#define UI_READING_DETAIL_TEXT_FONT_DEFAULT 20
+#define UI_READING_DETAIL_TEXT_FONT_MIN 16
+#define UI_READING_DETAIL_TEXT_FONT_MAX 30
+#define UI_READING_DETAIL_TEXT_FONT_STEP 2
+#define UI_READING_DETAIL_TEXT_LINE_SPACE_DEFAULT 2
+#define UI_READING_DETAIL_TEXT_LINE_SPACE_MIN 0
+#define UI_READING_DETAIL_TEXT_LINE_SPACE_MAX 12
+#define UI_READING_DETAIL_TEXT_LINE_SPACE_STEP 1
 #define UI_READING_DETAIL_FONT_DELTA 0
 #define UI_READING_DETAIL_BITMAP_GLYPH_SCRATCH_BYTES 4096U
+#define UI_READING_DETAIL_EDGE_SWIPE_START_BAND_H 120
+#define UI_READING_DETAIL_SWIPE_TRIGGER_DISTANCE 70
+#define UI_READING_DETAIL_SWIPE_MAX_X_DRIFT 120
+#define UI_READING_DETAIL_SETTINGS_PANEL_H 344
 
 typedef struct
 {
@@ -38,6 +48,10 @@ typedef struct
     lv_obj_t *page_label;
     lv_obj_t *prev_button;
     lv_obj_t *next_button;
+    lv_obj_t *settings_mask;
+    lv_obj_t *settings_panel;
+    lv_obj_t *font_value_label;
+    lv_obj_t *line_space_value_label;
 } ui_reading_detail_refs_t;
 
 typedef enum
@@ -96,6 +110,10 @@ static int s_reading_detail_stb_ascent = 0;
 static int s_reading_detail_stb_descent = 0;
 static int s_reading_detail_stb_line_gap = 0;
 static uint8_t s_reading_detail_glyph_scratch[UI_READING_DETAIL_BITMAP_GLYPH_SCRATCH_BYTES];
+static uint16_t s_reading_detail_text_font_size = UI_READING_DETAIL_TEXT_FONT_DEFAULT;
+static int16_t s_reading_detail_text_line_space = UI_READING_DETAIL_TEXT_LINE_SPACE_DEFAULT;
+static bool s_reading_detail_swipe_tracking = false;
+static lv_point_t s_reading_detail_swipe_start = {0};
 
 extern const unsigned char xiaozhi_font[];
 extern const int xiaozhi_font_size;
@@ -113,15 +131,29 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path);
 static bool ui_reading_detail_render_page(void);
 static bool ui_reading_detail_selected_matches_request(void);
 static bool ui_reading_detail_render_text_bitmap(const char *formatted_text);
+static bool ui_reading_detail_append_next_page(char *formatted_buffer,
+                                               size_t formatted_buffer_size,
+                                               uint16_t *page_count_out,
+                                               bool *has_last_page_out);
+static bool ui_reading_detail_ensure_page_available(uint16_t page_index);
 static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
                                                        uint32_t codepoint,
                                                        uint32_t codepoint_next,
                                                        uint16_t fallback_width);
 static const lv_font_t *ui_reading_detail_get_text_font(void);
+static void ui_reading_detail_refresh_settings_labels(void);
+static void ui_reading_detail_show_settings_panel(void);
+static void ui_reading_detail_hide_settings_panel(void);
+static bool ui_reading_detail_settings_panel_visible(void);
+static void ui_reading_detail_apply_text_style(void);
+static void ui_reading_detail_reflow_after_setting_change(void);
+static void ui_reading_detail_swipe_event_cb(lv_event_t *e);
+static bool ui_reading_detail_point_in_bottom_swipe_band(const lv_point_t *point);
+static void ui_reading_detail_add_swipe_listener(lv_obj_t *obj);
 
 static const lv_font_t *ui_reading_detail_get_text_font(void)
 {
-    return ui_font_get(UI_READING_DETAIL_TEXT_FONT);
+    return ui_font_get(s_reading_detail_text_font_size);
 }
 
 static bool ui_reading_detail_init_stb_font(void)
@@ -137,14 +169,13 @@ static bool ui_reading_detail_init_stb_font(void)
                         xiaozhi_font,
                         stbtt_GetFontOffsetForIndex(xiaozhi_font, 0)))
     {
-        rt_kprintf("reading_detail: stb init failed\n");
         return false;
     }
 
-    font_px = (int)ui_scaled_font_size(UI_READING_DETAIL_TEXT_FONT) + UI_READING_DETAIL_FONT_DELTA;
+    font_px = (int)ui_scaled_font_size(s_reading_detail_text_font_size) + UI_READING_DETAIL_FONT_DELTA;
     if (font_px <= 0)
     {
-        font_px = UI_READING_DETAIL_TEXT_FONT + UI_READING_DETAIL_FONT_DELTA;
+        font_px = s_reading_detail_text_font_size + UI_READING_DETAIL_FONT_DELTA;
     }
 
     s_reading_detail_stb_scale = stbtt_ScaleForMappingEmToPixels(&s_reading_detail_stb_info,
@@ -173,8 +204,6 @@ static bool ui_reading_detail_ensure_bitmap_buffer(void)
     s_reading_detail_bitmap_buffer = (lv_color_t *)rt_malloc(data_size);
     if (s_reading_detail_bitmap_buffer == NULL)
     {
-        rt_kprintf("reading_detail: bitmap alloc failed bytes=%lu\n",
-                   (unsigned long)data_size);
         return false;
     }
 
@@ -340,6 +369,139 @@ static bool ui_reading_detail_is_content_ready(void)
            s_reading_detail_completed_request_id == s_reading_detail_request_id;
 }
 
+static bool ui_reading_detail_settings_panel_visible(void)
+{
+    return s_reading_detail_refs.settings_mask != NULL &&
+           !lv_obj_has_flag(s_reading_detail_refs.settings_mask, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void ui_reading_detail_apply_text_style(void)
+{
+    if (s_reading_detail_refs.content_label == NULL)
+    {
+        return;
+    }
+
+    lv_obj_set_style_text_font(s_reading_detail_refs.content_label,
+                               ui_reading_detail_get_text_font(),
+                               0);
+    lv_obj_set_style_text_line_space(s_reading_detail_refs.content_label,
+                                     ui_px_y(s_reading_detail_text_line_space),
+                                     0);
+}
+
+static void ui_reading_detail_refresh_settings_labels(void)
+{
+    char text[24];
+
+    if (s_reading_detail_refs.font_value_label != NULL)
+    {
+        rt_snprintf(text, sizeof(text), "%u", (unsigned int)s_reading_detail_text_font_size);
+        lv_label_set_text(s_reading_detail_refs.font_value_label, text);
+    }
+
+    if (s_reading_detail_refs.line_space_value_label != NULL)
+    {
+        rt_snprintf(text, sizeof(text), "%d", (int)s_reading_detail_text_line_space);
+        lv_label_set_text(s_reading_detail_refs.line_space_value_label, text);
+    }
+}
+
+static void ui_reading_detail_show_settings_panel(void)
+{
+    if (s_reading_detail_refs.settings_mask == NULL)
+    {
+        return;
+    }
+
+    ui_reading_detail_refresh_settings_labels();
+    lv_obj_clear_flag(s_reading_detail_refs.settings_mask, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_reading_detail_refs.settings_mask);
+    if (s_reading_detail_auto_timer != NULL)
+    {
+        lv_timer_pause(s_reading_detail_auto_timer);
+    }
+}
+
+static void ui_reading_detail_hide_settings_panel(void)
+{
+    if (s_reading_detail_refs.settings_mask == NULL)
+    {
+        return;
+    }
+
+    lv_obj_add_flag(s_reading_detail_refs.settings_mask, LV_OBJ_FLAG_HIDDEN);
+    if (s_reading_detail_auto_timer != NULL)
+    {
+        lv_timer_resume(s_reading_detail_auto_timer);
+        lv_timer_reset(s_reading_detail_auto_timer);
+    }
+}
+
+static void ui_reading_detail_reflow_after_setting_change(void)
+{
+    uint32_t current_start = 0U;
+    uint16_t page_index = 0U;
+    bool has_last_page = false;
+    uint16_t page_count;
+
+    s_reading_detail_stb_ready = false;
+    s_reading_detail_width_cache_font = NULL;
+    memset(s_reading_detail_ascii_width_cache, 0, sizeof(s_reading_detail_ascii_width_cache));
+    s_reading_detail_cjk_width = 0U;
+    s_reading_detail_fullwidth_width = 0U;
+    s_reading_detail_first_page_layout_ready = false;
+    s_reading_detail_first_page_bitmap_ready = false;
+    memset(s_reading_detail_first_page_layout, 0, sizeof(s_reading_detail_first_page_layout));
+    memset(s_reading_detail_page_buffer, 0, sizeof(s_reading_detail_page_buffer));
+
+    if (ui_reading_detail_is_content_ready())
+    {
+        if (ui_reading_detail_ensure_page_available(s_reading_detail_current_page))
+        {
+            current_start = s_reading_detail_page_offsets[s_reading_detail_current_page];
+        }
+    }
+
+    ui_reading_detail_apply_text_style();
+    ui_reading_detail_reset_pages();
+
+    if (!ui_reading_detail_is_content_ready())
+    {
+        ui_reading_detail_show_loading_state();
+        return;
+    }
+
+    page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
+    while (!has_last_page)
+    {
+        uint16_t next_page_count = page_count;
+        bool next_has_last_page = has_last_page;
+
+        if (!ui_reading_detail_append_next_page(NULL,
+                                                0U,
+                                                &next_page_count,
+                                                &next_has_last_page))
+        {
+            break;
+        }
+
+        if (next_page_count > page_count &&
+            current_start >= s_reading_detail_page_offsets[next_page_count - 1U] &&
+            current_start < s_reading_detail_page_offsets[next_page_count])
+        {
+            page_index = (uint16_t)(next_page_count - 1U);
+            break;
+        }
+
+        page_count = next_page_count;
+        has_last_page = next_has_last_page;
+    }
+
+    s_reading_detail_current_page = page_index;
+    (void)ui_reading_detail_render_page();
+}
+
 static uint16_t ui_reading_detail_get_max_lines(void)
 {
     int32_t max_height;
@@ -350,7 +512,7 @@ static uint16_t ui_reading_detail_get_max_lines(void)
 
     max_height = ui_px_h(UI_READING_DETAIL_TEXT_HEIGHT);
     font = ui_reading_detail_get_text_font();
-    line_space = ui_px_y(UI_READING_DETAIL_TEXT_LINE_SPACE);
+    line_space = ui_px_y(s_reading_detail_text_line_space);
     line_height = lv_font_get_line_height(font) + line_space;
     if (line_height <= 0)
     {
@@ -438,8 +600,8 @@ static bool ui_reading_detail_render_text_bitmap(const char *formatted_text)
     }
 
     memset(s_reading_detail_bitmap_buffer, 0xFF, s_reading_detail_bitmap_dsc.data_size);
-    font = ui_font_get(UI_READING_DETAIL_TEXT_FONT);
-    line_step = lv_font_get_line_height(font) + ui_px_y(UI_READING_DETAIL_TEXT_LINE_SPACE);
+    font = ui_reading_detail_get_text_font();
+    line_step = lv_font_get_line_height(font) + ui_px_y(s_reading_detail_text_line_space);
     if (line_step <= 0)
     {
         line_step = 1;
@@ -473,7 +635,7 @@ static bool ui_reading_detail_render_text_bitmap(const char *formatted_text)
         advance_px = (int)ui_reading_detail_get_glyph_width_fast(font,
                                                                  codepoint,
                                                                  next_codepoint,
-                                                                 (uint16_t)ui_px_x(UI_READING_DETAIL_TEXT_FONT));
+                                                                 (uint16_t)ui_px_x(s_reading_detail_text_font_size));
         stbtt_GetCodepointBitmapBox(&s_reading_detail_stb_info,
                                     (int)codepoint,
                                     s_reading_detail_stb_scale,
@@ -830,10 +992,6 @@ static bool ui_reading_detail_ensure_page_available(uint16_t page_index)
             break;
         }
 
-        rt_kprintf("reading_detail: lazy page_ready=%u known_last=%u page_ms=%lu\n",
-                   (unsigned int)page_count,
-                   has_last_page ? 1U : 0U,
-                   (unsigned long)(ui_reading_detail_now_ms() - page_start_ms));
     }
 
     return page_index < page_count;
@@ -864,8 +1022,6 @@ static void ui_reading_detail_load_thread_entry(void *parameter)
             rt_snprintf(s_reading_detail_text,
                         sizeof(s_reading_detail_text),
                         "TF 卡中还没有可阅读的文本文件。\n\n请先返回列表页确认文件是否已经识别。");
-            rt_kprintf("reading_detail: request=%lu fallback without selected file\n",
-                       (unsigned long)request_id);
         }
         else
         {
@@ -874,8 +1030,6 @@ static void ui_reading_detail_load_thread_entry(void *parameter)
 
         if (!ui_reading_detail_request_is_current(request_id))
         {
-            rt_kprintf("reading_detail: request=%lu canceled after load\n",
-                       (unsigned long)request_id);
             continue;
         }
 
@@ -890,8 +1044,6 @@ static void ui_reading_detail_load_thread_entry(void *parameter)
                                                     &page_count,
                                                     &has_last_page))
             {
-                rt_kprintf("reading_detail: request=%lu first page build failed\n",
-                           (unsigned long)request_id);
                 continue;
             }
 
@@ -900,18 +1052,6 @@ static void ui_reading_detail_load_thread_entry(void *parameter)
             s_reading_detail_load_state = UI_READING_DETAIL_LOAD_READY;
             s_reading_detail_completed_request_id = request_id;
             rt_hw_interrupt_enable(level);
-
-            rt_kprintf("reading_detail: request=%lu first_page_ready pages=%u last=%u page_ms=%lu total_ms=%lu\n",
-                       (unsigned long)request_id,
-                       (unsigned int)page_count,
-                       has_last_page ? 1U : 0U,
-                       (unsigned long)(ui_reading_detail_now_ms() - page_start_ms),
-                       (unsigned long)(ui_reading_detail_now_ms() - load_start_ms));
-            rt_kprintf("reading_detail: request=%lu first_page_text_len=%lu first_page_start=%lu first_page_end=%lu\n",
-                       (unsigned long)request_id,
-                       (unsigned long)strlen(s_reading_detail_first_page_layout),
-                       (unsigned long)s_reading_detail_page_offsets[0],
-                       (unsigned long)s_reading_detail_page_offsets[1]);
         }
     }
 }
@@ -928,7 +1068,6 @@ static void ui_reading_detail_start_load_worker(void)
     result = rt_sem_init(&s_reading_detail_load_sem, "rdload", 0, RT_IPC_FLAG_FIFO);
     if (result != RT_EOK)
     {
-        rt_kprintf("reading_detail: sem init failed=%d\n", result);
         return;
     }
 
@@ -942,7 +1081,6 @@ static void ui_reading_detail_start_load_worker(void)
                             UI_READING_DETAIL_LOAD_THREAD_TICK);
     if (result != RT_EOK)
     {
-        rt_kprintf("reading_detail: thread init failed=%d\n", result);
         rt_sem_detach(&s_reading_detail_load_sem);
         return;
     }
@@ -1030,7 +1168,6 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
     fd = open(file_path, O_RDONLY);
     if (fd < 0)
     {
-        rt_kprintf("reading_detail: open failed path=%s errno=%d\n", file_path, rt_get_errno());
         rt_snprintf(s_reading_detail_text,
                     sizeof(s_reading_detail_text),
                     "打开文件失败：\n%s\n\n请确认文件存在且 TF 卡可正常读取。",
@@ -1083,14 +1220,6 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
                     "这个文本文件目前是空的。");
     }
 
-    rt_kprintf("reading_detail: file=%s bytes=%lu open_ms=%lu read_ms=%lu normalize_ms=%lu total_ms=%lu\n",
-               file_path,
-               (unsigned long)dst,
-               (unsigned long)(read_start_ms - open_start_ms),
-               (unsigned long)read_elapsed_ms,
-               (unsigned long)normalize_elapsed_ms,
-               (unsigned long)(ui_reading_detail_now_ms() - open_start_ms));
-
     return true;
 }
 
@@ -1118,9 +1247,6 @@ static void ui_reading_detail_request_async_load(void)
     ++s_reading_detail_request_id;
     s_reading_detail_load_state = UI_READING_DETAIL_LOAD_LOADING;
     s_reading_detail_completed_request_id = 0U;
-    rt_kprintf("reading_detail: request=%lu queued path=%s\n",
-               (unsigned long)s_reading_detail_request_id,
-               s_reading_detail_request_path[0] != '\0' ? s_reading_detail_request_path : "<none>");
     rt_sem_release(&s_reading_detail_load_sem);
 }
 
@@ -1227,13 +1353,6 @@ static bool ui_reading_detail_render_page(void)
     lv_obj_invalidate(s_reading_detail_refs.content_label);
     ui_reading_detail_refresh_page_label();
     ui_reading_detail_refresh_nav_buttons();
-    rt_kprintf("reading_detail: render page=%u ready_pages=%u known=%u chars=%lu text_len=%lu render_ms=%lu\n",
-               (unsigned int)(s_reading_detail_current_page + 1U),
-               (unsigned int)page_count,
-               has_last_page ? 1U : 0U,
-               (unsigned long)page_len,
-               (unsigned long)page_text_len,
-               (unsigned long)(ui_reading_detail_now_ms() - render_start_ms));
     return true;
 }
 
@@ -1336,9 +1455,6 @@ static void ui_reading_detail_next_page(void)
     }
     else
     {
-        rt_kprintf("reading_detail: next pending current=%u ready_pages=%u\n",
-                   (unsigned int)(s_reading_detail_current_page + 1U),
-                   (unsigned int)page_count);
     }
 }
 
@@ -1346,6 +1462,10 @@ static void ui_reading_detail_prev_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) == LV_EVENT_CLICKED)
     {
+        if (ui_reading_detail_settings_panel_visible())
+        {
+            return;
+        }
         ui_reading_detail_prev_page();
     }
 }
@@ -1354,6 +1474,10 @@ static void ui_reading_detail_next_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) == LV_EVENT_CLICKED)
     {
+        if (ui_reading_detail_settings_panel_visible())
+        {
+            return;
+        }
         ui_reading_detail_next_page();
     }
 }
@@ -1365,6 +1489,11 @@ static void ui_reading_detail_content_event_cb(lv_event_t *e)
     lv_indev_t *indev;
 
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    if (ui_reading_detail_settings_panel_visible())
     {
         return;
     }
@@ -1387,6 +1516,309 @@ static void ui_reading_detail_content_event_cb(lv_event_t *e)
     }
 }
 
+static bool ui_reading_detail_point_in_bottom_swipe_band(const lv_point_t *point)
+{
+    lv_coord_t screen_h;
+    lv_coord_t band_top;
+
+    if (point == NULL || ui_Reading_Detail == NULL)
+    {
+        return false;
+    }
+
+    screen_h = lv_obj_get_height(ui_Reading_Detail);
+    band_top = screen_h - ui_px_y(UI_READING_DETAIL_EDGE_SWIPE_START_BAND_H);
+    if (band_top < 0)
+    {
+        band_top = 0;
+    }
+
+    return point->y >= band_top;
+}
+
+static void ui_reading_detail_add_swipe_listener(lv_obj_t *obj)
+{
+    if (obj == NULL)
+    {
+        return;
+    }
+
+    lv_obj_add_event_cb(obj, ui_reading_detail_swipe_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(obj, ui_reading_detail_swipe_event_cb, LV_EVENT_PRESSING, NULL);
+    lv_obj_add_event_cb(obj, ui_reading_detail_swipe_event_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(obj, ui_reading_detail_swipe_event_cb, LV_EVENT_PRESS_LOST, NULL);
+}
+
+static void ui_reading_detail_swipe_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code;
+    lv_indev_t *indev;
+    lv_point_t point;
+    lv_coord_t dy;
+    lv_coord_t dx;
+
+    code = lv_event_get_code(e);
+    indev = lv_indev_active();
+    if (indev == NULL)
+    {
+        return;
+    }
+
+    lv_indev_get_point(indev, &point);
+
+    if (code == LV_EVENT_PRESSED)
+    {
+        s_reading_detail_swipe_tracking = false;
+        if (!ui_reading_detail_settings_panel_visible() &&
+            ui_reading_detail_point_in_bottom_swipe_band(&point))
+        {
+            s_reading_detail_swipe_start = point;
+            s_reading_detail_swipe_tracking = true;
+        }
+        return;
+    }
+
+    if (code == LV_EVENT_PRESSING && s_reading_detail_swipe_tracking)
+    {
+        dy = s_reading_detail_swipe_start.y - point.y;
+        dx = s_reading_detail_swipe_start.x - point.x;
+        if (dx < 0)
+        {
+            dx = (lv_coord_t)(-dx);
+        }
+
+        if (dy >= ui_px_y(UI_READING_DETAIL_SWIPE_TRIGGER_DISTANCE) &&
+            dx <= ui_px_x(UI_READING_DETAIL_SWIPE_MAX_X_DRIFT))
+        {
+            s_reading_detail_swipe_tracking = false;
+            ui_reading_detail_show_settings_panel();
+        }
+        return;
+    }
+
+    if ((code != LV_EVENT_RELEASED && code != LV_EVENT_PRESS_LOST) ||
+        !s_reading_detail_swipe_tracking)
+    {
+        return;
+    }
+
+    s_reading_detail_swipe_tracking = false;
+    dy = s_reading_detail_swipe_start.y - point.y;
+    dx = s_reading_detail_swipe_start.x - point.x;
+    if (dx < 0)
+    {
+        dx = (lv_coord_t)(-dx);
+    }
+
+    if (dy >= ui_px_y(UI_READING_DETAIL_SWIPE_TRIGGER_DISTANCE) &&
+        dx <= ui_px_x(UI_READING_DETAIL_SWIPE_MAX_X_DRIFT))
+    {
+        ui_reading_detail_show_settings_panel();
+    }
+}
+
+static void ui_reading_detail_settings_mask_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED)
+    {
+        ui_reading_detail_hide_settings_panel();
+    }
+}
+
+static void ui_reading_detail_settings_panel_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        lv_event_stop_bubbling(e);
+        return;
+    }
+
+    lv_event_stop_bubbling(e);
+}
+
+static void ui_reading_detail_font_minus_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    if (s_reading_detail_text_font_size <= UI_READING_DETAIL_TEXT_FONT_MIN)
+    {
+        return;
+    }
+
+    s_reading_detail_text_font_size =
+        (uint16_t)(s_reading_detail_text_font_size - UI_READING_DETAIL_TEXT_FONT_STEP);
+    if (s_reading_detail_text_font_size < UI_READING_DETAIL_TEXT_FONT_MIN)
+    {
+        s_reading_detail_text_font_size = UI_READING_DETAIL_TEXT_FONT_MIN;
+    }
+
+    ui_reading_detail_refresh_settings_labels();
+    ui_reading_detail_reflow_after_setting_change();
+}
+
+static void ui_reading_detail_font_plus_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    if (s_reading_detail_text_font_size >= UI_READING_DETAIL_TEXT_FONT_MAX)
+    {
+        return;
+    }
+
+    s_reading_detail_text_font_size =
+        (uint16_t)(s_reading_detail_text_font_size + UI_READING_DETAIL_TEXT_FONT_STEP);
+    if (s_reading_detail_text_font_size > UI_READING_DETAIL_TEXT_FONT_MAX)
+    {
+        s_reading_detail_text_font_size = UI_READING_DETAIL_TEXT_FONT_MAX;
+    }
+
+    ui_reading_detail_refresh_settings_labels();
+    ui_reading_detail_reflow_after_setting_change();
+}
+
+static void ui_reading_detail_line_space_minus_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    if (s_reading_detail_text_line_space <= UI_READING_DETAIL_TEXT_LINE_SPACE_MIN)
+    {
+        return;
+    }
+
+    s_reading_detail_text_line_space -= UI_READING_DETAIL_TEXT_LINE_SPACE_STEP;
+    if (s_reading_detail_text_line_space < UI_READING_DETAIL_TEXT_LINE_SPACE_MIN)
+    {
+        s_reading_detail_text_line_space = UI_READING_DETAIL_TEXT_LINE_SPACE_MIN;
+    }
+
+    ui_reading_detail_refresh_settings_labels();
+    ui_reading_detail_reflow_after_setting_change();
+}
+
+static void ui_reading_detail_line_space_plus_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    if (s_reading_detail_text_line_space >= UI_READING_DETAIL_TEXT_LINE_SPACE_MAX)
+    {
+        return;
+    }
+
+    s_reading_detail_text_line_space += UI_READING_DETAIL_TEXT_LINE_SPACE_STEP;
+    if (s_reading_detail_text_line_space > UI_READING_DETAIL_TEXT_LINE_SPACE_MAX)
+    {
+        s_reading_detail_text_line_space = UI_READING_DETAIL_TEXT_LINE_SPACE_MAX;
+    }
+
+    ui_reading_detail_refresh_settings_labels();
+    ui_reading_detail_reflow_after_setting_change();
+}
+
+static void ui_reading_detail_create_settings_panel(lv_obj_t *parent)
+{
+    lv_obj_t *mask;
+    lv_obj_t *panel;
+    lv_obj_t *top_border;
+    lv_obj_t *row;
+    lv_obj_t *button;
+    lv_obj_t *title_label;
+    int32_t panel_h;
+    int32_t panel_y;
+
+    if (parent == NULL)
+    {
+        return;
+    }
+
+    mask = lv_obj_create(parent);
+    s_reading_detail_refs.settings_mask = mask;
+    lv_obj_remove_style_all(mask);
+    lv_obj_set_pos(mask, 0, 0);
+    lv_obj_set_size(mask, lv_pct(100), lv_pct(100));
+    lv_obj_set_style_bg_opa(mask, LV_OPA_TRANSP, 0);
+    lv_obj_add_flag(mask, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(mask, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(mask, ui_reading_detail_settings_mask_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_move_foreground(mask);
+
+    panel_h = ui_px_y(UI_READING_DETAIL_SETTINGS_PANEL_H);
+    if (panel_h > (int32_t)lv_obj_get_height(parent))
+    {
+        panel_h = (int32_t)lv_obj_get_height(parent);
+    }
+    panel_y = (int32_t)lv_obj_get_height(parent) - panel_h;
+    if (panel_y < 0)
+    {
+        panel_y = 0;
+    }
+    panel = lv_obj_create(mask);
+    s_reading_detail_refs.settings_panel = panel;
+    lv_obj_remove_style_all(panel);
+    lv_obj_set_pos(panel, 0, panel_y);
+    lv_obj_set_size(panel, lv_pct(100), panel_h);
+    lv_obj_set_style_radius(panel, 0, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_border_side(panel, LV_BORDER_SIDE_NONE, 0);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(panel, ui_reading_detail_settings_panel_event_cb, LV_EVENT_CLICKED, NULL);
+
+    top_border = lv_obj_create(panel);
+    lv_obj_remove_style_all(top_border);
+    lv_obj_set_pos(top_border, 0, 0);
+    lv_obj_set_size(top_border, lv_pct(100), ui_px_h(2));
+    lv_obj_set_style_bg_color(top_border, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(top_border, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(top_border, LV_OBJ_FLAG_CLICKABLE);
+
+    title_label = ui_create_label(panel,
+                                  "阅读设置",
+                                  24,
+                                  20,
+                                  200,
+                                  28,
+                                  24,
+                                  LV_TEXT_ALIGN_LEFT,
+                                  false,
+                                  false);
+    lv_obj_set_style_bg_opa(title_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(title_label, lv_color_hex(0xFFFFFF), 0);
+
+    row = ui_create_card(panel, 24, 66, 480, 52, UI_SCREEN_NONE, false, 0);
+    ui_create_label(row, "字体尺寸", 16, 10, 120, 28, 21, LV_TEXT_ALIGN_LEFT, false, false);
+    button = ui_create_button(row, 236, 8, 48, 32, "-", 22, UI_SCREEN_NONE, false);
+    lv_obj_add_event_cb(button, ui_reading_detail_font_minus_event_cb, LV_EVENT_CLICKED, NULL);
+    s_reading_detail_refs.font_value_label =
+        ui_create_label(row, "", 292, 10, 52, 28, 21, LV_TEXT_ALIGN_CENTER, false, false);
+    button = ui_create_button(row, 352, 8, 48, 32, "+", 22, UI_SCREEN_NONE, true);
+    lv_obj_add_event_cb(button, ui_reading_detail_font_plus_event_cb, LV_EVENT_CLICKED, NULL);
+
+    row = ui_create_card(panel, 24, 132, 480, 52, UI_SCREEN_NONE, false, 0);
+    ui_create_label(row, "行间距", 16, 10, 120, 28, 21, LV_TEXT_ALIGN_LEFT, false, false);
+    button = ui_create_button(row, 236, 8, 48, 32, "-", 22, UI_SCREEN_NONE, false);
+    lv_obj_add_event_cb(button, ui_reading_detail_line_space_minus_event_cb, LV_EVENT_CLICKED, NULL);
+    s_reading_detail_refs.line_space_value_label =
+        ui_create_label(row, "", 292, 10, 52, 28, 21, LV_TEXT_ALIGN_CENTER, false, false);
+    button = ui_create_button(row, 352, 8, 48, 32, "+", 22, UI_SCREEN_NONE, true);
+    lv_obj_add_event_cb(button, ui_reading_detail_line_space_plus_event_cb, LV_EVENT_CLICKED, NULL);
+
+    ui_reading_detail_refresh_settings_labels();
+}
+
 void ui_Reading_Detail_screen_init(void)
 {
     ui_screen_scaffold_t page;
@@ -1407,7 +1839,6 @@ void ui_Reading_Detail_screen_init(void)
 
     ui_Reading_Detail = ui_create_screen_base();
     title = ui_reading_list_get_selected_name();
-    rt_kprintf("reading_detail: init title=%s\n", title);
     ui_build_standard_screen(&page, ui_Reading_Detail, title, UI_SCREEN_READING_LIST);
 
     reading_box = ui_create_card(page.content, 24, 12, 480, 572, UI_SCREEN_NONE, false, 0);
@@ -1419,7 +1850,7 @@ void ui_Reading_Detail_screen_init(void)
                                                           8,
                                                           UI_READING_DETAIL_TEXT_WIDTH,
                                                           UI_READING_DETAIL_TEXT_HEIGHT,
-                                                          UI_READING_DETAIL_TEXT_FONT,
+                                                          s_reading_detail_text_font_size,
                                                           LV_TEXT_ALIGN_LEFT,
                                                           false,
                                                           true);
@@ -1427,14 +1858,9 @@ void ui_Reading_Detail_screen_init(void)
     lv_obj_set_size(s_reading_detail_refs.content_label,
                     ui_px_w(UI_READING_DETAIL_TEXT_WIDTH),
                     ui_px_h(UI_READING_DETAIL_TEXT_HEIGHT));
-    lv_obj_set_style_text_font(s_reading_detail_refs.content_label,
-                               ui_reading_detail_get_text_font(),
-                               0);
+    ui_reading_detail_apply_text_style();
     lv_obj_set_style_text_align(s_reading_detail_refs.content_label, LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_set_style_pad_all(s_reading_detail_refs.content_label, 0, 0);
-    lv_obj_set_style_text_line_space(s_reading_detail_refs.content_label,
-                                     ui_px_y(UI_READING_DETAIL_TEXT_LINE_SPACE),
-                                     0);
     s_reading_detail_refs.content_image = lv_image_create(reading_box);
     lv_obj_set_pos(s_reading_detail_refs.content_image, 10, 8);
     lv_obj_set_size(s_reading_detail_refs.content_image,
@@ -1458,6 +1884,16 @@ void ui_Reading_Detail_screen_init(void)
     s_reading_detail_refs.next_button = ui_create_button(page.content, 329, 603, 175, 40, "下一页", 20, UI_SCREEN_NONE, true);
     lv_obj_add_event_cb(s_reading_detail_refs.prev_button, ui_reading_detail_prev_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_reading_detail_refs.next_button, ui_reading_detail_next_event_cb, LV_EVENT_CLICKED, NULL);
+
+    ui_reading_detail_add_swipe_listener(ui_Reading_Detail);
+    ui_reading_detail_add_swipe_listener(page.content);
+    ui_reading_detail_add_swipe_listener(reading_box);
+    ui_reading_detail_add_swipe_listener(s_reading_detail_refs.page_label);
+    ui_reading_detail_add_swipe_listener(s_reading_detail_refs.prev_button);
+    ui_reading_detail_add_swipe_listener(s_reading_detail_refs.next_button);
+    ui_reading_detail_add_swipe_listener(s_reading_detail_refs.content_label);
+    ui_reading_detail_add_swipe_listener(s_reading_detail_refs.content_image);
+    ui_reading_detail_create_settings_panel(ui_Reading_Detail);
 
     if (ui_reading_detail_is_selected_ready())
     {
@@ -1520,4 +1956,9 @@ void ui_Reading_Detail_screen_destroy(void)
     ++s_reading_detail_request_id;
     s_reading_detail_load_state = UI_READING_DETAIL_LOAD_IDLE;
     s_reading_detail_completed_request_id = 0U;
+    s_reading_detail_swipe_tracking = false;
+    s_reading_detail_refs.settings_mask = NULL;
+    s_reading_detail_refs.settings_panel = NULL;
+    s_reading_detail_refs.font_value_label = NULL;
+    s_reading_detail_refs.line_space_value_label = NULL;
 }
