@@ -8,8 +8,10 @@
 #include "lv_tiny_ttf.h"
 #include "rtdevice.h"
 #include "ui_runtime_adapter.h"
+#include "../xiaozhi/weather/weather.h"
 
 #define LCD_DEVICE_NAME "lcd"
+#define LCD_BACKLIGHT_DEVICE_NAME "lcdlight"
 #define UI_STANDARD_NAV_FONT_SIZE 28
 #define UI_STATUS_BAR_HEIGHT 68
 #define UI_STATUS_BAR_CALENDAR_TOUCH_W 320
@@ -32,6 +34,12 @@ typedef enum
     UI_STATUS_SLIDER_BRIGHTNESS = 0,
     UI_STATUS_SLIDER_VOLUME,
 } ui_status_slider_kind_t;
+
+typedef enum
+{
+    UI_STATUS_TOGGLE_BLUETOOTH = 0,
+    UI_STATUS_TOGGLE_NETWORK,
+} ui_status_toggle_kind_t;
 
 extern const lv_image_dsc_t ble_icon_img;
 extern const unsigned char xiaozhi_font[];
@@ -60,6 +68,7 @@ typedef struct
 typedef struct
 {
     rt_device_t lcd_device;
+    rt_device_t lcd_backlight_device;
     lv_timer_t *sync_timer;
     lv_timer_t *toast_timer;
     lv_obj_t *host_screen;
@@ -82,8 +91,11 @@ typedef struct
     lv_obj_t *bluetooth_card;
     lv_obj_t *bluetooth_title_label;
     lv_obj_t *bluetooth_subtitle_label;
+    lv_obj_t *bluetooth_value_label;
     lv_obj_t *network_card;
+    lv_obj_t *network_title_label;
     lv_obj_t *network_subtitle_label;
+    lv_obj_t *network_value_label;
     uint8_t brightness_steps;
     uint8_t volume_steps;
     bool charging;
@@ -91,6 +103,10 @@ typedef struct
     bool waiting_requested;
     bool suppress_connected_state;
     bool last_bt_connected;
+    bool bluetooth_enabled;
+    bool network_enabled;
+    bool bluetooth_toggle_initialized;
+    bool network_toggle_initialized;
     rt_tick_t last_input_tick;
 } ui_status_panel_state_t;
 
@@ -99,6 +115,7 @@ static ui_screen_refs_entry_t s_screen_refs[UI_SCREEN_COUNT];
 static bool s_ui_helpers_initialized = false;
 static lv_coord_t s_screen_width = UI_FIGMA_WIDTH;
 static lv_coord_t s_screen_height = UI_FIGMA_HEIGHT;
+static lv_timer_t *s_status_bar_time_timer = NULL;
 static const size_t UI_TINY_TTF_GLYPH_CACHE_COUNT = 32U;
 static ui_status_panel_state_t s_status_panel = {0};
 static volatile int s_status_pending_brightness = -1;
@@ -126,6 +143,11 @@ static bool ui_accept_navigation_interaction(void);
 static bool ui_status_detail_is_active(void);
 static void ui_status_detail_reload_async_cb(void *user_data);
 static void ui_status_refresh_connection_icons(bool force);
+static void ui_status_bar_refresh_datetime(void);
+static void ui_status_bar_time_timer_cb(lv_timer_t *timer);
+static void ui_status_bar_schedule_next_minute_refresh(void);
+static bool ui_status_backlight_read(uint8_t *brightness);
+static void ui_status_backlight_write(uint8_t brightness);
 
 static bool ui_bt_connection_active(void)
 {
@@ -140,6 +162,183 @@ static bool ui_bt_pairing_enabled(void)
 static bool ui_bt_network_ready(void)
 {
     return false;
+}
+
+static void ui_status_bar_schedule_next_minute_refresh(void)
+{
+    date_time_t current_time;
+    uint32_t delay_ms = 60000U;
+
+    if (s_status_bar_time_timer == NULL)
+    {
+        return;
+    }
+
+    if (xiaozhi_time_get_current(&current_time) == RT_EOK)
+    {
+        int second = current_time.second;
+
+        if (second < 0)
+        {
+            second = 0;
+        }
+        if (second > 59)
+        {
+            second = 59;
+        }
+
+        delay_ms = (uint32_t)(60 - second) * 1000U;
+        if (delay_ms == 0U)
+        {
+            delay_ms = 60000U;
+        }
+    }
+
+    lv_timer_set_period(s_status_bar_time_timer, delay_ms);
+    lv_timer_resume(s_status_bar_time_timer);
+    lv_timer_reset(s_status_bar_time_timer);
+}
+
+static void ui_status_bar_refresh_datetime(void)
+{
+    static int last_year = -1;
+    static int last_month = -1;
+    static int last_day = -1;
+    static int last_hour = -1;
+    static int last_minute = -1;
+    static int last_temperature = INT32_MIN;
+    date_time_t current_time;
+    weather_info_t current_weather = {0};
+    bool weather_available = false;
+    char time_text[16];
+    char meta_text[48];
+    size_t i;
+
+    if (xiaozhi_time_get_current(&current_time) != RT_EOK)
+    {
+        ui_status_bar_schedule_next_minute_refresh();
+        return;
+    }
+
+    if (xiaozhi_weather_get(&current_weather) == RT_EOK && current_weather.last_update > 0)
+    {
+        weather_available = true;
+    }
+
+    if (current_time.year == last_year &&
+        current_time.month == last_month &&
+        current_time.day == last_day &&
+        current_time.hour == last_hour &&
+        current_time.minute == last_minute &&
+        (!weather_available || current_weather.temperature == last_temperature))
+    {
+        ui_status_bar_schedule_next_minute_refresh();
+        return;
+    }
+
+    last_year = current_time.year;
+    last_month = current_time.month;
+    last_day = current_time.day;
+    last_hour = current_time.hour;
+    last_minute = current_time.minute;
+    last_temperature = weather_available ? current_weather.temperature : INT32_MIN;
+
+    rt_snprintf(time_text,
+                sizeof(time_text),
+                "%02d:%02d",
+                current_time.hour,
+                current_time.minute);
+
+    if (weather_available)
+    {
+        rt_snprintf(meta_text,
+                    sizeof(meta_text),
+                    "%04d/%02d/%02d\n%s %d°C",
+                    current_time.year,
+                    current_time.month,
+                    current_time.day,
+                    current_time.weekday_str[0] != '\0' ? current_time.weekday_str : "周?",
+                    current_weather.temperature);
+    }
+    else
+    {
+        rt_snprintf(meta_text,
+                    sizeof(meta_text),
+                    "%04d/%02d/%02d\n%s",
+                    current_time.year,
+                    current_time.month,
+                    current_time.day,
+                    current_time.weekday_str[0] != '\0' ? current_time.weekday_str : "周?");
+    }
+
+    for (i = 0; i < sizeof(s_screen_refs) / sizeof(s_screen_refs[0]); ++i)
+    {
+        xiaozhi_home_screen_refs_t *refs = &s_screen_refs[i].refs;
+
+        if (!s_screen_refs[i].used)
+        {
+            continue;
+        }
+
+        if (refs->time_label != NULL)
+        {
+            lv_label_set_text(refs->time_label, time_text);
+        }
+
+        if (refs->meta_label != NULL)
+        {
+            lv_label_set_text(refs->meta_label, meta_text);
+        }
+    }
+
+    ui_status_bar_schedule_next_minute_refresh();
+}
+
+static void ui_status_bar_time_timer_cb(lv_timer_t *timer)
+{
+    LV_UNUSED(timer);
+    ui_status_bar_refresh_datetime();
+}
+
+static bool ui_status_backlight_read(uint8_t *brightness)
+{
+    rt_size_t read_size;
+
+    if (brightness == NULL)
+    {
+        return false;
+    }
+
+    if (s_status_panel.lcd_backlight_device == RT_NULL)
+    {
+        s_status_panel.lcd_backlight_device = rt_device_find(LCD_BACKLIGHT_DEVICE_NAME);
+    }
+
+    if (s_status_panel.lcd_backlight_device == RT_NULL)
+    {
+        return false;
+    }
+
+    read_size = rt_device_read(s_status_panel.lcd_backlight_device, 0, brightness, 1);
+    return read_size == 1;
+}
+
+static void ui_status_backlight_write(uint8_t brightness)
+{
+    if (brightness > 100U)
+    {
+        brightness = 100U;
+    }
+
+    if (s_status_panel.lcd_backlight_device == RT_NULL)
+    {
+        s_status_panel.lcd_backlight_device = rt_device_find(LCD_BACKLIGHT_DEVICE_NAME);
+    }
+
+    if (s_status_panel.lcd_backlight_device != RT_NULL)
+    {
+        rt_device_write(s_status_panel.lcd_backlight_device, 0, &brightness, 1);
+    }
 }
 
 static lv_font_t *ui_font_cache_get(ui_font_cache_entry_t *cache,
@@ -501,14 +700,10 @@ static void ui_status_update_slider_visual(lv_obj_t *track,
                                            uint8_t max_step,
                                            uint8_t current_step)
 {
-    int32_t span;
     int32_t track_w;
-    int32_t knob_w;
-    int32_t usable_w;
-    int32_t knob_x = 0;
     int32_t fill_w;
 
-    if (track == NULL || fill == NULL || knob == NULL)
+    if (track == NULL || fill == NULL)
     {
         return;
     }
@@ -523,23 +718,21 @@ static void ui_status_update_slider_visual(lv_obj_t *track,
     }
 
     track_w = lv_obj_get_width(track);
-    knob_w = lv_obj_get_width(knob);
-    usable_w = track_w - knob_w;
-    if (usable_w < 0)
+    if ((max_step > min_step) && (track_w > 0))
     {
-        usable_w = 0;
+        int32_t numerator = (int32_t)(current_step - min_step) * track_w;
+        int32_t denominator = (int32_t)(max_step - min_step);
+
+        fill_w = (numerator + denominator / 2) / denominator;
+    }
+    else
+    {
+        fill_w = track_w;
     }
 
-    span = (int32_t)(max_step - min_step);
-    if (span > 0)
+    if (fill_w < 0)
     {
-        knob_x = ((int32_t)(current_step - min_step) * usable_w + span / 2) / span;
-    }
-
-    fill_w = knob_x + knob_w / 2;
-    if (fill_w < knob_w / 2)
-    {
-        fill_w = knob_w / 2;
+        fill_w = 0;
     }
     if (fill_w > track_w)
     {
@@ -547,8 +740,10 @@ static void ui_status_update_slider_visual(lv_obj_t *track,
     }
 
     lv_obj_set_width(fill, fill_w);
-    lv_obj_set_x(knob, lv_obj_get_x(track) + knob_x);
-    lv_obj_set_y(knob, lv_obj_get_y(track) - ui_px_y(1));
+    if (knob != NULL)
+    {
+        lv_obj_add_flag(knob, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 static bool ui_status_accept_interaction(void)
@@ -563,6 +758,20 @@ static void ui_status_update_panel_visuals(void)
     ui_status_bluetooth_state_t bt_state = ui_status_get_bluetooth_state();
     bool bt_pairing_enabled = ui_bt_pairing_enabled();
     bool network_ready = ui_bt_network_ready();
+    const char *bt_subtitle;
+    const char *network_subtitle;
+
+    if (!s_status_panel.bluetooth_toggle_initialized)
+    {
+        s_status_panel.bluetooth_enabled = (bt_state != UI_STATUS_BLUETOOTH_DISCONNECTED) || bt_pairing_enabled;
+        s_status_panel.bluetooth_toggle_initialized = true;
+    }
+
+    if (!s_status_panel.network_toggle_initialized)
+    {
+        s_status_panel.network_enabled = network_ready;
+        s_status_panel.network_toggle_initialized = true;
+    }
 
     if (s_status_panel.brightness_value_label != NULL)
     {
@@ -591,48 +800,53 @@ static void ui_status_update_panel_visuals(void)
 
     if (s_status_panel.bluetooth_card != NULL)
     {
-        bool filled = bt_state != UI_STATUS_BLUETOOTH_DISCONNECTED;
-
-        LV_UNUSED(filled);
         ui_apply_basic_object_style(s_status_panel.bluetooth_card, false, 0, 2);
 
         if (s_status_panel.bluetooth_title_label != NULL)
         {
-            lv_obj_set_style_text_color(s_status_panel.bluetooth_title_label,
-                                        lv_color_hex(0x000000),
-                                        0);
+            lv_label_set_text(s_status_panel.bluetooth_title_label, "蓝牙");
         }
         if (s_status_panel.bluetooth_subtitle_label != NULL)
         {
-            lv_obj_set_style_text_color(s_status_panel.bluetooth_subtitle_label,
-                                        lv_color_hex(0x000000),
-                                        0);
+            switch (bt_state)
+            {
+            case UI_STATUS_BLUETOOTH_CONNECTED:
+                bt_subtitle = "已连接";
+                break;
+            case UI_STATUS_BLUETOOTH_WAITING:
+                bt_subtitle = "连接中";
+                break;
+            default:
+                bt_subtitle = bt_pairing_enabled ? "已开启" : "未开启";
+                break;
+            }
+            lv_label_set_text(s_status_panel.bluetooth_subtitle_label, bt_subtitle);
         }
-
-        switch (bt_state)
+        if (s_status_panel.bluetooth_value_label != NULL)
         {
-        case UI_STATUS_BLUETOOTH_CONNECTED:
-            lv_label_set_text(s_status_panel.bluetooth_title_label, "蓝牙");
-            lv_label_set_text(s_status_panel.bluetooth_subtitle_label, "已连接");
-            break;
-        case UI_STATUS_BLUETOOTH_WAITING:
-            lv_label_set_text(s_status_panel.bluetooth_title_label, "蓝牙连接中");
-            lv_label_set_text(s_status_panel.bluetooth_subtitle_label, "请在手机里找到设备并连接");
-            break;
-        default:
-            lv_label_set_text(s_status_panel.bluetooth_title_label,
-                              bt_pairing_enabled ? "蓝牙已开启" : "蓝牙未启用");
-            lv_label_set_text(s_status_panel.bluetooth_subtitle_label,
-                              bt_pairing_enabled ? "当前固件未托管连接流程"
-                                                 : "当前固件仅保留 BLE 初始化");
-            break;
+            lv_label_set_text(s_status_panel.bluetooth_value_label,
+                              s_status_panel.bluetooth_enabled ? "开" : "关");
         }
     }
 
-    if (s_status_panel.network_subtitle_label != NULL)
+    if (s_status_panel.network_card != NULL)
     {
-        lv_label_set_text(s_status_panel.network_subtitle_label,
-                          network_ready ? "已联网" : "未联网");
+        ui_apply_basic_object_style(s_status_panel.network_card, false, 0, 2);
+
+        if (s_status_panel.network_title_label != NULL)
+        {
+            lv_label_set_text(s_status_panel.network_title_label, "4G");
+        }
+        if (s_status_panel.network_subtitle_label != NULL)
+        {
+            network_subtitle = network_ready ? "已联网" : "未联网";
+            lv_label_set_text(s_status_panel.network_subtitle_label, network_subtitle);
+        }
+        if (s_status_panel.network_value_label != NULL)
+        {
+            lv_label_set_text(s_status_panel.network_value_label,
+                              s_status_panel.network_enabled ? "开" : "关");
+        }
     }
 }
 
@@ -716,7 +930,7 @@ static void ui_status_sync_timer_cb(lv_timer_t *timer)
         s_status_panel.lcd_device = rt_device_find(LCD_DEVICE_NAME);
     }
 
-    if (s_status_panel.lcd_device != RT_NULL)
+    if (!ui_status_backlight_read(&brightness) && s_status_panel.lcd_device != RT_NULL)
     {
         rt_device_control(s_status_panel.lcd_device, RTGRAPHIC_CTRL_GET_BRIGHTNESS, &brightness);
     }
@@ -839,9 +1053,9 @@ static void ui_status_detail_reload_async_cb(void *user_data)
     s_status_detail_reload_pending = false;
 }
 
-static void ui_status_bluetooth_card_event_cb(lv_event_t *e)
+static void ui_status_toggle_card_event_cb(lv_event_t *e)
 {
-    ui_status_bluetooth_state_t bt_state;
+    ui_status_toggle_kind_t kind = (ui_status_toggle_kind_t)(uintptr_t)lv_event_get_user_data(e);
 
     if (lv_event_get_code(e) != LV_EVENT_RELEASED)
     {
@@ -852,14 +1066,18 @@ static void ui_status_bluetooth_card_event_cb(lv_event_t *e)
         return;
     }
 
-    bt_state = ui_status_get_bluetooth_state();
-    if (bt_state == UI_STATUS_BLUETOOTH_DISCONNECTED)
+    if (kind == UI_STATUS_TOGGLE_BLUETOOTH)
     {
-        ui_status_show_toast("当前固件仅保留 BLE 初始化");
-        return;
+        s_status_panel.bluetooth_enabled = !s_status_panel.bluetooth_enabled;
+        s_status_panel.bluetooth_toggle_initialized = true;
+    }
+    else
+    {
+        s_status_panel.network_enabled = !s_status_panel.network_enabled;
+        s_status_panel.network_toggle_initialized = true;
     }
 
-    ui_status_show_toast("蓝牙连接管理已移除");
+    ui_status_update_panel_visuals();
 }
 
 static lv_obj_t *ui_status_create_touch_zone(lv_obj_t *parent,
@@ -896,7 +1114,7 @@ static uint8_t ui_status_slider_step_from_touch(lv_obj_t *zone,
     lv_point_t point;
     int32_t width;
     int32_t rel_x;
-    int32_t slot_count;
+    int32_t range;
     int32_t step;
 
     if (zone == NULL || indev == NULL)
@@ -922,8 +1140,13 @@ static uint8_t ui_status_slider_step_from_touch(lv_obj_t *zone,
         rel_x = width - 1;
     }
 
-    slot_count = (int32_t)(max_step - min_step + 1U);
-    step = (rel_x * slot_count) / width + min_step;
+    range = (int32_t)(max_step - min_step);
+    if (range <= 0)
+    {
+        return min_step;
+    }
+
+    step = (rel_x * range + width / 2) / width + min_step;
     if (step > max_step)
     {
         step = max_step;
@@ -938,12 +1161,17 @@ static void ui_status_slider_event_cb(lv_event_t *e)
     ui_status_slider_kind_t kind = (ui_status_slider_kind_t)(uintptr_t)lv_event_get_user_data(e);
     lv_indev_t *indev = lv_event_get_indev(e);
     uint8_t value;
+    lv_event_code_t code = lv_event_get_code(e);
 
-    if (lv_event_get_code(e) != LV_EVENT_RELEASED || slider == NULL || indev == NULL)
+    if ((code != LV_EVENT_PRESSED) &&
+        (code != LV_EVENT_PRESSING) &&
+        (code != LV_EVENT_RELEASED) &&
+        (code != LV_EVENT_CLICKED))
     {
         return;
     }
-    if (!ui_status_accept_interaction())
+
+    if (slider == NULL || indev == NULL)
     {
         return;
     }
@@ -951,18 +1179,33 @@ static void ui_status_slider_event_cb(lv_event_t *e)
     if (kind == UI_STATUS_SLIDER_BRIGHTNESS)
     {
         uint8_t actual;
+        bool wrote_backlight;
 
         value = ui_status_slider_step_from_touch(slider, indev, 1U, 5U);
         actual = ui_status_steps_to_brightness(value);
         s_status_panel.brightness_steps = value;
         s_status_pending_brightness = actual;
-        if (s_status_panel.lcd_device == RT_NULL)
+        wrote_backlight = false;
+        if (s_status_panel.lcd_backlight_device == RT_NULL)
         {
-            s_status_panel.lcd_device = rt_device_find(LCD_DEVICE_NAME);
+            s_status_panel.lcd_backlight_device = rt_device_find(LCD_BACKLIGHT_DEVICE_NAME);
         }
-        if (s_status_panel.lcd_device != RT_NULL)
+        if (s_status_panel.lcd_backlight_device != RT_NULL)
         {
-            rt_device_control(s_status_panel.lcd_device, RTGRAPHIC_CTRL_SET_BRIGHTNESS, &actual);
+            ui_status_backlight_write(actual);
+            wrote_backlight = true;
+        }
+
+        if (!wrote_backlight)
+        {
+            if (s_status_panel.lcd_device == RT_NULL)
+            {
+                s_status_panel.lcd_device = rt_device_find(LCD_DEVICE_NAME);
+            }
+            if (s_status_panel.lcd_device != RT_NULL)
+            {
+                rt_device_control(s_status_panel.lcd_device, RTGRAPHIC_CTRL_SET_BRIGHTNESS, &actual);
+            }
         }
     }
     else
@@ -999,6 +1242,7 @@ static void ui_status_mask_event_cb(lv_event_t *e)
 static void ui_status_root_delete_event_cb(lv_event_t *e)
 {
     rt_device_t lcd_device;
+    rt_device_t lcd_backlight_device;
     lv_timer_t *sync_timer;
     lv_timer_t *toast_timer;
     uint8_t brightness_steps;
@@ -1008,6 +1252,10 @@ static void ui_status_root_delete_event_cb(lv_event_t *e)
     bool waiting_requested;
     bool suppress_connected_state;
     bool last_bt_connected;
+    bool bluetooth_enabled;
+    bool network_enabled;
+    bool bluetooth_toggle_initialized;
+    bool network_toggle_initialized;
 
     if (lv_event_get_target_obj(e) != s_status_panel.root)
     {
@@ -1015,6 +1263,7 @@ static void ui_status_root_delete_event_cb(lv_event_t *e)
     }
 
     lcd_device = s_status_panel.lcd_device;
+    lcd_backlight_device = s_status_panel.lcd_backlight_device;
     sync_timer = s_status_panel.sync_timer;
     toast_timer = s_status_panel.toast_timer;
     brightness_steps = s_status_panel.brightness_steps;
@@ -1024,9 +1273,14 @@ static void ui_status_root_delete_event_cb(lv_event_t *e)
     waiting_requested = s_status_panel.waiting_requested;
     suppress_connected_state = s_status_panel.suppress_connected_state;
     last_bt_connected = s_status_panel.last_bt_connected;
+    bluetooth_enabled = s_status_panel.bluetooth_enabled;
+    network_enabled = s_status_panel.network_enabled;
+    bluetooth_toggle_initialized = s_status_panel.bluetooth_toggle_initialized;
+    network_toggle_initialized = s_status_panel.network_toggle_initialized;
 
     memset(&s_status_panel, 0, sizeof(s_status_panel));
     s_status_panel.lcd_device = lcd_device;
+    s_status_panel.lcd_backlight_device = lcd_backlight_device;
     s_status_panel.sync_timer = sync_timer;
     s_status_panel.toast_timer = toast_timer;
     s_status_panel.brightness_steps = brightness_steps;
@@ -1036,9 +1290,14 @@ static void ui_status_root_delete_event_cb(lv_event_t *e)
     s_status_panel.waiting_requested = waiting_requested;
     s_status_panel.suppress_connected_state = suppress_connected_state;
     s_status_panel.last_bt_connected = last_bt_connected;
+    s_status_panel.bluetooth_enabled = bluetooth_enabled;
+    s_status_panel.network_enabled = network_enabled;
+    s_status_panel.bluetooth_toggle_initialized = bluetooth_toggle_initialized;
+    s_status_panel.network_toggle_initialized = network_toggle_initialized;
 }
 
 static void ui_status_preserve_runtime_state(rt_device_t *lcd_device,
+                                             rt_device_t *lcd_backlight_device,
                                              lv_timer_t **sync_timer,
                                              lv_timer_t **toast_timer,
                                              uint8_t *brightness_steps,
@@ -1047,9 +1306,14 @@ static void ui_status_preserve_runtime_state(rt_device_t *lcd_device,
                                              bool *confirm_visible,
                                              bool *waiting_requested,
                                              bool *suppress_connected_state,
-                                             bool *last_bt_connected)
+                                             bool *last_bt_connected,
+                                             bool *bluetooth_enabled,
+                                             bool *network_enabled,
+                                             bool *bluetooth_toggle_initialized,
+                                             bool *network_toggle_initialized)
 {
     if (lcd_device != NULL) *lcd_device = s_status_panel.lcd_device;
+    if (lcd_backlight_device != NULL) *lcd_backlight_device = s_status_panel.lcd_backlight_device;
     if (sync_timer != NULL) *sync_timer = s_status_panel.sync_timer;
     if (toast_timer != NULL) *toast_timer = s_status_panel.toast_timer;
     if (brightness_steps != NULL) *brightness_steps = s_status_panel.brightness_steps;
@@ -1059,9 +1323,14 @@ static void ui_status_preserve_runtime_state(rt_device_t *lcd_device,
     if (waiting_requested != NULL) *waiting_requested = s_status_panel.waiting_requested;
     if (suppress_connected_state != NULL) *suppress_connected_state = s_status_panel.suppress_connected_state;
     if (last_bt_connected != NULL) *last_bt_connected = s_status_panel.last_bt_connected;
+    if (bluetooth_enabled != NULL) *bluetooth_enabled = s_status_panel.bluetooth_enabled;
+    if (network_enabled != NULL) *network_enabled = s_status_panel.network_enabled;
+    if (bluetooth_toggle_initialized != NULL) *bluetooth_toggle_initialized = s_status_panel.bluetooth_toggle_initialized;
+    if (network_toggle_initialized != NULL) *network_toggle_initialized = s_status_panel.network_toggle_initialized;
 }
 
 static void ui_status_restore_runtime_state(rt_device_t lcd_device,
+                                            rt_device_t lcd_backlight_device,
                                             lv_timer_t *sync_timer,
                                             lv_timer_t *toast_timer,
                                             uint8_t brightness_steps,
@@ -1070,10 +1339,15 @@ static void ui_status_restore_runtime_state(rt_device_t lcd_device,
                                             bool confirm_visible,
                                             bool waiting_requested,
                                             bool suppress_connected_state,
-                                            bool last_bt_connected)
+                                            bool last_bt_connected,
+                                            bool bluetooth_enabled,
+                                            bool network_enabled,
+                                            bool bluetooth_toggle_initialized,
+                                            bool network_toggle_initialized)
 {
     memset(&s_status_panel, 0, sizeof(s_status_panel));
     s_status_panel.lcd_device = lcd_device;
+    s_status_panel.lcd_backlight_device = lcd_backlight_device;
     s_status_panel.sync_timer = sync_timer;
     s_status_panel.toast_timer = toast_timer;
     s_status_panel.brightness_steps = brightness_steps;
@@ -1083,6 +1357,10 @@ static void ui_status_restore_runtime_state(rt_device_t lcd_device,
     s_status_panel.waiting_requested = waiting_requested;
     s_status_panel.suppress_connected_state = suppress_connected_state;
     s_status_panel.last_bt_connected = last_bt_connected;
+    s_status_panel.bluetooth_enabled = bluetooth_enabled;
+    s_status_panel.network_enabled = network_enabled;
+    s_status_panel.bluetooth_toggle_initialized = bluetooth_toggle_initialized;
+    s_status_panel.network_toggle_initialized = network_toggle_initialized;
 }
 
 static void ui_status_create_slider_visual(lv_obj_t *parent,
@@ -1096,45 +1374,49 @@ static void ui_status_create_slider_visual(lv_obj_t *parent,
 {
     lv_obj_t *track;
     lv_obj_t *fill;
-    lv_obj_t *knob;
+    const lv_coord_t track_h = ui_px_h(12);
 
     track = lv_obj_create(parent);
-    ui_apply_basic_object_style(track, false, ui_px_h(9), 2);
+    ui_apply_basic_object_style(track, false, ui_px_h(6), 2);
     lv_obj_set_pos(track, ui_px_x(x), ui_px_y(y));
-    lv_obj_set_size(track, ui_px_w(w), ui_px_h(18));
+    lv_obj_set_size(track, ui_px_w(w), track_h);
+    lv_obj_clear_flag(track, LV_OBJ_FLAG_CLICKABLE);
 
     fill = lv_obj_create(track);
-    ui_apply_basic_object_style(fill, true, ui_px_h(7), 0);
+    ui_apply_basic_object_style(fill, true, ui_px_h(6), 0);
     lv_obj_set_pos(fill, 0, 0);
-    lv_obj_set_size(fill, ui_px_w(10), ui_px_h(18));
-
-    knob = lv_obj_create(parent);
-    ui_apply_basic_object_style(knob, true, ui_px_h(10), 0);
-    lv_obj_set_pos(knob, ui_px_x(x), ui_px_y(y - 1));
-    lv_obj_set_size(knob, ui_px_w(20), ui_px_h(20));
+    lv_obj_set_size(fill, ui_px_w(10), track_h);
+    lv_obj_clear_flag(fill, LV_OBJ_FLAG_CLICKABLE);
 
     if (kind == UI_STATUS_SLIDER_BRIGHTNESS)
     {
         s_status_panel.brightness_track = track;
         s_status_panel.brightness_fill = fill;
-        s_status_panel.brightness_knob = knob;
+        s_status_panel.brightness_knob = NULL;
     }
     else
     {
         s_status_panel.volume_track = track;
         s_status_panel.volume_fill = fill;
-        s_status_panel.volume_knob = knob;
+        s_status_panel.volume_knob = NULL;
     }
 
-    ui_status_update_slider_visual(track, fill, knob, min_step, max_step, current_step);
+    ui_status_update_slider_visual(track, fill, NULL, min_step, max_step, current_step);
 
-    LV_UNUSED(ui_status_create_touch_zone(parent,
-                                          x,
-                                          y - 10,
-                                          w,
-                                          40,
-                                          ui_status_slider_event_cb,
-                                          (void *)(uintptr_t)kind));
+    {
+        lv_obj_t *touch_zone = ui_status_create_touch_zone(parent,
+                                                           x,
+                                                           y - 14,
+                                                           w,
+                                                           44,
+                                                           NULL,
+                                                           NULL);
+        lv_obj_add_event_cb(touch_zone, ui_status_slider_event_cb, LV_EVENT_PRESSED, (void *)(uintptr_t)kind);
+        lv_obj_add_event_cb(touch_zone, ui_status_slider_event_cb, LV_EVENT_PRESSING, (void *)(uintptr_t)kind);
+        lv_obj_add_event_cb(touch_zone, ui_status_slider_event_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)kind);
+        lv_obj_add_event_cb(touch_zone, ui_status_slider_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)kind);
+        lv_obj_move_foreground(touch_zone);
+    }
 }
 
 static void ui_status_build_panel_widgets(lv_obj_t *root,
@@ -1144,21 +1426,15 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                                           int32_t panel_w)
 {
     lv_obj_t *panel;
-    lv_obj_t *slider_box;
     lv_obj_t *line;
-    lv_obj_t *label;
-    lv_obj_t *button;
     lv_obj_t *touch_zone;
     int32_t inner_x;
     int32_t inner_w;
+    int32_t value_x;
     int32_t slider_w;
     int32_t status_gap;
     int32_t status_card_w;
     int32_t status_right_x;
-    int32_t toast_w;
-    int32_t toast_x;
-    int32_t confirm_w;
-    int32_t confirm_x;
 
     if (root == NULL || parent == NULL)
     {
@@ -1168,27 +1444,37 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
     panel = lv_obj_create(parent);
     s_status_panel.panel = panel;
     ui_apply_basic_object_style(panel, false, 0, 2);
+    lv_obj_set_style_border_side(panel,
+                                 LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_RIGHT | LV_BORDER_SIDE_BOTTOM,
+                                 0);
     lv_obj_set_pos(panel, ui_px_x(panel_x), ui_px_y(panel_y));
-    lv_obj_set_size(panel, ui_px_w(panel_w), ui_px_h(316));
-    inner_x = 22;
+    lv_obj_set_size(panel, ui_px_w(panel_w), ui_px_h(314));
+    inner_x = 18;
     inner_w = panel_w - (inner_x * 2);
-    slider_w = inner_w - 72;
-    status_gap = 14;
+    value_x = inner_x + inner_w - 92;
+    slider_w = inner_w;
+    status_gap = 12;
     status_card_w = (inner_w - status_gap) / 2;
     status_right_x = inner_x + status_card_w + status_gap;
-    toast_w = 418;
-    toast_x = (int32_t)(s_screen_width - toast_w) / 2;
-    confirm_w = 310;
-    confirm_x = (int32_t)(s_screen_width - confirm_w) / 2;
 
     ui_create_label(panel,
-                    "快捷状态",
-                    22,
-                    18,
-                    160,
+                    "设备控制",
+                    inner_x,
+                    16,
+                    180,
                     28,
                     24,
                     LV_TEXT_ALIGN_LEFT,
+                    false,
+                    false);
+    ui_create_label(panel,
+                    "亮度、音量、蓝牙和 4G",
+                    panel_w - 220,
+                    18,
+                    202,
+                    24,
+                    16,
+                    LV_TEXT_ALIGN_RIGHT,
                     false,
                     false);
 
@@ -1197,183 +1483,151 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
     lv_obj_set_pos(line, ui_px_x(inner_x), ui_px_y(52));
     lv_obj_set_size(line, ui_px_w(inner_w), ui_px_h(2));
 
-    slider_box = ui_create_card(panel, inner_x, 70, inner_w, 144, UI_SCREEN_NONE, false, 0);
-
-    ui_create_label(slider_box,
+    ui_create_label(panel,
                     "屏幕亮度",
-                    18,
-                    18,
+                    inner_x,
+                    74,
                     160,
                     28,
                     21,
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     false);
-    s_status_panel.brightness_value_label = ui_create_label(slider_box,
+    s_status_panel.brightness_value_label = ui_create_label(panel,
                                                             "3 / 5",
-                                                            inner_w - 142,
-                                                            18,
-                                                            110,
+                                                            value_x,
+                                                            74,
+                                                            92,
                                                             28,
                                                             21,
                                                             LV_TEXT_ALIGN_RIGHT,
                                                             false,
                                                             false);
     s_status_panel.brightness_slider = NULL;
-    ui_status_create_slider_visual(slider_box,
-                                   24,
-                                   58,
+    ui_status_create_slider_visual(panel,
+                                   inner_x,
+                                   108,
                                    slider_w,
                                    1U,
                                    5U,
                                    s_status_panel.brightness_steps,
                                    UI_STATUS_SLIDER_BRIGHTNESS);
 
-    ui_create_label(slider_box,
+    ui_create_label(panel,
                     "声音音量",
-                    18,
-                    90,
+                    inner_x,
+                    152,
                     160,
                     28,
                     21,
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     false);
-    s_status_panel.volume_value_label = ui_create_label(slider_box,
+    s_status_panel.volume_value_label = ui_create_label(panel,
                                                         "5 / 10",
-                                                        inner_w - 164,
-                                                        90,
-                                                        132,
+                                                        value_x,
+                                                        152,
+                                                        92,
                                                         28,
                                                         21,
                                                         LV_TEXT_ALIGN_RIGHT,
                                                         false,
                                                         false);
     s_status_panel.volume_slider = NULL;
-    ui_status_create_slider_visual(slider_box,
-                                   24,
-                                   130,
+    ui_status_create_slider_visual(panel,
+                                   inner_x,
+                                   186,
                                    slider_w,
                                    0U,
                                    10U,
                                    s_status_panel.volume_steps,
                                    UI_STATUS_SLIDER_VOLUME);
 
-    s_status_panel.bluetooth_card = ui_create_card(panel, inner_x, 232, status_card_w, 64, UI_SCREEN_NONE, false, 0);
+    s_status_panel.bluetooth_card = ui_create_card(panel, inner_x, 236, status_card_w, 60, UI_SCREEN_NONE, false, 0);
     s_status_panel.bluetooth_title_label = ui_create_label(s_status_panel.bluetooth_card,
                                                            "蓝牙",
-                                                           18,
-                                                           10,
-                                                           180,
+                                                           14,
+                                                           9,
+                                                           96,
                                                            24,
-                                                           22,
+                                                           21,
                                                            LV_TEXT_ALIGN_LEFT,
                                                            false,
                                                            false);
     s_status_panel.bluetooth_subtitle_label = ui_create_label(s_status_panel.bluetooth_card,
-                                                              "点击可连接蓝牙",
-                                                              18,
-                                                              34,
-                                                              192,
+                                                              "未开启",
+                                                              14,
+                                                              33,
+                                                              110,
                                                               22,
                                                               14,
                                                               LV_TEXT_ALIGN_LEFT,
                                                               false,
                                                               false);
+    s_status_panel.bluetooth_value_label = ui_create_label(s_status_panel.bluetooth_card,
+                                                           "关",
+                                                           status_card_w - 56,
+                                                           18,
+                                                           36,
+                                                           24,
+                                                           24,
+                                                           LV_TEXT_ALIGN_CENTER,
+                                                           false,
+                                                           false);
     touch_zone = ui_status_create_touch_zone(panel,
                                              inner_x,
-                                             232,
+                                             236,
                                              status_card_w,
-                                             64,
-                                             ui_status_bluetooth_card_event_cb,
-                                             NULL);
+                                             60,
+                                             ui_status_toggle_card_event_cb,
+                                             (void *)(uintptr_t)UI_STATUS_TOGGLE_BLUETOOTH);
     lv_obj_move_foreground(touch_zone);
 
-    s_status_panel.network_card = ui_create_card(panel, status_right_x, 232, status_card_w, 64, UI_SCREEN_NONE, true, 0);
-    label = ui_create_label(s_status_panel.network_card,
-                            "网络状态",
-                            18,
-                            10,
-                            180,
-                            24,
-                            22,
-                            LV_TEXT_ALIGN_LEFT,
-                            true,
-                            false);
-    LV_UNUSED(label);
+    s_status_panel.network_card = ui_create_card(panel, status_right_x, 236, status_card_w, 60, UI_SCREEN_NONE, false, 0);
+    s_status_panel.network_title_label = ui_create_label(s_status_panel.network_card,
+                                                         "4G",
+                                                         14,
+                                                         9,
+                                                         96,
+                                                         24,
+                                                         21,
+                                                         LV_TEXT_ALIGN_LEFT,
+                                                         false,
+                                                         false);
     s_status_panel.network_subtitle_label = ui_create_label(s_status_panel.network_card,
                                                             "未联网",
-                                                            18,
-                                                            34,
-                                                            192,
+                                                            14,
+                                                            33,
+                                                            110,
                                                             22,
                                                             14,
                                                             LV_TEXT_ALIGN_LEFT,
-                                                            true,
+                                                            false,
                                                             false);
-
-    s_status_panel.toast = lv_obj_create(root);
-    ui_apply_basic_object_style(s_status_panel.toast, true, ui_px_h(20), 0);
-    lv_obj_set_pos(s_status_panel.toast, ui_px_x(toast_x), ui_px_y(80));
-    lv_obj_set_size(s_status_panel.toast, ui_px_w(toast_w), ui_px_h(40));
-    lv_obj_add_flag(s_status_panel.toast, LV_OBJ_FLAG_HIDDEN);
-    s_status_panel.toast_label = ui_create_label(s_status_panel.toast,
-                                                 "蓝牙连接成功",
-                                                 0,
-                                                 8,
-                                                 418,
-                                                 24,
-                                                 14,
-                                                 LV_TEXT_ALIGN_CENTER,
-                                                 true,
-                                                 false);
-
-    s_status_panel.confirm = lv_obj_create(root);
-    ui_apply_basic_object_style(s_status_panel.confirm, false, 0, 2);
-    lv_obj_set_pos(s_status_panel.confirm, ui_px_x(confirm_x), ui_px_y(224));
-    lv_obj_set_size(s_status_panel.confirm, ui_px_w(confirm_w), ui_px_h(128));
-    if (!s_status_panel.confirm_visible)
-    {
-        lv_obj_add_flag(s_status_panel.confirm, LV_OBJ_FLAG_HIDDEN);
-    }
-
-    ui_create_label(s_status_panel.confirm,
-                    "确定断开蓝牙连接？",
-                    0,
-                    24,
-                    310,
-                    28,
-                    22,
-                    LV_TEXT_ALIGN_CENTER,
-                    false,
-                    false);
-
-    button = ui_create_card(s_status_panel.confirm, 26, 76, 112, 32, UI_SCREEN_NONE, false, 0);
-    ui_create_label(button, "否", 0, 3, 112, 24, 18, LV_TEXT_ALIGN_CENTER, false, false);
-    touch_zone = ui_status_create_touch_zone(s_status_panel.confirm,
-                                             26,
-                                             76,
-                                             112,
-                                             32,
-                                             ui_status_confirm_no_event_cb,
-                                             NULL);
-    lv_obj_move_foreground(touch_zone);
-
-    button = ui_create_card(s_status_panel.confirm, 172, 76, 112, 32, UI_SCREEN_NONE, true, 0);
-    ui_create_label(button, "是", 0, 3, 112, 24, 18, LV_TEXT_ALIGN_CENTER, true, false);
-    touch_zone = ui_status_create_touch_zone(s_status_panel.confirm,
-                                             172,
-                                             76,
-                                             112,
-                                             32,
-                                             ui_status_confirm_yes_event_cb,
-                                             NULL);
+    s_status_panel.network_value_label = ui_create_label(s_status_panel.network_card,
+                                                         "关",
+                                                         status_card_w - 56,
+                                                         18,
+                                                         36,
+                                                         24,
+                                                         24,
+                                                         LV_TEXT_ALIGN_CENTER,
+                                                         false,
+                                                         false);
+    touch_zone = ui_status_create_touch_zone(panel,
+                                             status_right_x,
+                                             236,
+                                             status_card_w,
+                                             60,
+                                             ui_status_toggle_card_event_cb,
+                                             (void *)(uintptr_t)UI_STATUS_TOGGLE_NETWORK);
     lv_obj_move_foreground(touch_zone);
 }
 
 static void ui_status_build_overlay(lv_obj_t *screen)
 {
     rt_device_t lcd_device;
+    rt_device_t lcd_backlight_device;
     lv_timer_t *sync_timer;
     lv_timer_t *toast_timer;
     uint8_t brightness_steps;
@@ -1383,6 +1637,10 @@ static void ui_status_build_overlay(lv_obj_t *screen)
     bool waiting_requested;
     bool suppress_connected_state;
     bool last_bt_connected;
+    bool bluetooth_enabled;
+    bool network_enabled;
+    bool bluetooth_toggle_initialized;
+    bool network_toggle_initialized;
 
     if (screen == NULL)
     {
@@ -1397,6 +1655,7 @@ static void ui_status_build_overlay(lv_obj_t *screen)
     if (s_status_panel.root != NULL)
     {
         ui_status_preserve_runtime_state(&lcd_device,
+                                         &lcd_backlight_device,
                                          &sync_timer,
                                          &toast_timer,
                                          &brightness_steps,
@@ -1405,10 +1664,15 @@ static void ui_status_build_overlay(lv_obj_t *screen)
                                          &confirm_visible,
                                          &waiting_requested,
                                          &suppress_connected_state,
-                                         &last_bt_connected);
+                                         &last_bt_connected,
+                                         &bluetooth_enabled,
+                                         &network_enabled,
+                                         &bluetooth_toggle_initialized,
+                                         &network_toggle_initialized);
 
         lv_obj_delete(s_status_panel.root);
         ui_status_restore_runtime_state(lcd_device,
+                                        lcd_backlight_device,
                                         sync_timer,
                                         toast_timer,
                                         brightness_steps,
@@ -1417,7 +1681,11 @@ static void ui_status_build_overlay(lv_obj_t *screen)
                                         confirm_visible,
                                         waiting_requested,
                                         suppress_connected_state,
-                                        last_bt_connected);
+                                        last_bt_connected,
+                                        bluetooth_enabled,
+                                        network_enabled,
+                                        bluetooth_toggle_initialized,
+                                        network_toggle_initialized);
     }
 
     s_status_panel.host_screen = screen;
@@ -1430,13 +1698,18 @@ static void ui_status_build_overlay(lv_obj_t *screen)
     lv_obj_add_flag(s_status_panel.root, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(s_status_panel.root, ui_status_root_delete_event_cb, LV_EVENT_DELETE, NULL);
 
-    /* 先完全去掉遮罩层，单独验证花屏是否由遮罩对象触发。 */
-    s_status_panel.mask = NULL;
+    s_status_panel.mask = lv_obj_create(s_status_panel.root);
+    lv_obj_remove_style_all(s_status_panel.mask);
+    lv_obj_set_pos(s_status_panel.mask, 0, 0);
+    lv_obj_set_size(s_status_panel.mask, s_screen_width, s_screen_height);
+    lv_obj_add_flag(s_status_panel.mask, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_status_panel.mask, ui_status_mask_event_cb, LV_EVENT_CLICKED, NULL);
+
     ui_status_build_panel_widgets(s_status_panel.root,
                                   s_status_panel.root,
-                                  18,
+                                  0,
                                   UI_STATUS_BAR_HEIGHT,
-                                  546);
+                                  s_screen_width);
 
     lv_obj_move_foreground(s_status_panel.root);
     ui_status_update_panel_visuals();
@@ -1444,7 +1717,7 @@ static void ui_status_build_overlay(lv_obj_t *screen)
 
 static void ui_status_panel_toggle_event_cb(lv_event_t *e)
 {
-    ui_screen_id_t current_screen;
+    lv_obj_t *screen;
 
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
     {
@@ -1456,14 +1729,29 @@ static void ui_status_panel_toggle_event_cb(lv_event_t *e)
         return;
     }
 
-    current_screen = ui_runtime_get_active_screen_id();
-    if (current_screen == UI_SCREEN_NONE || current_screen == UI_SCREEN_STATUS_DETAIL)
+    screen = lv_screen_active();
+    if (screen == NULL)
     {
-        current_screen = UI_SCREEN_HOME;
+        return;
     }
 
-    ui_Status_Detail_screen_set_return_target(current_screen);
-    ui_runtime_switch_to(UI_SCREEN_STATUS_DETAIL);
+    ui_status_build_overlay(screen);
+    if (s_status_panel.root == NULL)
+    {
+        return;
+    }
+
+    if (lv_obj_has_flag(s_status_panel.root, LV_OBJ_FLAG_HIDDEN))
+    {
+        ui_status_sync_now();
+        ui_status_update_panel_visuals();
+        lv_obj_clear_flag(s_status_panel.root, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(s_status_panel.root);
+    }
+    else
+    {
+        ui_status_close_panel();
+    }
 }
 
 void ui_helpers_init(void)
@@ -1501,6 +1789,12 @@ void ui_helpers_init(void)
         lv_timer_set_repeat_count(s_status_panel.toast_timer, 1);
         lv_timer_pause(s_status_panel.toast_timer);
     }
+    s_status_bar_time_timer = lv_timer_create(ui_status_bar_time_timer_cb, 60000, NULL);
+    if (s_status_bar_time_timer != NULL)
+    {
+        lv_timer_pause(s_status_bar_time_timer);
+        ui_status_bar_refresh_datetime();
+    }
     s_ui_helpers_initialized = true;
 }
 
@@ -1520,6 +1814,11 @@ void ui_helpers_deinit(void)
     {
         lv_timer_delete(s_status_panel.toast_timer);
         s_status_panel.toast_timer = NULL;
+    }
+    if (s_status_bar_time_timer != NULL)
+    {
+        lv_timer_delete(s_status_bar_time_timer);
+        s_status_bar_time_timer = NULL;
     }
     ui_helpers_reset_font_cache();
 
@@ -1780,7 +2079,6 @@ void ui_build_status_bar_ex(lv_obj_t *parent,
                             bool enable_detail_touch)
 {
     lv_obj_t *bar;
-    lv_obj_t *calendar_touch_zone;
     lv_obj_t *bar_touch_zone;
     lv_obj_t *time_label;
     lv_obj_t *meta_label;
@@ -1854,24 +2152,13 @@ void ui_build_status_bar_ex(lv_obj_t *parent,
                                     false,
                                     false);
 
-    calendar_touch_zone = lv_obj_create(bar);
-    ui_apply_basic_object_style(calendar_touch_zone, false, 0, 0);
-    lv_obj_set_style_bg_opa(calendar_touch_zone, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(calendar_touch_zone, 0, 0);
-    lv_obj_set_pos(calendar_touch_zone, 0, 0);
-    lv_obj_set_size(calendar_touch_zone,
-                    ui_px_w(UI_STATUS_BAR_CALENDAR_TOUCH_W),
-                    ui_px_h(UI_STATUS_BAR_HEIGHT));
-    ui_attach_nav_event(calendar_touch_zone, UI_SCREEN_CALENDAR);
-
     bar_touch_zone = lv_obj_create(bar);
     ui_apply_basic_object_style(bar_touch_zone, false, 0, 0);
     lv_obj_set_style_bg_opa(bar_touch_zone, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(bar_touch_zone, 0, 0);
-    /* 仅右侧状态图标区域可呼出详情，避免抢占左侧已有交互。 */
-    lv_obj_set_pos(bar_touch_zone, ui_px_x(UI_STATUS_BAR_DETAIL_TOUCH_X), 0);
+    lv_obj_set_pos(bar_touch_zone, 0, 0);
     lv_obj_set_size(bar_touch_zone,
-                    s_screen_width - ui_px_x(UI_STATUS_BAR_DETAIL_TOUCH_X),
+                    s_screen_width,
                     ui_px_h(UI_STATUS_BAR_HEIGHT));
     if (enable_detail_touch)
     {
@@ -1904,6 +2191,7 @@ void ui_build_status_bar_ex(lv_obj_t *parent,
         ui_register_screen_refs(parent, refs);
     }
 
+    ui_status_bar_refresh_datetime();
     ui_status_refresh_charging_icons();
     ui_status_refresh_connection_icons(true);
 }
@@ -1976,6 +2264,7 @@ void ui_build_standard_screen(ui_screen_scaffold_t *scaffold,
 void ui_build_status_detail_content(lv_obj_t *screen, lv_obj_t *parent)
 {
     rt_device_t lcd_device;
+    rt_device_t lcd_backlight_device;
     lv_timer_t *sync_timer;
     lv_timer_t *toast_timer;
     uint8_t brightness_steps;
@@ -1985,6 +2274,10 @@ void ui_build_status_detail_content(lv_obj_t *screen, lv_obj_t *parent)
     bool waiting_requested;
     bool suppress_connected_state;
     bool last_bt_connected;
+    bool bluetooth_enabled;
+    bool network_enabled;
+    bool bluetooth_toggle_initialized;
+    bool network_toggle_initialized;
 
     if (screen == NULL || parent == NULL)
     {
@@ -1992,6 +2285,7 @@ void ui_build_status_detail_content(lv_obj_t *screen, lv_obj_t *parent)
     }
 
     ui_status_preserve_runtime_state(&lcd_device,
+                                     &lcd_backlight_device,
                                      &sync_timer,
                                      &toast_timer,
                                      &brightness_steps,
@@ -2000,8 +2294,13 @@ void ui_build_status_detail_content(lv_obj_t *screen, lv_obj_t *parent)
                                      &confirm_visible,
                                      &waiting_requested,
                                      &suppress_connected_state,
-                                     &last_bt_connected);
+                                     &last_bt_connected,
+                                     &bluetooth_enabled,
+                                     &network_enabled,
+                                     &bluetooth_toggle_initialized,
+                                     &network_toggle_initialized);
     ui_status_restore_runtime_state(lcd_device,
+                                    lcd_backlight_device,
                                     sync_timer,
                                     toast_timer,
                                     brightness_steps,
@@ -2010,7 +2309,11 @@ void ui_build_status_detail_content(lv_obj_t *screen, lv_obj_t *parent)
                                     confirm_visible,
                                     waiting_requested,
                                     suppress_connected_state,
-                                    last_bt_connected);
+                                    last_bt_connected,
+                                    bluetooth_enabled,
+                                    network_enabled,
+                                    bluetooth_toggle_initialized,
+                                    network_toggle_initialized);
     s_status_panel.host_screen = screen;
     s_status_panel.root = screen;
     s_status_panel.mask = NULL;
@@ -2072,8 +2375,11 @@ void ui_screen_refs_unregister(lv_obj_t *screen)
         s_status_panel.bluetooth_card = NULL;
         s_status_panel.bluetooth_title_label = NULL;
         s_status_panel.bluetooth_subtitle_label = NULL;
+        s_status_panel.bluetooth_value_label = NULL;
         s_status_panel.network_card = NULL;
+        s_status_panel.network_title_label = NULL;
         s_status_panel.network_subtitle_label = NULL;
+        s_status_panel.network_value_label = NULL;
     }
 
     for (i = 0; i < sizeof(s_screen_refs) / sizeof(s_screen_refs[0]); ++i)

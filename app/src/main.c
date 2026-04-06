@@ -241,6 +241,16 @@ static void set_panel_brightness(rt_uint8_t brightness)
     rt_sem_release(&s_backlight_sem);
 }
 
+void app_set_panel_brightness(rt_uint8_t brightness)
+{
+    set_panel_brightness(brightness);
+}
+
+rt_uint8_t app_get_panel_brightness(void)
+{
+    return s_backlight_target_brightness;
+}
+
 static void backlight_thread_entry(void *parameter)
 {
     rt_tick_t keepalive_tick = rt_tick_from_millisecond(BACKLIGHT_KEEPALIVE_MS);
