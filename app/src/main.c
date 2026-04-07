@@ -19,6 +19,7 @@
 #include "ble_connection_manager.h"
 #include "bt_connection_manager.h"
 #include "audio_manager.h"
+#include "bf0_pm.h"
 #include "ui/ui.h"
 #include "ui/ui_dispatch.h"
 #include "ui/ui_runtime_adapter.h"
@@ -27,7 +28,7 @@
 #include "mem_section.h"
 
 #define LCD_DEVICE_NAME "lcd"
-#define UI_BRIGHTNESS 50U
+#define UI_BRIGHTNESS 100U
 #define BT_APP_READY 0U
 #define BT_APP_CONNECT_PAN 1U
 #define BT_APP_CONNECT_PAN_SUCCESS 2U
@@ -40,7 +41,9 @@
 
 #define BACKLIGHT_THREAD_STACK_SIZE 2048
 #define BACKLIGHT_THREAD_PRIORITY 19
-#define BACKLIGHT_KEEPALIVE_MS 800U
+#define BACKLIGHT_STEP_DELAY_MS 20
+#define BACKLIGHT_LEVEL_MIN 50U
+#define BACKLIGHT_LEVEL_MAX 100U
 #define TF_MOUNT_THREAD_STACK_SIZE 4096
 #define TF_MOUNT_THREAD_PRIORITY 18
 #define TF_MOUNT_RETRY_COUNT 120
@@ -49,7 +52,6 @@
 static struct rt_thread s_ui_thread;
 static struct rt_thread s_backlight_thread;
 static struct rt_thread s_tf_mount_thread;
-static struct rt_semaphore s_backlight_sem;
 
 /* xz_ui 线程栈放入 PSRAM section - 使用 L2_RET_BSS section */
 #if defined(__CC_ARM) || defined(__CLANG_ARM)
@@ -78,8 +80,6 @@ static rt_uint8_t s_tf_mount_thread_stack[TF_MOUNT_THREAD_STACK_SIZE]
     L2_RET_BSS_SECT(tf_mount_thread_stack);
 #endif
 
-static volatile rt_uint8_t s_backlight_target_brightness = UI_BRIGHTNESS;
-static volatile rt_uint8_t s_backlight_applied_brightness = 0xFFU;
 static volatile rt_uint8_t s_ui_debug_open_reading = 0U;
 static volatile rt_uint8_t s_xiaozhi_registered = 0U;
 bt_app_t g_bt_app_env = {0};
@@ -232,13 +232,7 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
 
 static void set_panel_brightness(rt_uint8_t brightness)
 {
-    if (brightness > 100U)
-    {
-        brightness = 100U;
-    }
-
-    s_backlight_target_brightness = brightness;
-    rt_sem_release(&s_backlight_sem);
+    (void)brightness;
 }
 
 void app_set_panel_brightness(rt_uint8_t brightness)
@@ -253,37 +247,13 @@ rt_uint8_t app_get_panel_brightness(void)
 
 static void backlight_thread_entry(void *parameter)
 {
-    rt_tick_t keepalive_tick = rt_tick_from_millisecond(BACKLIGHT_KEEPALIVE_MS);
-    rt_uint8_t brightness = 0U;
-    rt_uint8_t enabled = 0U;
-
     (void)parameter;
 
-    if (keepalive_tick == 0)
-    {
-        keepalive_tick = 1;
-    }
+    board_backlight_set_level(0U);
 
     while (1)
     {
-        rt_err_t wait_result;
-
-        wait_result = rt_sem_take(&s_backlight_sem, keepalive_tick);
-        if ((wait_result != RT_EOK) && (wait_result != -RT_ETIMEOUT))
-        {
-            rt_kprintf("backlight: sem wait failed=%d\n", wait_result);
-            rt_thread_mdelay(20);
-            continue;
-        }
-
-        brightness = s_backlight_target_brightness;
-        enabled = brightness > 0U ? 1U : 0U;
-        board_backlight_set(enabled);
-        if (enabled != s_backlight_applied_brightness)
-        {
-            rt_kprintf("backlight: gpio=%u target=%u\n", enabled, brightness);
-            s_backlight_applied_brightness = enabled;
-        }
+        rt_thread_mdelay(1000);
     }
 }
 
@@ -446,13 +416,6 @@ static rt_err_t start_backlight_thread(void)
 {
     rt_err_t result;
 
-    result = rt_sem_init(&s_backlight_sem, "bl_sem", 0, RT_IPC_FLAG_FIFO);
-    if (result != RT_EOK)
-    {
-        rt_kprintf("backlight: sem init failed=%d\n", result);
-        return result;
-    }
-
     result = rt_thread_init(&s_backlight_thread,
                             "backlight",
                             backlight_thread_entry,
@@ -464,12 +427,10 @@ static rt_err_t start_backlight_thread(void)
     if (result != RT_EOK)
     {
         rt_kprintf("backlight: thread init failed=%d\n", result);
-        rt_sem_detach(&s_backlight_sem);
         return result;
     }
 
     rt_thread_startup(&s_backlight_thread);
-    rt_sem_release(&s_backlight_sem);
     return RT_EOK;
 }
 
@@ -512,6 +473,12 @@ int main(void)
 {
     rt_err_t result;
     uint32_t bt_event = 0;
+
+#ifdef RT_USING_PM
+    rt_pm_request(PM_SLEEP_MODE_IDLE);
+    pm_scenario_start(PM_SCENARIO_UI);
+    rt_kprintf("pm_test: lock idle sleep and keep UI scenario active\n");
+#endif
 
     check_poweron_reason();
     set_pinmux();

@@ -1095,6 +1095,30 @@ static rt_err_t drv_pwm_control(struct rt_device_pwm *device, int cmd, void *arg
         /* arg is not configuration for RESUME and SUSPEND command */
         RT_ASSERT(configuration->channel > 0); //Channel id must > 0
     }
+
+    if ((configuration != RT_NULL)
+            && (pwm != RT_NULL)
+            && (rt_strcmp(pwm->name, "pwm2") == 0)
+            && (configuration->channel == 4))
+    {
+        switch (cmd)
+        {
+        case PWM_CMD_ENABLE:
+            rt_kprintf("bl_trace: drv_pwm pwm2 ch4 ENABLE\n");
+            break;
+        case PWM_CMD_DISABLE:
+            rt_kprintf("bl_trace: drv_pwm pwm2 ch4 DISABLE\n");
+            break;
+        case PWM_CMD_SET:
+            rt_kprintf("bl_trace: drv_pwm pwm2 ch4 SET period=%u pulse=%u\n",
+                       configuration->period,
+                       configuration->pulse);
+            break;
+        default:
+            break;
+        }
+    }
+
     switch (cmd)
     {
     case PWM_CMD_ENABLE:
@@ -1478,4 +1502,3 @@ MSH_CMD_EXPORT(pwm_play, pwm_play     pwm3 1 1000 07 00010203040506);
 /// @} bsp_sample
 
 /// @} file
-
