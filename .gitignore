@@ -8,3 +8,6 @@
 /**/*.pyc
 .sconsign.dblite
 .DS_Store
+*.o
+*.tmp.c
+*.tmp.o
