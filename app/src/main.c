@@ -82,6 +82,7 @@ static rt_uint8_t s_tf_mount_thread_stack[TF_MOUNT_THREAD_STACK_SIZE]
 
 static volatile rt_uint8_t s_ui_debug_open_reading = 0U;
 static volatile rt_uint8_t s_xiaozhi_registered = 0U;
+static rt_uint8_t s_backlight_target_brightness = 0U;
 bt_app_t g_bt_app_env = {0};
 rt_mailbox_t g_bt_app_mb = RT_NULL;
 BOOL g_pan_connected = FALSE;
@@ -232,7 +233,17 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
 
 static void set_panel_brightness(rt_uint8_t brightness)
 {
-    (void)brightness;
+    if (brightness > BACKLIGHT_LEVEL_MAX)
+    {
+        brightness = BACKLIGHT_LEVEL_MAX;
+    }
+    else if ((brightness != 0U) && (brightness < BACKLIGHT_LEVEL_MIN))
+    {
+        brightness = BACKLIGHT_LEVEL_MIN;
+    }
+
+    s_backlight_target_brightness = brightness;
+    board_backlight_set_level(brightness);
 }
 
 void app_set_panel_brightness(rt_uint8_t brightness)
@@ -362,7 +373,7 @@ static void ui_thread_entry(void *parameter)
         rt_kprintf("ui: ui_dispatch_init failed=%d\n", result);
         return;
     }
-    set_panel_brightness(UI_BRIGHTNESS);
+    set_panel_brightness(s_backlight_target_brightness);
     rt_kprintf("ui: before ui_init\n");
     ui_init();
     rt_kprintf("ui: after ui_init\n");
@@ -482,7 +493,7 @@ int main(void)
 
     check_poweron_reason();
     set_pinmux();
-    board_backlight_set(1U);
+    board_backlight_set(0U);
     rt_kprintf("ui: boot\n");
 
     result = start_backlight_thread();
