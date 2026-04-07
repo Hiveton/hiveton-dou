@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 
 lv_obj_t *ui_Status_Detail = NULL;
@@ -27,7 +28,7 @@ void ui_Status_Detail_screen_init(void)
     ui_Status_Detail = ui_create_screen_base();
     ui_build_standard_screen_ex(&page,
                                 ui_Status_Detail,
-                                "快捷状态",
+                                ui_i18n_pick("快捷状态", "Quick Status"),
                                 s_status_detail_return_target,
                                 false);
     ui_build_status_detail_content(ui_Status_Detail, page.content);

@@ -5,6 +5,7 @@
 
 #include "rtthread.h"
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 
 #define UI_CALENDAR_CELL_COUNT 42U
@@ -72,7 +73,6 @@ typedef struct
 
 lv_obj_t *ui_Calendar = NULL;
 
-static const char *s_week_labels[] = {"一", "二", "三", "四", "五", "六", "日"};
 static ui_calendar_refs_t s_calendar_refs;
 static ui_calendar_date_t s_calendar_today;
 static ui_calendar_date_t s_calendar_selected;
@@ -241,10 +241,10 @@ static const char *ui_calendar_get_week_label(int year, int month, int day)
 
     if (week_index < 0 || week_index >= 7)
     {
-        return s_week_labels[0];
+        return ui_i18n_weekday_short(0);
     }
 
-    return s_week_labels[week_index];
+    return ui_i18n_weekday_short(week_index);
 }
 
 static void ui_calendar_refresh_summary(void)
@@ -261,15 +261,15 @@ static void ui_calendar_refresh_summary(void)
     days_in_month = ui_calendar_days_in_month(s_calendar_selected.year, s_calendar_selected.month);
     rt_snprintf(summary,
                 sizeof(summary),
-                "%04d 年 %02d 月 %02d 日",
+                ui_i18n_pick("%04d 年 %02d 月 %02d 日", "%04d-%02d-%02d"),
                 s_calendar_selected.year,
                 s_calendar_selected.month,
                 s_calendar_selected.day);
 
     rt_snprintf(detail,
                 sizeof(detail),
-                "%s · %s · 本月 %d 天",
-                ui_calendar_dates_equal(&s_calendar_selected, &s_calendar_today) ? "今天" : "已选日期",
+                ui_i18n_pick("%s · %s · 本月 %d 天", "%s · %s · %d days"),
+                ui_calendar_dates_equal(&s_calendar_selected, &s_calendar_today) ? ui_i18n_pick("今天", "Today") : ui_i18n_pick("已选日期", "Selected"),
                 ui_calendar_get_week_label(s_calendar_selected.year, s_calendar_selected.month, s_calendar_selected.day),
                 days_in_month);
 
@@ -307,10 +307,10 @@ static void ui_calendar_render(void)
     next_month = s_calendar_view_month + 1;
     ui_calendar_normalize_year_month(&next_year, &next_month);
 
-    rt_snprintf(title, sizeof(title), "%04d 年 %d 月", s_calendar_view_year, s_calendar_view_month);
+    rt_snprintf(title, sizeof(title), ui_i18n_pick("%04d 年 %d 月", "%04d-%02d"), s_calendar_view_year, s_calendar_view_month);
     rt_snprintf(meta,
                 sizeof(meta),
-                "今天 %04d-%02d-%02d · 星期%s",
+                ui_i18n_pick("今天 %04d-%02d-%02d · 星期%s", "Today %04d-%02d-%02d · %s"),
                 s_calendar_today.year,
                 s_calendar_today.month,
                 s_calendar_today.day,
@@ -501,7 +501,7 @@ void ui_Calendar_screen_init(void)
     s_calendar_view_month = s_calendar_today.month;
 
     ui_Calendar = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Calendar, "日历", UI_SCREEN_HOME);
+    ui_build_standard_screen(&page, ui_Calendar, ui_i18n_pick("日历", "Calendar"), UI_SCREEN_HOME);
     ui_calendar_build_layout(page.content, &layout);
 
     s_calendar_refs.title_label = ui_create_label(page.content,
@@ -530,7 +530,7 @@ void ui_Calendar_screen_init(void)
                                                     layout.today_y,
                                                     layout.today_w,
                                                     layout.today_h,
-                                                    "今天",
+                                                    ui_i18n_pick("今天", "Today"),
                                                     22,
                                                     UI_SCREEN_NONE,
                                                     false);
@@ -558,7 +558,7 @@ void ui_Calendar_screen_init(void)
     for (col = 0; col < UI_CALENDAR_GRID_COLS; ++col)
     {
         ui_create_label(page.content,
-                        s_week_labels[col],
+                        ui_i18n_weekday_short((int)col),
                         layout.week_x + (int)col * (layout.week_w + layout.week_gap),
                         layout.week_y,
                         layout.week_w,

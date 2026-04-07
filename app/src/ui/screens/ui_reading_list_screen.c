@@ -8,6 +8,7 @@
 #include "rtdevice.h"
 #include "rtthread.h"
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 #include "ui_runtime_adapter.h"
 
@@ -432,7 +433,7 @@ static void ui_reading_open_timer_cb(lv_timer_t *timer)
     }
 
     s_reading_open_detail_pending = false;
-    lv_label_set_text(s_reading_status_label, "正在打开阅读详情...");
+    lv_label_set_text(s_reading_status_label, ui_i18n_pick("正在打开阅读详情...", "Opening reading detail..."));
     ui_runtime_switch_to(UI_SCREEN_READING_DETAIL);
 }
 
@@ -573,7 +574,7 @@ static void ui_reading_card_event_cb(lv_event_t *e)
         return;
     }
 
-    lv_label_set_text(s_reading_status_label, "正在准备首屏内容...");
+    lv_label_set_text(s_reading_status_label, ui_i18n_pick("正在准备首屏内容...", "Preparing the first page..."));
 
     if (s_reading_open_timer == NULL)
     {
@@ -633,7 +634,7 @@ static void ui_reading_list_render(void)
     {
         rt_snprintf(status_text,
                     sizeof(status_text),
-                    "挂载点 %s · 共 %u 个文件",
+                    ui_i18n_pick("挂载点 %s · 共 %u 个文件", "Mount %s · %u files"),
                     s_reading_mount_path,
                     (unsigned int)s_reading_file_count);
         lv_label_set_text(s_reading_status_label, status_text);
@@ -652,7 +653,7 @@ static void ui_reading_list_render(void)
             ui_reading_format_size(s_reading_files[file_index].size_bytes, meta_text, sizeof(meta_text));
             rt_snprintf(status_text,
                         sizeof(status_text),
-                        "%s · 点击查看",
+                        ui_i18n_pick("%s · 点击查看", "%s · Tap to open"),
                         meta_text);
             ui_reading_show_card(visible_index,
                                  s_reading_files[file_index].name,
@@ -667,20 +668,32 @@ static void ui_reading_list_render(void)
     {
         rt_snprintf(status_text,
                     sizeof(status_text),
-                    "挂载点 %s · 当前没有文件",
+                    ui_i18n_pick("挂载点 %s · 当前没有文件", "Mount %s · No files"),
                     s_reading_mount_path[0] != '\0' ? s_reading_mount_path : "/");
         lv_label_set_text(s_reading_status_label, status_text);
-        ui_reading_show_card(0, "TF 卡里还没有可显示文件", "请将书籍文件复制到 TF 卡后等待列表自动刷新。", false);
+        ui_reading_show_card(0,
+                             ui_i18n_pick("TF 卡里还没有可显示文件", "No readable files on TF card"),
+                             ui_i18n_pick("请将书籍文件复制到 TF 卡后等待列表自动刷新。",
+                                          "Copy book files to the TF card and wait for the list to refresh."),
+                             false);
     }
     else if (s_reading_scan_state == UI_READING_SCAN_MOUNT_FAILED)
     {
-        lv_label_set_text(s_reading_status_label, "已检测到存储设备，但挂载失败");
-        ui_reading_show_card(0, "TF 卡未挂载成功", "请确认卡已格式化为 FAT，并重启或重新插拔后再试。", false);
+        lv_label_set_text(s_reading_status_label, ui_i18n_pick("已检测到存储设备，但挂载失败", "Storage detected, but mount failed"));
+        ui_reading_show_card(0,
+                             ui_i18n_pick("TF 卡未挂载成功", "TF card mount failed"),
+                             ui_i18n_pick("请确认卡已格式化为 FAT，并重启或重新插拔后再试。",
+                                          "Make sure the card is FAT formatted, then reboot or reinsert it."),
+                             false);
     }
     else
     {
-        lv_label_set_text(s_reading_status_label, "当前未检测到 TF 卡");
-        ui_reading_show_card(0, "未检测到 TF 卡", "系统还没有注册 sd0/sd1 设备，插卡后页面会自动刷新。", false);
+        lv_label_set_text(s_reading_status_label, ui_i18n_pick("当前未检测到 TF 卡", "No TF card detected"));
+        ui_reading_show_card(0,
+                             ui_i18n_pick("未检测到 TF 卡", "TF card not detected"),
+                             ui_i18n_pick("系统还没有注册 sd0/sd1 设备，插卡后页面会自动刷新。",
+                                          "The system has not registered an sd0/sd1 device yet. This page will refresh after card insertion."),
+                             false);
     }
 
     for (visible_index = 1; visible_index < UI_READING_VISIBLE_COUNT; ++visible_index)
@@ -698,7 +711,7 @@ const char *ui_reading_list_get_selected_name(void)
 
     if (!s_reading_has_selection || s_reading_selected_index >= s_reading_file_count)
     {
-        return "在线阅读";
+        return ui_i18n_pick("在线阅读", "Reading");
     }
 
     return s_reading_files[s_reading_selected_index].name;
@@ -762,10 +775,10 @@ void ui_Reading_List_screen_init(void)
     memset(s_reading_cards, 0, sizeof(s_reading_cards));
 
     ui_Reading_List = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Reading_List, "在线阅读", UI_SCREEN_HOME);
+    ui_build_standard_screen(&page, ui_Reading_List, ui_i18n_pick("在线阅读", "Reading"), UI_SCREEN_HOME);
 
     s_reading_status_label = ui_create_label(page.content,
-                                             "正在扫描 TF 卡...",
+                                             ui_i18n_pick("正在扫描 TF 卡...", "Scanning TF card..."),
                                              24,
                                              14,
                                              360,
@@ -780,8 +793,8 @@ void ui_Reading_List_screen_init(void)
         ui_reading_create_card(page.content, i, s_card_y_positions[i]);
     }
 
-    s_reading_prev_button = ui_create_button(page.content, 304, 585, 96, 46, "上翻", 20, UI_SCREEN_NONE, false);
-    s_reading_next_button = ui_create_button(page.content, 408, 585, 96, 46, "下翻", 20, UI_SCREEN_NONE, false);
+    s_reading_prev_button = ui_create_button(page.content, 304, 585, 96, 46, ui_i18n_pick("上翻", "Prev"), 20, UI_SCREEN_NONE, false);
+    s_reading_next_button = ui_create_button(page.content, 408, 585, 96, 46, ui_i18n_pick("下翻", "Next"), 20, UI_SCREEN_NONE, false);
     lv_obj_add_event_cb(s_reading_prev_button, ui_reading_prev_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_reading_next_button, ui_reading_next_event_cb, LV_EVENT_CLICKED, NULL);
 

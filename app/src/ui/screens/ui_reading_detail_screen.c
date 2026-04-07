@@ -7,6 +7,7 @@
 #include "rthw.h"
 #include "mem_section.h"
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 #include "ui_runtime_adapter.h"
 #define STBTT_malloc(x, u) ((void)(u), lv_malloc(x))
@@ -352,7 +353,8 @@ static void ui_reading_detail_show_loading_state(void)
 {
     rt_snprintf(s_reading_detail_page_buffer,
                 sizeof(s_reading_detail_page_buffer),
-                "正在读取文本内容...\n\n请稍候。");
+                "%s",
+                ui_i18n_pick("正在读取文本内容...\n\n请稍候。", "Loading the text content...\n\nPlease wait."));
     rt_snprintf(s_reading_detail_page_text, sizeof(s_reading_detail_page_text), "-- / --");
 
     if (s_reading_detail_refs.content_label != NULL)
@@ -904,7 +906,9 @@ static void ui_reading_detail_load_thread_entry(void *parameter)
             memset(s_reading_detail_text, 0, sizeof(s_reading_detail_text));
             rt_snprintf(s_reading_detail_text,
                         sizeof(s_reading_detail_text),
-                        "TF 卡中还没有可阅读的文本文件。\n\n请先返回列表页确认文件是否已经识别。");
+                        "%s",
+                        ui_i18n_pick("TF 卡中还没有可阅读的文本文件。\n\n请先返回列表页确认文件是否已经识别。",
+                                     "There are no readable text files on the TF card yet.\n\nPlease go back to the list and check whether the file has been detected."));
             rt_kprintf("reading_detail: request=%lu fallback without selected file\n",
                        (unsigned long)request_id);
         }
@@ -1154,7 +1158,9 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
     {
         rt_snprintf(s_reading_detail_text,
                     sizeof(s_reading_detail_text),
-                    "TF 卡中还没有可阅读的文本文件。\n\n请先返回列表页确认文件是否已经识别。");
+                    "%s",
+                    ui_i18n_pick("TF 卡中还没有可阅读的文本文件。\n\n请先返回列表页确认文件是否已经识别。",
+                                 "There are no readable text files on the TF card yet.\n\nPlease go back to the list and check whether the file has been detected."));
         return false;
     }
 
@@ -1165,7 +1171,8 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
         rt_kprintf("reading_detail: open failed path=%s errno=%d\n", file_path, rt_get_errno());
         rt_snprintf(s_reading_detail_text,
                     sizeof(s_reading_detail_text),
-                    "打开文件失败：\n%s\n\n请确认文件存在且 TF 卡可正常读取。",
+                    ui_i18n_pick("打开文件失败：\n%s\n\n请确认文件存在且 TF 卡可正常读取。",
+                                 "Failed to open file:\n%s\n\nPlease confirm the file exists and the TF card is readable."),
                     file_path);
         return false;
     }
@@ -1212,7 +1219,8 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
     {
         rt_snprintf(s_reading_detail_text,
                     sizeof(s_reading_detail_text),
-                    "这个文本文件目前是空的。");
+                    "%s",
+                    ui_i18n_pick("这个文本文件目前是空的。", "This text file is currently empty."));
     }
 
     rt_kprintf("reading_detail: file=%s bytes=%lu open_ms=%lu read_ms=%lu normalize_ms=%lu total_ms=%lu\n",
@@ -1349,7 +1357,7 @@ static bool ui_reading_detail_render_page(void)
     page_text_len = strlen(page_text);
     if (page_text_len == 0U)
     {
-        page_text = "正文为空。";
+        page_text = ui_i18n_pick("正文为空。", "The page is empty.");
         page_text_len = strlen(page_text);
     }
 
@@ -1729,8 +1737,8 @@ void ui_Reading_Detail_screen_init(void)
                                                        LV_TEXT_ALIGN_LEFT,
                                                        false,
                                                        false);
-    s_reading_detail_refs.prev_button = ui_create_button(page.content, 198, 603, 175, 40, "上一页", 20, UI_SCREEN_NONE, false);
-    s_reading_detail_refs.next_button = ui_create_button(page.content, 329, 603, 175, 40, "下一页", 20, UI_SCREEN_NONE, true);
+    s_reading_detail_refs.prev_button = ui_create_button(page.content, 198, 603, 175, 40, ui_i18n_pick("上一页", "Previous"), 20, UI_SCREEN_NONE, false);
+    s_reading_detail_refs.next_button = ui_create_button(page.content, 329, 603, 175, 40, ui_i18n_pick("下一页", "Next"), 20, UI_SCREEN_NONE, true);
     lv_obj_add_flag(s_reading_detail_refs.prev_button, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_add_flag(s_reading_detail_refs.next_button, LV_OBJ_FLAG_EVENT_BUBBLE);
     lv_obj_add_event_cb(s_reading_detail_refs.prev_button, ui_reading_detail_prev_event_cb, LV_EVENT_CLICKED, NULL);
@@ -1783,7 +1791,7 @@ void ui_Reading_Detail_screen_init(void)
     lv_obj_add_flag(s_reading_detail_refs.settings_panel, LV_OBJ_FLAG_CLICKABLE);
 
     ui_create_label(s_reading_detail_refs.settings_panel,
-                    "阅读设置",
+                    ui_i18n_pick("阅读设置", "Reading Settings"),
                     24,
                     16,
                     160,
@@ -1796,7 +1804,7 @@ void ui_Reading_Detail_screen_init(void)
     row = ui_create_card(s_reading_detail_refs.settings_panel, 24, 52, 480, 42, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    ui_create_label(row, "字号", 0, 8, 80, 24, 18, LV_TEXT_ALIGN_LEFT, false, false);
+    ui_create_label(row, ui_i18n_pick("字号", "Font"), 0, 8, 80, 24, 18, LV_TEXT_ALIGN_LEFT, false, false);
     button = ui_create_button(row, 256, 0, 56, 42, "-", 22, UI_SCREEN_NONE, false);
     lv_obj_add_event_cb(button, ui_reading_detail_adjust_font_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(-UI_READING_DETAIL_TEXT_FONT_STEP));
     s_reading_detail_refs.font_value_label = ui_create_label(row,
@@ -1815,7 +1823,7 @@ void ui_Reading_Detail_screen_init(void)
     row = ui_create_card(s_reading_detail_refs.settings_panel, 24, 102, 480, 42, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    ui_create_label(row, "行距", 0, 8, 80, 24, 18, LV_TEXT_ALIGN_LEFT, false, false);
+    ui_create_label(row, ui_i18n_pick("行距", "Spacing"), 0, 8, 80, 24, 18, LV_TEXT_ALIGN_LEFT, false, false);
     button = ui_create_button(row, 256, 0, 56, 42, "-", 22, UI_SCREEN_NONE, false);
     lv_obj_add_event_cb(button,
                         ui_reading_detail_adjust_line_space_event_cb,

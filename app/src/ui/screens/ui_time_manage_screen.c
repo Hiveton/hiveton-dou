@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 
 lv_obj_t *ui_Time_Manage = NULL;
@@ -43,17 +44,17 @@ void ui_Time_Manage_screen_init(void)
     }
 
     ui_Time_Manage = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Time_Manage, "时间管理", UI_SCREEN_HOME);
+    ui_build_standard_screen(&page, ui_Time_Manage, ui_i18n_pick("时间管理", "Time"), UI_SCREEN_HOME);
 
     create_time_menu_card(page.content,
                           56,
-                          "番茄时间",
-                          "专注计时与休息切换",
+                          ui_i18n_pick("番茄时间", "Pomodoro"),
+                          ui_i18n_pick("专注计时与休息切换", "Focus timer and break cycle"),
                           UI_SCREEN_POMODORO);
     create_time_menu_card(page.content,
                           188,
-                          "日期与时间",
-                          "手动校准当前时间",
+                          ui_i18n_pick("日期与时间", "Date & Time"),
+                          ui_i18n_pick("手动校准当前时间", "Adjust the device clock"),
                           UI_SCREEN_DATETIME);
 }
 

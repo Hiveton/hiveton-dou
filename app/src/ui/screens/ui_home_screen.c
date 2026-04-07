@@ -1,6 +1,7 @@
 #include <string.h>
 
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 #include "../../xiaozhi/weather/weather.h"
 
@@ -21,20 +22,21 @@ extern const lv_image_dsc_t home_weather;
 typedef struct
 {
     const lv_image_dsc_t *icon;
-    const char *label;
+    const char *label_zh;
+    const char *label_en;
     ui_screen_id_t target;
 } ui_home_tile_t;
 
 static const ui_home_tile_t s_home_tiles[] = {
-    {&home_reading, "阅读", UI_SCREEN_READING_LIST},
-    {&home_pet, "宠物管理", UI_SCREEN_PET},
-    {&home_ai, "AI小豆", UI_SCREEN_AI_DOU},
-    {&home_clock, "时间管理", UI_SCREEN_TIME_MANAGE},
-    {&home_weather, "天气", UI_SCREEN_WEATHER},
-    {&home_calendar, "日历", UI_SCREEN_CALENDAR},
-    {&home_record, "录音", UI_SCREEN_RECORDER},
-    {&home_music, "音乐", UI_SCREEN_MUSIC_LIST},
-    {&home_settings, "设置", UI_SCREEN_SETTINGS},
+    {&home_reading, "阅读", "Reading", UI_SCREEN_READING_LIST},
+    {&home_pet, "宠物管理", "Pet", UI_SCREEN_PET},
+    {&home_ai, "AI小豆", "AI Dou", UI_SCREEN_AI_DOU},
+    {&home_clock, "时间管理", "Time", UI_SCREEN_TIME_MANAGE},
+    {&home_weather, "天气", "Weather", UI_SCREEN_WEATHER},
+    {&home_calendar, "日历", "Calendar", UI_SCREEN_CALENDAR},
+    {&home_record, "录音", "Recorder", UI_SCREEN_RECORDER},
+    {&home_music, "音乐", "Music", UI_SCREEN_MUSIC_LIST},
+    {&home_settings, "设置", "Settings", UI_SCREEN_SETTINGS},
 };
 
 static lv_obj_t *create_home_hotspot(lv_obj_t *parent,
@@ -113,7 +115,7 @@ void ui_Home_screen_init(void)
 
         lv_img_set_src(icon, tile->icon);
         ui_create_label(zone,
-                        tile->label,
+                        ui_i18n_pick(tile->label_zh, tile->label_en),
                         0,
                         122,
                         156,

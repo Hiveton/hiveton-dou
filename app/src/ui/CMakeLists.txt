@@ -19,6 +19,7 @@ SET(SOURCES screens/ui_home_screen.c
     screens/ui_language_screen.c
     home_screen.c
     ui.c
+    ui_i18n.c
     ui_helpers.c
     ui_runtime_adapter.c
 )

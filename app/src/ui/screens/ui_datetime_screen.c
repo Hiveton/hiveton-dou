@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 
 lv_obj_t *ui_Datetime = NULL;
@@ -32,10 +33,10 @@ void ui_Datetime_screen_init(void)
     }
 
     ui_Datetime = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Datetime, "日期与时间", UI_SCREEN_TIME_MANAGE);
+    ui_build_standard_screen(&page, ui_Datetime, ui_i18n_pick("日期与时间", "Date & Time"), UI_SCREEN_TIME_MANAGE);
 
     ui_create_label(page.content,
-                    "当前设备时间",
+                    ui_i18n_pick("当前设备时间", "Current Device Time"),
                     44,
                     62,
                     440,
@@ -55,11 +56,11 @@ void ui_Datetime_screen_init(void)
                     false,
                     false);
 
-    create_datetime_row(page.content, 169, "年", "2026");
-    create_datetime_row(page.content, 253, "月", "01");
-    create_datetime_row(page.content, 337, "日", "14");
-    create_datetime_row(page.content, 421, "时", "15");
-    create_datetime_row(page.content, 505, "分", "30");
+    create_datetime_row(page.content, 169, ui_i18n_pick("年", "Year"), "2026");
+    create_datetime_row(page.content, 253, ui_i18n_pick("月", "Month"), "01");
+    create_datetime_row(page.content, 337, ui_i18n_pick("日", "Day"), "14");
+    create_datetime_row(page.content, 421, ui_i18n_pick("时", "Hour"), "15");
+    create_datetime_row(page.content, 505, ui_i18n_pick("分", "Minute"), "30");
 }
 
 void ui_Datetime_screen_destroy(void)

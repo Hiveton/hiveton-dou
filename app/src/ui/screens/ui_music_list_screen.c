@@ -1,6 +1,7 @@
 #include <stddef.h>
 
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 
 lv_obj_t *ui_Music_List = NULL;
@@ -57,10 +58,10 @@ void ui_Music_List_screen_init(void)
     }
 
     ui_Music_List = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Music_List, "音乐", UI_SCREEN_HOME);
+    ui_build_standard_screen(&page, ui_Music_List, ui_i18n_pick("音乐", "Music"), UI_SCREEN_HOME);
 
     ui_create_label(page.content,
-                    "全部音乐",
+                    ui_i18n_pick("全部音乐", "All Tracks"),
                     24,
                     14,
                     76,
@@ -75,8 +76,8 @@ void ui_Music_List_screen_init(void)
         create_music_card(page.content, 40 + (int)(i * 139), &s_music_items[i]);
     }
 
-    ui_create_button(page.content, 304, 585, 96, 46, "上翻", 26, UI_SCREEN_NONE, false);
-    ui_create_button(page.content, 408, 585, 96, 46, "下翻", 26, UI_SCREEN_NONE, false);
+    ui_create_button(page.content, 304, 585, 96, 46, ui_i18n_pick("上翻", "Prev"), 26, UI_SCREEN_NONE, false);
+    ui_create_button(page.content, 408, 585, 96, 46, ui_i18n_pick("下翻", "Next"), 26, UI_SCREEN_NONE, false);
 }
 
 void ui_Music_List_screen_destroy(void)

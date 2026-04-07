@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 
 lv_obj_t *ui_Music_Player = NULL;
@@ -39,7 +40,7 @@ void ui_Music_Player_screen_init(void)
     }
 
     ui_Music_Player = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Music_Player, "音乐播放器", UI_SCREEN_MUSIC_LIST);
+    ui_build_standard_screen(&page, ui_Music_Player, ui_i18n_pick("音乐播放器", "Music Player"), UI_SCREEN_MUSIC_LIST);
 
     disc = ui_create_card(page.content, 144, 56, 240, 240, UI_SCREEN_NONE, false, 120);
     inner_disc = ui_create_card(disc, 89, 89, 62, 62, UI_SCREEN_NONE, false, 31);
@@ -71,9 +72,9 @@ void ui_Music_Player_screen_init(void)
     create_bar(page.content, 110, 455, 362, 8, false);
     create_bar(page.content, 110, 455, 138, 8, true);
 
-    ui_create_button(page.content, 55, 528, 126, 52, "上一首", 20, UI_SCREEN_NONE, false);
-    ui_create_button(page.content, 201, 528, 126, 52, "播放", 20, UI_SCREEN_NONE, true);
-    ui_create_button(page.content, 347, 528, 126, 52, "下一首", 20, UI_SCREEN_NONE, false);
+    ui_create_button(page.content, 55, 528, 126, 52, ui_i18n_pick("上一首", "Previous"), 20, UI_SCREEN_NONE, false);
+    ui_create_button(page.content, 201, 528, 126, 52, ui_i18n_pick("播放", "Play"), 20, UI_SCREEN_NONE, true);
+    ui_create_button(page.content, 347, 528, 126, 52, ui_i18n_pick("下一首", "Next"), 20, UI_SCREEN_NONE, false);
 }
 
 void ui_Music_Player_screen_destroy(void)

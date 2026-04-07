@@ -1,6 +1,7 @@
 #include <stddef.h>
 
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 
 lv_obj_t *ui_Record_List = NULL;
@@ -8,13 +9,14 @@ lv_obj_t *ui_Record_List = NULL;
 typedef struct
 {
     const char *title;
-    const char *meta;
+    const char *meta_zh;
+    const char *meta_en;
 } ui_record_item_t;
 
 static const ui_record_item_t s_record_items[] = {
-    {"晨读摘录_0318_01.wav", "00:46 · 点击播放"},
-    {"会议备忘_0317_02.wav", "01:12 · 点击播放"},
-    {"临时灵感_0315_03.wav", "00:28 · 点击播放"},
+    {"晨读摘录_0318_01.wav", "00:46 · 点击播放", "00:46 · Tap to play"},
+    {"会议备忘_0317_02.wav", "01:12 · 点击播放", "01:12 · Tap to play"},
+    {"临时灵感_0315_03.wav", "00:28 · 点击播放", "00:28 · Tap to play"},
 };
 
 static void create_record_card(lv_obj_t *parent,
@@ -34,7 +36,7 @@ static void create_record_card(lv_obj_t *parent,
                     false,
                     false);
     ui_create_label(card,
-                    item->meta,
+                    ui_i18n_pick(item->meta_zh, item->meta_en),
                     18,
                     57,
                     430,
@@ -56,7 +58,7 @@ void ui_Record_List_screen_init(void)
     }
 
     ui_Record_List = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Record_List, "录音记录", UI_SCREEN_RECORDER);
+    ui_build_standard_screen(&page, ui_Record_List, ui_i18n_pick("录音记录", "Recordings"), UI_SCREEN_RECORDER);
 
     for (i = 0; i < sizeof(s_record_items) / sizeof(s_record_items[0]); ++i)
     {

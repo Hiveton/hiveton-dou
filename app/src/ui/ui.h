@@ -35,6 +35,13 @@ extern lv_obj_t *ui_Weather_Toggle;
 extern lv_obj_t *ui_Brightness;
 extern lv_obj_t *ui_Language;
 
+typedef enum
+{
+    UI_SETTINGS_LANGUAGE_ZH_CN = 0,
+    UI_SETTINGS_LANGUAGE_EN_US,
+    UI_SETTINGS_LANGUAGE_COUNT
+} ui_settings_language_t;
+
 void ui_Home_screen_init(void);
 void ui_Home_screen_destroy(void);
 const xiaozhi_home_screen_refs_t *ui_home_screen_refs_get(void);
@@ -77,6 +84,12 @@ void ui_Music_Player_screen_init(void);
 void ui_Music_Player_screen_destroy(void);
 void ui_Settings_screen_init(void);
 void ui_Settings_screen_destroy(void);
+ui_settings_language_t ui_settings_get_language(void);
+void ui_settings_set_language(ui_settings_language_t language);
+const char *ui_settings_get_language_label(void);
+int ui_settings_get_sleep_start_minutes(void);
+void ui_settings_set_sleep_start_minutes(int minutes);
+void ui_settings_adjust_sleep_start_minutes(int delta_minutes);
 void ui_Sleep_Time_screen_init(void);
 void ui_Sleep_Time_screen_destroy(void);
 void ui_Weather_Toggle_screen_init(void);

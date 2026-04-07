@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 
 lv_obj_t *ui_Recorder = NULL;
@@ -14,7 +15,7 @@ void ui_Recorder_screen_init(void)
     }
 
     ui_Recorder = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Recorder, "录音", UI_SCREEN_HOME);
+    ui_build_standard_screen(&page, ui_Recorder, ui_i18n_pick("录音", "Recorder"), UI_SCREEN_HOME);
 
     ui_create_label(page.content,
                     "00:00",
@@ -27,7 +28,7 @@ void ui_Recorder_screen_init(void)
                     false,
                     false);
     ui_create_label(page.content,
-                    "点击下方按钮开始录音",
+                    ui_i18n_pick("点击下方按钮开始录音", "Tap the button below to start recording"),
                     0,
                     194,
                     528,
@@ -39,7 +40,7 @@ void ui_Recorder_screen_init(void)
 
     record_button = ui_create_card(page.content, 174, 246, 180, 180, UI_SCREEN_NONE, true, 90);
     ui_create_label(record_button,
-                    "录音",
+                    ui_i18n_pick("录音", "Record"),
                     0,
                     64,
                     180,
@@ -54,7 +55,7 @@ void ui_Recorder_screen_init(void)
                      507,
                      118,
                      48,
-                     "录音记录",
+                     ui_i18n_pick("录音记录", "Recordings"),
                      20,
                      UI_SCREEN_RECORD_LIST,
                      true);

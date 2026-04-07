@@ -7,6 +7,7 @@
 #include "audio_server.h"
 #include "lv_tiny_ttf.h"
 #include "rtdevice.h"
+#include "ui_i18n.h"
 #include "ui_runtime_adapter.h"
 #include "../xiaozhi/weather/weather.h"
 
@@ -257,7 +258,7 @@ static void ui_status_bar_refresh_datetime(void)
                     current_time.year,
                     current_time.month,
                     current_time.day,
-                    current_time.weekday_str[0] != '\0' ? current_time.weekday_str : "周?",
+                    ui_i18n_translate_weekday_label(current_time.weekday_str[0] != '\0' ? current_time.weekday_str : ui_i18n_weekday_fallback()),
                     current_weather.temperature);
     }
     else
@@ -268,7 +269,7 @@ static void ui_status_bar_refresh_datetime(void)
                     current_time.year,
                     current_time.month,
                     current_time.day,
-                    current_time.weekday_str[0] != '\0' ? current_time.weekday_str : "周?");
+                    ui_i18n_translate_weekday_label(current_time.weekday_str[0] != '\0' ? current_time.weekday_str : ui_i18n_weekday_fallback()));
     }
 
     for (i = 0; i < sizeof(s_screen_refs) / sizeof(s_screen_refs[0]); ++i)
@@ -804,20 +805,20 @@ static void ui_status_update_panel_visuals(void)
 
         if (s_status_panel.bluetooth_title_label != NULL)
         {
-            lv_label_set_text(s_status_panel.bluetooth_title_label, "蓝牙");
+            lv_label_set_text(s_status_panel.bluetooth_title_label, ui_i18n_pick("蓝牙", "Bluetooth"));
         }
         if (s_status_panel.bluetooth_subtitle_label != NULL)
         {
             switch (bt_state)
             {
             case UI_STATUS_BLUETOOTH_CONNECTED:
-                bt_subtitle = "已连接";
+                bt_subtitle = ui_i18n_pick("已连接", "Connected");
                 break;
             case UI_STATUS_BLUETOOTH_WAITING:
-                bt_subtitle = "连接中";
+                bt_subtitle = ui_i18n_pick("连接中", "Connecting");
                 break;
             default:
-                bt_subtitle = bt_pairing_enabled ? "已开启" : "未开启";
+                bt_subtitle = bt_pairing_enabled ? ui_i18n_pick("已开启", "Enabled") : ui_i18n_pick("未开启", "Disabled");
                 break;
             }
             lv_label_set_text(s_status_panel.bluetooth_subtitle_label, bt_subtitle);
@@ -825,7 +826,7 @@ static void ui_status_update_panel_visuals(void)
         if (s_status_panel.bluetooth_value_label != NULL)
         {
             lv_label_set_text(s_status_panel.bluetooth_value_label,
-                              s_status_panel.bluetooth_enabled ? "开" : "关");
+                              s_status_panel.bluetooth_enabled ? ui_i18n_pick("开", "On") : ui_i18n_pick("关", "Off"));
         }
     }
 
@@ -839,13 +840,13 @@ static void ui_status_update_panel_visuals(void)
         }
         if (s_status_panel.network_subtitle_label != NULL)
         {
-            network_subtitle = network_ready ? "已联网" : "未联网";
+            network_subtitle = network_ready ? ui_i18n_pick("已联网", "Online") : ui_i18n_pick("未联网", "Offline");
             lv_label_set_text(s_status_panel.network_subtitle_label, network_subtitle);
         }
         if (s_status_panel.network_value_label != NULL)
         {
             lv_label_set_text(s_status_panel.network_value_label,
-                              s_status_panel.network_enabled ? "开" : "关");
+                              s_status_panel.network_enabled ? ui_i18n_pick("开", "On") : ui_i18n_pick("关", "Off"));
         }
     }
 }
@@ -965,7 +966,7 @@ static void ui_status_sync_timer_cb(lv_timer_t *timer)
     {
         s_status_panel.waiting_requested = false;
         s_status_panel.suppress_connected_state = false;
-        ui_status_show_toast("蓝牙连接成功");
+        ui_status_show_toast(ui_i18n_pick("蓝牙连接成功", "Bluetooth connected"));
     }
     else if (!bt_connected && s_status_panel.last_bt_connected)
     {
@@ -1458,7 +1459,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
     status_right_x = inner_x + status_card_w + status_gap;
 
     ui_create_label(panel,
-                    "设备控制",
+                    ui_i18n_pick("设备控制", "Device Control"),
                     inner_x,
                     16,
                     180,
@@ -1468,7 +1469,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                     false,
                     false);
     ui_create_label(panel,
-                    "亮度、音量、蓝牙和 4G",
+                    ui_i18n_pick("亮度、音量、蓝牙和 4G", "Brightness, volume, Bluetooth, and 4G"),
                     panel_w - 220,
                     18,
                     202,
@@ -1484,7 +1485,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
     lv_obj_set_size(line, ui_px_w(inner_w), ui_px_h(2));
 
     ui_create_label(panel,
-                    "屏幕亮度",
+                    ui_i18n_pick("屏幕亮度", "Brightness"),
                     inner_x,
                     74,
                     160,
@@ -1514,7 +1515,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                                    UI_STATUS_SLIDER_BRIGHTNESS);
 
     ui_create_label(panel,
-                    "声音音量",
+                    ui_i18n_pick("声音音量", "Volume"),
                     inner_x,
                     152,
                     160,
@@ -1545,7 +1546,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
 
     s_status_panel.bluetooth_card = ui_create_card(panel, inner_x, 236, status_card_w, 60, UI_SCREEN_NONE, false, 0);
     s_status_panel.bluetooth_title_label = ui_create_label(s_status_panel.bluetooth_card,
-                                                           "蓝牙",
+                                                           ui_i18n_pick("蓝牙", "Bluetooth"),
                                                            14,
                                                            9,
                                                            96,
@@ -1555,7 +1556,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                                                            false,
                                                            false);
     s_status_panel.bluetooth_subtitle_label = ui_create_label(s_status_panel.bluetooth_card,
-                                                              "未开启",
+                                                              ui_i18n_pick("未开启", "Disabled"),
                                                               14,
                                                               33,
                                                               110,
@@ -1565,7 +1566,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                                                               false,
                                                               false);
     s_status_panel.bluetooth_value_label = ui_create_label(s_status_panel.bluetooth_card,
-                                                           "关",
+                                                           ui_i18n_pick("关", "Off"),
                                                            status_card_w - 56,
                                                            18,
                                                            36,
@@ -1595,7 +1596,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                                                          false,
                                                          false);
     s_status_panel.network_subtitle_label = ui_create_label(s_status_panel.network_card,
-                                                            "未联网",
+                                                            ui_i18n_pick("未联网", "Offline"),
                                                             14,
                                                             33,
                                                             110,
@@ -1605,7 +1606,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                                                             false,
                                                             false);
     s_status_panel.network_value_label = ui_create_label(s_status_panel.network_card,
-                                                         "关",
+                                                         ui_i18n_pick("关", "Off"),
                                                          status_card_w - 56,
                                                          18,
                                                          36,
@@ -2117,7 +2118,7 @@ void ui_build_status_bar_ex(lv_obj_t *parent,
                                  false,
                                  false);
     meta_label = ui_create_label(bar,
-                                 "2026/01/14\n星期三 23°C",
+                                 ui_i18n_pick("2026/01/14\n星期三 23°C", "2026/01/14\nWed 23C"),
                                  142,
                                  14,
                                  150,
@@ -2242,8 +2243,8 @@ void ui_build_standard_screen_ex(ui_screen_scaffold_t *scaffold,
                     LV_TEXT_ALIGN_CENTER,
                     false,
                     false);
-    ui_create_nav_button(title_bar, 0, 0, 96, 58, "返回", back_target);
-    ui_create_nav_button(title_bar, s_screen_width - 96, 0, 96, 58, "主页", UI_SCREEN_HOME);
+    ui_create_nav_button(title_bar, 0, 0, 96, 58, ui_i18n_pick("返回", "Back"), back_target);
+    ui_create_nav_button(title_bar, s_screen_width - 96, 0, 96, 58, ui_i18n_pick("主页", "Home"), UI_SCREEN_HOME);
 
     content = lv_obj_create(section);
     ui_apply_basic_object_style(content, false, 0, 0);

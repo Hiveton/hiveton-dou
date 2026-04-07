@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "ui_i18n.h"
 #include "ui_helpers.h"
 #include "xiaozhi/xiaozhi_client_public.h"
 #include "xiaozhi/xiaozhi_service.h"
@@ -68,6 +69,17 @@ static xz_service_ui_callbacks_t s_ui_cbs = {
     .on_error = on_error,
 };
 static ai_ui_pending_state_t s_ai_pending = {0};
+
+static const char *ai_ui_text_idle(void)
+{
+    return ui_i18n_pick("静候你开口", "Ready for you");
+}
+
+static const char *ai_ui_text_prompt(void)
+{
+    return ui_i18n_pick("今天想聊什么？你可以问我阅读内容、让我整理想法，或者直接说一句想记录的话。",
+                        "What would you like to talk about today? Ask about your reading, let me organize your ideas, or just say something you want to remember.");
+}
 
 static void ai_set_label_if_changed(lv_obj_t *label,
                                     char *cache,
@@ -145,33 +157,33 @@ static void ai_ui_sync_timer_cb(lv_timer_t *timer)
         {
         case XZ_SERVICE_READY:
             ai_set_label_if_changed(s_ai_mouth_label, s_ai_mouth_cache,
-                                    sizeof(s_ai_mouth_cache), "静候你开口");
+                                    sizeof(s_ai_mouth_cache), ai_ui_text_idle());
             if (!pending.copy_valid)
             {
                 ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
                                         sizeof(s_ai_copy_cache),
-                                        "今天想聊什么？你可以问我阅读内容、让我整理想法，或者直接说一句想记录的话。");
+                                        ai_ui_text_prompt());
             }
             ai_set_face_if_changed(&funny2);
             break;
         case XZ_SERVICE_LISTENING:
             ai_set_label_if_changed(s_ai_mouth_label, s_ai_mouth_cache,
-                                    sizeof(s_ai_mouth_cache), "正在聆听");
+                                    sizeof(s_ai_mouth_cache), ui_i18n_pick("正在聆听", "Listening"));
             if (!pending.copy_valid)
             {
                 ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
-                                        sizeof(s_ai_copy_cache), "请说话...");
+                                        sizeof(s_ai_copy_cache), ui_i18n_pick("请说话...", "Please speak..."));
             }
             ai_set_face_if_changed(&sleepy2);
             break;
         case XZ_SERVICE_SPEAKING:
             ai_set_label_if_changed(s_ai_mouth_label, s_ai_mouth_cache,
-                                    sizeof(s_ai_mouth_cache), "正在回答");
+                                    sizeof(s_ai_mouth_cache), ui_i18n_pick("正在回答", "Responding"));
             ai_set_face_if_changed(&funny2);
             break;
         case XZ_SERVICE_CLOSING:
             ai_set_label_if_changed(s_ai_mouth_label, s_ai_mouth_cache,
-                                    sizeof(s_ai_mouth_cache), "服务关闭中");
+                                    sizeof(s_ai_mouth_cache), ui_i18n_pick("服务关闭中", "Closing"));
             break;
         default:
             break;
@@ -193,7 +205,7 @@ static void ai_ui_sync_timer_cb(lv_timer_t *timer)
 static void update_talk_button_text(xz_service_state_t state)
 {
     lv_obj_t *label;
-    const char *text = "点击开始说话";
+    const char *text = ui_i18n_pick("点击开始说话", "Tap to talk");
 
     if (s_talk_button == NULL)
     {
@@ -209,19 +221,19 @@ static void update_talk_button_text(xz_service_state_t state)
     switch (state)
     {
     case XZ_SERVICE_LISTENING:
-        text = "点击停止并发送";
+        text = ui_i18n_pick("点击停止并发送", "Tap to stop and send");
         break;
     case XZ_SERVICE_SPEAKING:
-        text = "点击重新说话";
+        text = ui_i18n_pick("点击重新说话", "Tap to speak again");
         break;
     case XZ_SERVICE_INITING:
-        text = "连接中...";
+        text = ui_i18n_pick("连接中...", "Connecting...");
         break;
     case XZ_SERVICE_CLOSING:
-        text = "关闭中...";
+        text = ui_i18n_pick("关闭中...", "Closing...");
         break;
     default:
-        text = "点击开始说话";
+        text = ui_i18n_pick("点击开始说话", "Tap to talk");
         break;
     }
 
@@ -252,17 +264,18 @@ static void ai_service_boot_timer_cb(lv_timer_t *timer)
     {
         ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
                                 sizeof(s_ai_copy_cache),
-                                "服务启动失败，请检查蓝牙网络连接");
+                                ui_i18n_pick("服务启动失败，请检查蓝牙网络连接",
+                                             "Service failed to start. Please check Bluetooth and network."));
         ai_set_label_if_changed(s_ai_mouth_label, s_ai_mouth_cache,
-                                sizeof(s_ai_mouth_cache), "启动失败");
+                                sizeof(s_ai_mouth_cache), ui_i18n_pick("启动失败", "Start Failed"));
         return;
     }
 
     ai_set_label_if_changed(s_ai_mouth_label, s_ai_mouth_cache,
-                            sizeof(s_ai_mouth_cache), "连接小智中");
+                            sizeof(s_ai_mouth_cache), ui_i18n_pick("连接小智中", "Connecting Xiaozhi"));
     ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
                             sizeof(s_ai_copy_cache),
-                            "页面已稳定，正在连接小智...");
+                            ui_i18n_pick("页面已稳定，正在连接小智...", "The page is ready. Connecting Xiaozhi..."));
 
     if (s_ai_greeting_timer == NULL)
     {
@@ -300,11 +313,11 @@ static void ai_restore_runtime_state(void)
     {
         if (xiaozhi_service_get_session_id() != NULL)
         {
-            on_chat_output("小智已保持连接");
+            on_chat_output(ui_i18n_pick("小智已保持连接", "Xiaozhi is still connected"));
         }
         else
         {
-            on_chat_output("正在恢复小智状态...");
+            on_chat_output(ui_i18n_pick("正在恢复小智状态...", "Restoring Xiaozhi state..."));
         }
     }
 }
@@ -331,13 +344,13 @@ static void update_network_status(void)
     network_ready = s_ai_last_network_ready;
 
     if (network_ready == 1) {
-        text = "已连接";
+        text = ui_i18n_pick("已连接", "Connected");
         lv_obj_set_style_text_color(s_network_label, lv_color_hex(0x000000), 0);
     } else if (xiaozhi_service_get_state() != XZ_SERVICE_IDLE) {
-        text = "连接中";
+        text = ui_i18n_pick("连接中", "Connecting");
         lv_obj_set_style_text_color(s_network_label, lv_color_hex(0x000000), 0);
     } else {
-        text = "未连接";
+        text = ui_i18n_pick("未连接", "Offline");
         lv_obj_set_style_text_color(s_network_label, lv_color_hex(0x000000), 0);
     }
 
@@ -427,7 +440,7 @@ static void ai_talk_button_event_cb(lv_event_t *e)
     
     /* 检查网络状态 */
     if (check_internet_access() != 1) {
-        lv_label_set_text(s_ai_copy_label, "请先连接网络");
+        lv_label_set_text(s_ai_copy_label, ui_i18n_pick("请先连接网络", "Please connect to the network first"));
         return;
     }
     
@@ -435,14 +448,14 @@ static void ai_talk_button_event_cb(lv_event_t *e)
 
     if (state == XZ_SERVICE_INITING || state == XZ_SERVICE_CLOSING)
     {
-        lv_label_set_text(s_ai_copy_label, "小智正在准备，请稍后再试");
+        lv_label_set_text(s_ai_copy_label, ui_i18n_pick("小智正在准备，请稍后再试", "Xiaozhi is getting ready. Please try again shortly."));
         return;
     }
 
     if (s_stop_pending)
     {
         update_talk_button_text(XZ_SERVICE_READY);
-        lv_label_set_text(s_ai_copy_label, "正在发送给小智，请稍候...");
+        lv_label_set_text(s_ai_copy_label, ui_i18n_pick("正在发送给小智，请稍候...", "Sending to Xiaozhi, please wait..."));
         return;
     }
 
@@ -451,8 +464,8 @@ static void ai_talk_button_event_cb(lv_event_t *e)
         s_stop_pending = true;
         xiaozhi_service_stop_listening();
         update_talk_button_text(XZ_SERVICE_READY);
-        lv_label_set_text(s_ai_mouth_label, "正在发送");
-        lv_label_set_text(s_ai_copy_label, "录音结束，正在发送给小智...");
+        lv_label_set_text(s_ai_mouth_label, ui_i18n_pick("正在发送", "Sending"));
+        lv_label_set_text(s_ai_copy_label, ui_i18n_pick("录音结束，正在发送给小智...", "Recording finished. Sending to Xiaozhi..."));
         return;
     }
 
@@ -461,16 +474,16 @@ static void ai_talk_button_event_cb(lv_event_t *e)
     if (state == XZ_SERVICE_SPEAKING)
     {
         ai_set_label_if_changed(s_ai_mouth_label, s_ai_mouth_cache,
-                                sizeof(s_ai_mouth_cache), "正在聆听");
+                                sizeof(s_ai_mouth_cache), ui_i18n_pick("正在聆听", "Listening"));
         ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
                                 sizeof(s_ai_copy_cache),
-                                "已打断当前回答，开始重新录音...");
+                                ui_i18n_pick("已打断当前回答，开始重新录音...", "Current reply interrupted. Recording again..."));
     }
     else
     {
         ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
                                 sizeof(s_ai_copy_cache),
-                                "开始录音，再点一次即可停止并发送");
+                                ui_i18n_pick("开始录音，再点一次即可停止并发送", "Recording started. Tap again to stop and send."));
     }
 }
 
@@ -488,7 +501,7 @@ void ui_AI_Dou_screen_init(void)
     }
     
     ui_AI_Dou = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_AI_Dou, "AI小豆", UI_SCREEN_HOME);
+    ui_build_standard_screen(&page, ui_AI_Dou, ui_i18n_pick("AI小豆", "AI Dou"), UI_SCREEN_HOME);
 
     if (s_ai_pending_mutex == RT_NULL)
     {
@@ -518,7 +531,7 @@ void ui_AI_Dou_screen_init(void)
     lv_obj_set_pos(s_network_label, 426, 20);
     lv_obj_set_style_text_font(s_network_label, ui_font_get(16), 0);
     ai_set_label_if_changed(s_network_label, s_ai_network_cache,
-                            sizeof(s_ai_network_cache), "检查中...");
+                            sizeof(s_ai_network_cache), ui_i18n_pick("检查中...", "Checking..."));
     update_network_status();
     
     face = ui_create_card(page.content, 174, 34, 180, 180, UI_SCREEN_NONE, false, 90);
@@ -531,7 +544,7 @@ void ui_AI_Dou_screen_init(void)
 
     dialog_card = ui_create_card(page.content, 24, 250, 480, 190, UI_SCREEN_NONE, false, 0);
     s_ai_mouth_label = ui_create_label(dialog_card,
-                                       "初始化中...",
+                                       ui_i18n_pick("初始化中...", "Initializing..."),
                                        0,
                                        20,
                                        480,
@@ -541,7 +554,7 @@ void ui_AI_Dou_screen_init(void)
                                        false,
                                        false);
     s_ai_copy_label = ui_create_label(dialog_card,
-                                      "正在启动AI服务...",
+                                      ui_i18n_pick("正在启动AI服务...", "Starting AI service..."),
                                       24,
                                       76,
                                       432,
@@ -556,7 +569,7 @@ void ui_AI_Dou_screen_init(void)
                                    475,
                                    200,
                                    64,
-                                   "点击开始说话",
+                                   ui_i18n_pick("点击开始说话", "Tap to talk"),
                                    26,
                                    UI_SCREEN_NONE,
                                    true);
@@ -564,7 +577,8 @@ void ui_AI_Dou_screen_init(void)
     lv_obj_set_style_radius(talk_button, ui_px_x(32), 0);
     lv_obj_add_event_cb(talk_button, ai_talk_button_event_cb, LV_EVENT_CLICKED, NULL);
     ui_create_label(page.content,
-                    "点击一次开始录音，再点击一次停止并发送给小智。也可直接说\"你好小智\"唤醒。",
+                    ui_i18n_pick("点击一次开始录音，再点击一次停止并发送给小智。也可直接说\"你好小智\"唤醒。",
+                                 "Tap once to start recording, tap again to stop and send. You can also wake it with \"Hello Xiaozhi\"."),
                     52,
                     555,
                     424,
@@ -575,10 +589,10 @@ void ui_AI_Dou_screen_init(void)
                     true);
     
     ai_set_label_if_changed(s_ai_mouth_label, s_ai_mouth_cache,
-                            sizeof(s_ai_mouth_cache), "页面准备中...");
+                            sizeof(s_ai_mouth_cache), ui_i18n_pick("页面准备中...", "Preparing page..."));
     ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
                             sizeof(s_ai_copy_cache),
-                            "先完成页面渲染，再启动小智服务...");
+                            ui_i18n_pick("先完成页面渲染，再启动小智服务...", "Finishing page rendering before starting Xiaozhi..."));
     lv_obj_update_layout(ui_AI_Dou);
     lv_obj_invalidate(ui_AI_Dou);
     lv_refr_now(NULL);
