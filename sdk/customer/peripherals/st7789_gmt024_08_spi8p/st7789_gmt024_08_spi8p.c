@@ -146,6 +146,8 @@ static void EPD_SetBacklight(uint8_t br)
     rt_err_t result;
     rt_uint32_t pulse;
 
+    rt_kprintf("bl_trace: st7789 EPD_SetBacklight=%u\n", br);
+
     if (br > 100)
     {
         br = 100;
@@ -1440,7 +1442,6 @@ void EPD_Sleep(LCDC_HandleTypeDef *hlcdc)
 static void LCD_Init(LCDC_HandleTypeDef *hlcdc)
 {
     LCD_Drv_Init(hlcdc, EPD_FULL);
-    EPD_SetBacklight(100);
     rt_kprintf("EPD initialized\n");
     // rt_thread_mdelay(1000);
     rt_kprintf("EPD initialized\n");
@@ -1661,6 +1662,7 @@ static void LCD_SetColorMode(LCDC_HandleTypeDef *hlcdc, uint16_t color_mode)
 
 static void LCD_SetBrightness(LCDC_HandleTypeDef *hlcdc, uint8_t br)
 {
+    rt_kprintf("bl_trace: st7789 LCD_SetBrightness=%u\n", br);
     EPD_SetBacklight(br);
 }
 
@@ -1822,9 +1824,9 @@ static const LCD_DrvOpsDef epd_spi_drv = {
     .WriteMultiplePixels = LCD_WriteMultiplePixels,
     .ReadPixel = LCD_ReadPixel,
     .SetColorMode = LCD_SetColorMode,
-    .SetBrightness = LCD_SetBrightness,
-    .IdleModeOn = LCD_IdleModeOn,
-    .IdleModeOff = LCD_IdleModeOff,
+    .SetBrightness = RT_NULL,
+    .IdleModeOn = RT_NULL,
+    .IdleModeOff = RT_NULL,
 };
 
 LCD_DRIVER_EXPORT(epd_spi, EPD_LCD_ID, &lcdc_int_cfg, &epd_spi_drv,

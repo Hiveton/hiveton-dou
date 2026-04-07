@@ -112,7 +112,6 @@
 #define DEBUG_PRINTF(...)   LOG_I(__VA_ARGS__)
 
 #define REG_BRIGHTNESS_MAX 0xFF
-
 #define QAD_SPI_ITF LCDC_INTF_SPI_DCX_4DATA
 
 static LCDC_InitTypeDef lcdc_int_cfg_qadspi =
@@ -143,8 +142,6 @@ static LCDC_InitTypeDef lcdc_int_cfg_qadspi =
     },
 
 };
-
-
 static LCDC_InitTypeDef lcdc_int_cfg;
 
 static uint32_t LCD_ReadID(LCDC_HandleTypeDef *hlcdc);
@@ -152,7 +149,6 @@ static void LCD_SetRegion(LCDC_HandleTypeDef *hlcdc, uint16_t Xpos0, uint16_t Yp
 static void     LCD_WriteReg(LCDC_HandleTypeDef *hlcdc, uint16_t LCD_Reg, uint8_t *Parameters, uint32_t NbParameters);
 static uint32_t LCD_ReadData(LCDC_HandleTypeDef *hlcdc, uint16_t RegValue, uint8_t ReadSize);
 static void LCD_ReadMode(LCDC_HandleTypeDef *hlcdc, bool enable);
-
 
 /**
   * @brief  spi read/write mode

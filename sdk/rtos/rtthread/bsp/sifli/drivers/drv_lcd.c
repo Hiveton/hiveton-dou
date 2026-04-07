@@ -1060,6 +1060,10 @@ static rt_err_t lcd_set_brightness(uint8_t bright)
     if (IS_DRV_LCD_ERROR()) return RT_ERROR;
 
     LOG_I("set brightness %d", bright);
+    rt_kprintf("bl_trace: drv_lcd lcd_set_brightness=%u drv_brightness=%u status=%d\n",
+               bright,
+               drv_lcd.brightness,
+               drv_lcd.status);
 
     //In case of async_send_timeout_handler called before semaphore timeout
     if (drv_lcd.p_drv_ops && drv_lcd.p_drv_ops->p_ops->SetBrightness)
@@ -2834,23 +2838,11 @@ static rt_size_t backligt_set(rt_device_t dev, rt_off_t pos, const void *buffer,
         uint8_t percent = *((uint8_t *) buffer);
 
         if (percent > 100) percent = 100;
-
-        struct rt_device_pwm *backlight_device = (struct rt_device_pwm *)rt_device_find(LCD_PWM_BACKLIGHT_INTERFACE_NAME);
-        if (!backlight_device)
-        {
-            RT_ASSERT(0);
-        }
-        else
-        {
-            rt_uint32_t period = LCD_PWM_BACKLIGHT_PEROID;
-            LOG_I("backligt_set %d%", percent);
-
-            rt_pwm_set(backlight_device, LCD_PWM_BACKLIGHT_CHANEL_NUM, period, period * percent / 100);
-            if (0 == percent)
-                rt_pwm_disable(backlight_device, LCD_PWM_BACKLIGHT_CHANEL_NUM);
-            else
-                rt_pwm_enable(backlight_device, LCD_PWM_BACKLIGHT_CHANEL_NUM);
-        }
+        /*
+         * Keep lcdlight readable for diagnostics, but stop this generic path
+         * from driving the board backlight PWM while the board layer owns PA01.
+         */
+        LOG_I("backligt_set bypass pwm %d%", percent);
 
         lcd_backlight_level = percent;
 
