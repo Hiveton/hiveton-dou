@@ -23,6 +23,7 @@
 #include "ui/ui.h"
 #include "ui/ui_dispatch.h"
 #include "ui/ui_runtime_adapter.h"
+#include "xiaozhi/weather/weather.h"
 #include "xiaozhi/bt_env.h"
 #include "xiaozhi/xiaozhi_client_public.h"
 #include "mem_section.h"
@@ -529,6 +530,12 @@ int main(void)
     if (result != RT_EOK)
     {
         return 0;
+    }
+
+    result = xiaozhi_weather_service_start();
+    if (result != RT_EOK)
+    {
+        rt_kprintf("weather: service start failed=%d\n", result);
     }
 
     while (1)

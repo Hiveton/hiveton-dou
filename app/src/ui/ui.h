@@ -60,6 +60,7 @@ void ui_Pomodoro_screen_destroy(void);
 void ui_Datetime_screen_init(void);
 void ui_Datetime_screen_destroy(void);
 void ui_Weather_screen_init(void);
+void ui_Weather_screen_refresh(void);
 void ui_Weather_screen_destroy(void);
 void ui_Calendar_screen_init(void);
 void ui_Calendar_screen_destroy(void);

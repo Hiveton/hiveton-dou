@@ -1,7 +1,12 @@
 #include "ui.h"
 #include "ui_helpers.h"
+#include "ui_runtime_adapter.h"
+#include "../../xiaozhi/weather/weather.h"
 
 lv_obj_t *ui_Weather_Toggle = NULL;
+
+static lv_obj_t *s_weather_toggle_button = NULL;
+static lv_obj_t *s_weather_toggle_desc = NULL;
 
 static lv_obj_t *create_toggle_divider(lv_obj_t *parent, int x, int y, int w)
 {
@@ -18,6 +23,44 @@ static lv_obj_t *create_toggle_divider(lv_obj_t *parent, int x, int y, int w)
     lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(line, lv_color_hex(0xD9D9D9), 0);
     return line;
+}
+
+static void ui_weather_toggle_refresh(void)
+{
+    bool enabled = xiaozhi_weather_is_home_entry_enabled();
+
+    if (s_weather_toggle_button != NULL)
+    {
+        lv_obj_t *label = lv_obj_get_child(s_weather_toggle_button, 0);
+
+        if (label != NULL)
+        {
+            lv_label_set_text(label, enabled ? "开启" : "关闭");
+        }
+    }
+
+    if (s_weather_toggle_desc != NULL)
+    {
+        lv_label_set_text(s_weather_toggle_desc,
+                          enabled ?
+                              "关闭后首页不显示天气入口，但天气功能仍可从设置页进入。" :
+                              "开启后首页会恢复天气入口，并继续自动同步天气数据。");
+    }
+}
+
+static void ui_weather_toggle_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    xiaozhi_weather_set_home_entry_enabled(!xiaozhi_weather_is_home_entry_enabled());
+    ui_weather_toggle_refresh();
+
+    ui_Home_screen_destroy();
+    ui_Settings_screen_destroy();
+    ui_runtime_reload(UI_SCREEN_WEATHER_TOGGLE);
 }
 
 void ui_Weather_Toggle_screen_init(void)
@@ -46,18 +89,21 @@ void ui_Weather_Toggle_screen_init(void)
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     false);
-    ui_create_button(panel, 352, 92, 88, 40, "开启", 18, UI_SCREEN_NONE, true);
+    s_weather_toggle_button = ui_create_button(panel, 352, 92, 88, 40, "开启", 18, UI_SCREEN_NONE, true);
+    lv_obj_add_event_cb(s_weather_toggle_button, ui_weather_toggle_event_cb, LV_EVENT_CLICKED, NULL);
+
     create_toggle_divider(panel, 44, 146, 440);
-    ui_create_label(panel,
-                    "关闭后首页不显示天气入口，但天气功能仍可从设置页进入。",
-                    48,
-                    160,
-                    440,
-                    58,
-                    18,
-                    LV_TEXT_ALIGN_LEFT,
-                    false,
-                    true);
+    s_weather_toggle_desc = ui_create_label(panel,
+                                            "",
+                                            48,
+                                            160,
+                                            440,
+                                            58,
+                                            18,
+                                            LV_TEXT_ALIGN_LEFT,
+                                            false,
+                                            true);
+    ui_weather_toggle_refresh();
 }
 
 void ui_Weather_Toggle_screen_destroy(void)
@@ -67,4 +113,7 @@ void ui_Weather_Toggle_screen_destroy(void)
         lv_obj_delete(ui_Weather_Toggle);
         ui_Weather_Toggle = NULL;
     }
+
+    s_weather_toggle_button = NULL;
+    s_weather_toggle_desc = NULL;
 }

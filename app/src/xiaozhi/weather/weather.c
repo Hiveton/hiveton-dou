@@ -25,6 +25,17 @@
 static volatile int g_weather_sync_in_progress = 0;  // 天气同步进行标志
 static volatile int g_ntp_sync_in_progress = 0;      // NTP同步进行标志
 static volatile int g_network_available = 0;
+static volatile int g_weather_service_started = 0;
+static rt_thread_t g_weather_service_thread = RT_NULL;
+static rt_event_t g_weather_service_event = RT_NULL;
+static bool g_weather_home_entry_enabled = true;
+
+#define WEATHER_SERVICE_STACK_SIZE 6144
+#define WEATHER_SERVICE_PRIORITY   21
+#define WEATHER_SERVICE_TICK       10
+#define WEATHER_SERVICE_EVT_REFRESH (1UL << 0)
+#define WEATHER_SERVICE_POLL_MS_SUCCESS (30 * 60 * 1000U)
+#define WEATHER_SERVICE_POLL_MS_RETRY   (5 * 60 * 1000U)
 
 extern const lv_image_dsc_t w0;   // 晴
 extern const lv_image_dsc_t w1;   // 多云
@@ -96,6 +107,166 @@ static const char *month_names[] = {"",     "一月",   "二月",  "三月", "�
 // 添加NTP服务器列表
 static const char *ntp_servers[] = {"ntp.aliyun.com", "time.windows.com",
                                     "pool.ntp.org", "cn.pool.ntp.org"};
+
+static const lv_image_dsc_t *weather_icon_from_code(const char *code)
+{
+    long value;
+    char *endptr = RT_NULL;
+
+    if (code == RT_NULL || code[0] == '\0')
+    {
+        return &w99;
+    }
+
+    value = strtol(code, &endptr, 10);
+    if (endptr == code || *endptr != '\0')
+    {
+        return &w99;
+    }
+
+    switch (value)
+    {
+    case 0: return &w0;
+    case 1: return &w1;
+    case 2: return &w2;
+    case 3: return &w3;
+    case 4: return &w4;
+    case 5: return &w5;
+    case 6: return &w6;
+    case 7: return &w7;
+    case 8: return &w8;
+    case 9: return &w9;
+    case 10: return &w10;
+    case 11: return &w11;
+    case 12: return &w12;
+    case 13: return &w13;
+    case 14: return &w14;
+    case 15: return &w15;
+    case 16: return &w16;
+    case 17: return &w17;
+    case 18: return &w18;
+    case 19: return &w19;
+    case 20: return &w20;
+    case 21: return &w21;
+    case 22: return &w22;
+    case 23: return &w23;
+    case 24: return &w24;
+    case 25: return &w25;
+    case 26: return &w26;
+    case 27: return &w27;
+    case 28: return &w28;
+    case 29: return &w29;
+    case 30: return &w30;
+    case 31: return &w31;
+    case 32: return &w32;
+    case 33: return &w33;
+    case 34: return &w34;
+    case 35: return &w35;
+    case 36: return &w36;
+    case 37: return &w37;
+    case 38: return &w38;
+    default: return &w99;
+    }
+}
+
+const lv_image_dsc_t *xiaozhi_weather_get_icon(const char *code)
+{
+    return weather_icon_from_code(code);
+}
+
+int xiaozhi_weather_peek(weather_info_t *weather_info)
+{
+    if (weather_info == RT_NULL)
+    {
+        return -RT_EINVAL;
+    }
+
+    *weather_info = g_current_weather;
+    return (g_current_weather.last_update > 0) ? RT_EOK : -RT_ERROR;
+}
+
+bool xiaozhi_weather_is_home_entry_enabled(void)
+{
+    return g_weather_home_entry_enabled;
+}
+
+void xiaozhi_weather_set_home_entry_enabled(bool enabled)
+{
+    g_weather_home_entry_enabled = enabled;
+}
+
+static void weather_service_thread_entry(void *parameter)
+{
+    rt_uint32_t events = 0U;
+    rt_int32_t wait_ms = 1000;
+
+    LV_UNUSED(parameter);
+    xiaozhi_time_weather_init();
+
+    while (1)
+    {
+        if (g_weather_service_event != RT_NULL &&
+            rt_event_recv(g_weather_service_event,
+                          WEATHER_SERVICE_EVT_REFRESH,
+                          RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
+                          rt_tick_from_millisecond((rt_uint32_t)wait_ms),
+                          &events) == RT_EOK)
+        {
+            LV_UNUSED(events);
+        }
+
+        xiaozhi_time_weather();
+        wait_ms = (g_current_weather.last_update > 0) ?
+                  WEATHER_SERVICE_POLL_MS_SUCCESS :
+                  WEATHER_SERVICE_POLL_MS_RETRY;
+    }
+}
+
+int xiaozhi_weather_service_start(void)
+{
+    if (g_weather_service_started)
+    {
+        return RT_EOK;
+    }
+
+    if (g_weather_service_event == RT_NULL)
+    {
+        g_weather_service_event = rt_event_create("weather", RT_IPC_FLAG_FIFO);
+        if (g_weather_service_event == RT_NULL)
+        {
+            return -RT_ENOMEM;
+        }
+    }
+
+    g_weather_service_thread =
+        rt_thread_create("weather_sync",
+                         weather_service_thread_entry,
+                         RT_NULL,
+                         WEATHER_SERVICE_STACK_SIZE,
+                         WEATHER_SERVICE_PRIORITY,
+                         WEATHER_SERVICE_TICK);
+    if (g_weather_service_thread == RT_NULL)
+    {
+        return -RT_ENOMEM;
+    }
+
+    g_weather_service_started = 1;
+    rt_thread_startup(g_weather_service_thread);
+    return RT_EOK;
+}
+
+void xiaozhi_weather_request_refresh(void)
+{
+    if (xiaozhi_weather_service_start() != RT_EOK)
+    {
+        return;
+    }
+
+    if (g_weather_service_event != RT_NULL)
+    {
+        rt_event_send(g_weather_service_event, WEATHER_SERVICE_EVT_REFRESH);
+    }
+}
 
 /**
  * @brief 获取周几的中文字符串
@@ -401,6 +572,44 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
             weather_info->temperature = atoi(temperature->valuestring);
         }
 
+        {
+            cJSON *feels_like = cJSON_GetObjectItem(now, "feels_like");
+            if (feels_like && cJSON_IsString(feels_like))
+            {
+                weather_info->feels_like = atoi(feels_like->valuestring);
+            }
+        }
+
+        {
+            cJSON *humidity = cJSON_GetObjectItem(now, "humidity");
+            if (humidity && cJSON_IsString(humidity))
+            {
+                weather_info->humidity = atoi(humidity->valuestring);
+            }
+        }
+
+        {
+            cJSON *wind_direction = cJSON_GetObjectItem(now, "wind_direction");
+            if (wind_direction && cJSON_IsString(wind_direction))
+            {
+                strncpy(weather_info->wind_direction,
+                        wind_direction->valuestring,
+                        sizeof(weather_info->wind_direction) - 1);
+                weather_info->wind_direction[sizeof(weather_info->wind_direction) - 1] = '\0';
+            }
+        }
+
+        {
+            cJSON *wind_scale = cJSON_GetObjectItem(now, "wind_scale");
+            if (wind_scale && cJSON_IsString(wind_scale))
+            {
+                strncpy(weather_info->wind_scale,
+                        wind_scale->valuestring,
+                        sizeof(weather_info->wind_scale) - 1);
+                weather_info->wind_scale[sizeof(weather_info->wind_scale) - 1] = '\0';
+            }
+        }
+
         // 记录更新时间
         weather_info->last_update = time(RT_NULL);
 
@@ -607,171 +816,8 @@ void weather_ui_update_callback(void)
     }
     
     // 更新天气图标 (根据天气代码更新图标)
- if (weather_icon) {
-        // 根据天气代码选择相应的图标
-        
-        if (strcmp(g_current_weather.code, "0") == 0) {
-            // 晴（国内城市白天晴） Sunny
-            LV_IMAGE_DECLARE(w0);
-            lv_img_set_src(weather_icon, &w0);
-            } else if (strcmp(g_current_weather.code, "1") == 0) {
-            // 晴（国内城市夜晚晴） Clear
-            LV_IMAGE_DECLARE(w1);
-            lv_img_set_src(weather_icon, &w1);
-            } else if (strcmp(g_current_weather.code, "2") == 0) {
-            // 晴（国外城市白天晴） Fair
-            LV_IMAGE_DECLARE(w2);
-            lv_img_set_src(weather_icon, &w2);
-            } else if (strcmp(g_current_weather.code, "3") == 0) {
-            // 晴（国外城市夜晚晴） Fair
-            LV_IMAGE_DECLARE(w3);
-            lv_img_set_src(weather_icon, &w3);
-            } else if (strcmp(g_current_weather.code, "4") == 0) {
-            // 多云 Cloudy
-            LV_IMAGE_DECLARE(w4);
-            lv_img_set_src(weather_icon, &w4);
-            } else if (strcmp(g_current_weather.code, "5") == 0) {
-            // 晴间多云 Partly Cloudy
-            LV_IMAGE_DECLARE(w5);
-            lv_img_set_src(weather_icon, &w5);
-            } else if (strcmp(g_current_weather.code, "6") == 0) {
-            // 晴间多云 Partly Cloudy
-            LV_IMAGE_DECLARE(w6);
-            lv_img_set_src(weather_icon, &w6);
-            } else if (strcmp(g_current_weather.code, "7") == 0) {
-            // 大部多云 Mostly Cloudy
-            LV_IMAGE_DECLARE(w7);
-            lv_img_set_src(weather_icon, &w7);
-            } else if (strcmp(g_current_weather.code, "8") == 0) {
-            // 大部多云 Mostly Cloudy
-            LV_IMAGE_DECLARE(w8);
-            lv_img_set_src(weather_icon, &w8);
-            } else if (strcmp(g_current_weather.code, "9") == 0) {
-            // 阴 Overcast
-            LV_IMAGE_DECLARE(w9);
-            lv_img_set_src(weather_icon, &w9);
-            } else if (strcmp(g_current_weather.code, "10") == 0) {
-            // 阵雨 Shower
-            LV_IMAGE_DECLARE(w10);
-            lv_img_set_src(weather_icon, &w10);
-            } else if (strcmp(g_current_weather.code, "11") == 0) {
-            // 雷阵雨 Thundershower
-            LV_IMAGE_DECLARE(w11);
-            lv_img_set_src(weather_icon, &w11);
-            } else if (strcmp(g_current_weather.code, "12") == 0) {
-            // 雷阵雨伴有冰雹 Thundershower with Hail
-            LV_IMAGE_DECLARE(w12);
-            lv_img_set_src(weather_icon, &w12);
-            } else if (strcmp(g_current_weather.code, "13") == 0) {
-            // 小雨 Light Rain
-            LV_IMAGE_DECLARE(w13);
-            lv_img_set_src(weather_icon, &w13);
-            } else if (strcmp(g_current_weather.code, "14") == 0) {
-            // 中雨 Moderate Rain
-            LV_IMAGE_DECLARE(w14);
-            lv_img_set_src(weather_icon, &w14);
-            } else if (strcmp(g_current_weather.code, "15") == 0) {
-            // 大雨 Heavy Rain
-            LV_IMAGE_DECLARE(w15);
-            lv_img_set_src(weather_icon, &w15);
-            } else if (strcmp(g_current_weather.code, "16") == 0) {
-            // 暴雨 Storm
-            LV_IMAGE_DECLARE(w16);
-            lv_img_set_src(weather_icon, &w16);
-            } else if (strcmp(g_current_weather.code, "17") == 0) {
-            // 大暴雨 Heavy Storm
-            LV_IMAGE_DECLARE(w17);
-            lv_img_set_src(weather_icon, &w17);
-            } else if (strcmp(g_current_weather.code, "18") == 0) {
-            // 特大暴雨 Severe Storm
-            LV_IMAGE_DECLARE(w18);
-            lv_img_set_src(weather_icon, &w18);
-            } else if (strcmp(g_current_weather.code, "19") == 0) {
-            // 冻雨 Ice Rain
-            LV_IMAGE_DECLARE(w19);
-            lv_img_set_src(weather_icon, &w19);
-            } else if (strcmp(g_current_weather.code, "20") == 0) {
-            // 雨夹雪 Sleet
-            LV_IMAGE_DECLARE(w20);
-            lv_img_set_src(weather_icon, &w20);
-            } else if (strcmp(g_current_weather.code, "21") == 0) {
-            // 阵雪 Snow Flurry
-            LV_IMAGE_DECLARE(w21);
-            lv_img_set_src(weather_icon, &w21);
-            } else if (strcmp(g_current_weather.code, "22") == 0) {
-            // 小雪 Light Snow
-            LV_IMAGE_DECLARE(w22);
-            lv_img_set_src(weather_icon, &w22);
-            } else if (strcmp(g_current_weather.code, "23") == 0) {
-            // 中雪 Moderate Snow
-            LV_IMAGE_DECLARE(w23);
-            lv_img_set_src(weather_icon, &w23);
-            } else if (strcmp(g_current_weather.code, "24") == 0) {
-            // 大雪 Heavy Snow
-            LV_IMAGE_DECLARE(w24);
-            lv_img_set_src(weather_icon, &w24);
-            } else if (strcmp(g_current_weather.code, "25") == 0) {
-            // 暴雪 Snowstorm
-            LV_IMAGE_DECLARE(w25);
-            lv_img_set_src(weather_icon, &w25);
-            } else if (strcmp(g_current_weather.code, "26") == 0) {
-            // 浮尘 Dust
-            LV_IMAGE_DECLARE(w26);
-            lv_img_set_src(weather_icon, &w26);
-            } else if (strcmp(g_current_weather.code, "27") == 0) {
-            // 扬沙 Sand
-            LV_IMAGE_DECLARE(w27);
-            lv_img_set_src(weather_icon, &w27);
-            } else if (strcmp(g_current_weather.code, "28") == 0) {
-            // 沙尘暴 Duststorm
-            LV_IMAGE_DECLARE(w28);
-            lv_img_set_src(weather_icon, &w28);
-            } else if (strcmp(g_current_weather.code, "29") == 0) {
-            // 强沙尘暴 Sandstorm
-            LV_IMAGE_DECLARE(w29);
-            lv_img_set_src(weather_icon, &w29);
-            } else if (strcmp(g_current_weather.code, "30") == 0) {
-            // 雾 Foggy
-            LV_IMAGE_DECLARE(w30);
-            lv_img_set_src(weather_icon, &w30);
-            } else if (strcmp(g_current_weather.code, "31") == 0) {
-            // 霾 Haze
-            LV_IMAGE_DECLARE(w31);
-            lv_img_set_src(weather_icon, &w31);
-            } else if (strcmp(g_current_weather.code, "32") == 0) {
-            // 风 Windy
-            LV_IMAGE_DECLARE(w32);
-            lv_img_set_src(weather_icon, &w32);
-            } else if (strcmp(g_current_weather.code, "33") == 0) {
-            // 大风 Blustery
-            LV_IMAGE_DECLARE(w33);
-            lv_img_set_src(weather_icon, &w33);
-            } else if (strcmp(g_current_weather.code, "34") == 0) {
-            // 飓风 Hurricane
-            LV_IMAGE_DECLARE(w34);
-            lv_img_set_src(weather_icon, &w34);
-            } else if (strcmp(g_current_weather.code, "35") == 0) {
-            // 热带风暴 Tropical Storm
-            LV_IMAGE_DECLARE(w35);
-            lv_img_set_src(weather_icon, &w35);
-            } else if (strcmp(g_current_weather.code, "36") == 0) {
-            // 龙卷风 Tornado
-            LV_IMAGE_DECLARE(w36);
-            lv_img_set_src(weather_icon, &w36);
-            } else if (strcmp(g_current_weather.code, "37") == 0) {
-            // 冷 Cold
-            LV_IMAGE_DECLARE(w37);
-            lv_img_set_src(weather_icon, &w37);
-            } else if (strcmp(g_current_weather.code, "38") == 0) {
-            // 热 Hot
-            LV_IMAGE_DECLARE(w38);
-            lv_img_set_src(weather_icon, &w38);
-            } else {
-            // 未知 Unknown
-            LV_IMAGE_DECLARE(w99);
-            lv_img_set_src(weather_icon, &w99);
-        }
-        
+    if (weather_icon) {
+        lv_img_set_src(weather_icon, weather_icon_from_code(g_current_weather.code));
     }
     
     // 更新上次更新时间显示 (使用新UI中的last_time对象)
@@ -784,6 +830,11 @@ void weather_ui_update_callback(void)
             lv_label_set_text(last_time, last_update_text);
             LOG_I("last_update_text:%s",last_update_text);
         }
+    }
+
+    if (ui_Weather != NULL)
+    {
+        ui_Weather_screen_refresh();
     }
 }
 
