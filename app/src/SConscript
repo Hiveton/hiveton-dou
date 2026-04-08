@@ -12,12 +12,14 @@ src = [
     os.path.join(cwd, 'ui', 'ui_dispatch.c'),
     os.path.join(cwd, 'ui', 'ui_helpers.c'),
     os.path.join(cwd, 'ui', 'ui_runtime_adapter.c'),
+    os.path.join(cwd, 'reading', 'reading_epub.c'),
 ]
 src.extend(Glob(os.path.join(cwd, 'ui', 'screens', '*.c')))
 
 cpppath = [
     cwd,
     os.path.join(cwd, 'board'),
+    os.path.join(cwd, 'reading'),
     os.path.join(cwd, 'ui'),
     os.path.join(cwd, 'ui', 'fonts'),
     os.path.join(cwd, 'ui', 'screens'),

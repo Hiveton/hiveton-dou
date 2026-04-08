@@ -1,11 +1,13 @@
 #include <stdint.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <string.h>
 
 #include "dfs_posix.h"
 #include "rtthread.h"
 #include "rthw.h"
 #include "mem_section.h"
+#include "reading_epub.h"
 #include "ui.h"
 #include "ui_i18n.h"
 #include "ui_helpers.h"
@@ -16,11 +18,11 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "../../../../sdk/external/lvgl_v9/src/libs/tiny_ttf/stb_truetype_htcw.h"
 
-#define UI_READING_DETAIL_MAX_FILE_BYTES (64 * 1024)
+#define UI_READING_DETAIL_MAX_FILE_BYTES (2 * 1024 * 1024)
 #define UI_READING_DETAIL_MAX_PAGE_COUNT 768U
 #define UI_READING_DETAIL_PAGE_BUFFER_BYTES 12288U
 #define UI_READING_DETAIL_AUTO_PAGE_MS 5000U
-#define UI_READING_DETAIL_LOAD_THREAD_STACK_SIZE 16384
+#define UI_READING_DETAIL_LOAD_THREAD_STACK_SIZE (64 * 1024)
 #define UI_READING_DETAIL_LOAD_THREAD_PRIORITY 22
 #define UI_READING_DETAIL_LOAD_THREAD_TICK 10
 #define UI_READING_DETAIL_LOAD_TIMER_MS 30U
@@ -40,6 +42,9 @@
 #define UI_READING_DETAIL_SETTINGS_PANEL_HEIGHT 172
 #define UI_READING_DETAIL_SETTINGS_VALUE_WIDTH 76
 #define UI_READING_DETAIL_SWIPE_HANDLE_HEIGHT 48
+#define UI_READING_DETAIL_MAX_BLOCK_COUNT 256U
+#define UI_READING_DETAIL_MAX_IMAGE_COUNT 48U
+#define UI_READING_DETAIL_TEXT_STREAM_WINDOW_BYTES (128 * 1024U)
 
 typedef struct
 {
@@ -71,6 +76,27 @@ typedef enum
     UI_READING_DETAIL_LOAD_READY,
 } ui_reading_detail_load_state_t;
 
+typedef enum
+{
+    UI_READING_DETAIL_PAGE_TEXT = 0,
+    UI_READING_DETAIL_PAGE_IMAGE,
+} ui_reading_detail_page_type_t;
+
+typedef enum
+{
+    UI_READING_DETAIL_TEXT_SOURCE_NONE = 0,
+    UI_READING_DETAIL_TEXT_SOURCE_MEMORY,
+    UI_READING_DETAIL_TEXT_SOURCE_FILE,
+} ui_reading_detail_text_source_type_t;
+
+typedef struct
+{
+    ui_reading_detail_page_type_t type;
+    uint32_t start;
+    uint32_t end;
+    uint16_t image_index;
+} ui_reading_detail_page_entry_t;
+
 lv_obj_t *ui_Reading_Detail = NULL;
 
 static ui_reading_detail_refs_t s_reading_detail_refs;
@@ -86,16 +112,27 @@ ALIGN(RT_ALIGN_SIZE)
 static rt_uint8_t s_reading_detail_load_thread_stack[UI_READING_DETAIL_LOAD_THREAD_STACK_SIZE]
     L2_RET_BSS_SECT(reading_detail_load_thread_stack);
 #endif
+#if defined(__CC_ARM) || defined(__CLANG_ARM)
+L2_RET_BSS_SECT_BEGIN(reading_detail_text_buffer)
 static char s_reading_detail_text[UI_READING_DETAIL_MAX_FILE_BYTES + 1U];
+L2_RET_BSS_SECT_END
+#else
+static char s_reading_detail_text[UI_READING_DETAIL_MAX_FILE_BYTES + 1U]
+    L2_RET_BSS_SECT(reading_detail_text_buffer);
+#endif
 static char s_reading_detail_first_page_layout[UI_READING_DETAIL_PAGE_BUFFER_BYTES];
 static char s_reading_detail_page_buffer[UI_READING_DETAIL_PAGE_BUFFER_BYTES];
 static char s_reading_detail_page_text[32];
-static uint32_t s_reading_detail_page_offsets[UI_READING_DETAIL_MAX_PAGE_COUNT + 1U];
+static ui_reading_detail_page_entry_t s_reading_detail_pages[UI_READING_DETAIL_MAX_PAGE_COUNT];
+static reading_epub_block_t s_reading_detail_epub_blocks[UI_READING_DETAIL_MAX_BLOCK_COUNT];
+static reading_epub_image_ref_t s_reading_detail_epub_images[UI_READING_DETAIL_MAX_IMAGE_COUNT];
 static volatile uint16_t s_reading_detail_page_count = 0U;
 static uint16_t s_reading_detail_current_page = 0U;
 static lv_timer_t *s_reading_detail_auto_timer = NULL;
 static lv_timer_t *s_reading_detail_load_timer = NULL;
 static volatile bool s_reading_detail_has_last_page = false;
+static volatile uint16_t s_reading_detail_epub_block_count = 0U;
+static volatile uint16_t s_reading_detail_epub_image_count = 0U;
 static bool s_reading_detail_load_worker_started = false;
 static bool s_reading_detail_first_render_done = false;
 static uint16_t s_reading_detail_last_reported_page_count = 0U;
@@ -106,6 +143,7 @@ static volatile ui_reading_detail_load_state_t s_reading_detail_load_state = UI_
 static volatile bool s_reading_detail_first_page_layout_ready = false;
 static volatile bool s_reading_detail_first_page_bitmap_ready = false;
 static char s_reading_detail_request_path[256];
+static lv_image_dsc_t s_reading_detail_current_image_dsc;
 static const lv_font_t *s_reading_detail_width_cache_font = NULL;
 static uint16_t s_reading_detail_ascii_width_cache[128];
 static uint16_t s_reading_detail_cjk_width = 0U;
@@ -120,6 +158,20 @@ static int s_reading_detail_stb_ascent = 0;
 static int s_reading_detail_stb_descent = 0;
 static int s_reading_detail_stb_line_gap = 0;
 static uint8_t s_reading_detail_glyph_scratch[UI_READING_DETAIL_BITMAP_GLYPH_SCRATCH_BYTES];
+static ui_reading_detail_text_source_type_t s_reading_detail_text_source = UI_READING_DETAIL_TEXT_SOURCE_NONE;
+static int s_reading_detail_text_fd = -1;
+static uint32_t s_reading_detail_text_length = 0U;
+static uint32_t s_reading_detail_text_bom_skip = 0U;
+static uint32_t s_reading_detail_text_window_start = 0U;
+static uint32_t s_reading_detail_text_window_len = 0U;
+#if defined(__CC_ARM) || defined(__CLANG_ARM)
+L2_RET_BSS_SECT_BEGIN(reading_detail_text_stream_window)
+static char s_reading_detail_text_stream_window[UI_READING_DETAIL_TEXT_STREAM_WINDOW_BYTES];
+L2_RET_BSS_SECT_END
+#else
+static char s_reading_detail_text_stream_window[UI_READING_DETAIL_TEXT_STREAM_WINDOW_BYTES]
+    L2_RET_BSS_SECT(reading_detail_text_stream_window);
+#endif
 static uint16_t s_reading_detail_font_size = UI_READING_DETAIL_TEXT_FONT;
 static uint16_t s_reading_detail_line_space = UI_READING_DETAIL_TEXT_LINE_SPACE;
 static ui_reading_detail_swipe_state_t s_reading_detail_swipe_state;
@@ -137,6 +189,7 @@ static void ui_reading_detail_refresh_page_label(void);
 static void ui_reading_detail_refresh_nav_buttons(void);
 static void ui_reading_detail_set_button_enabled(lv_obj_t *button, bool enabled);
 static bool ui_reading_detail_load_text_from_path(const char *file_path);
+static bool ui_reading_detail_load_epub_from_path(const char *file_path);
 static bool ui_reading_detail_render_page(void);
 static bool ui_reading_detail_selected_matches_request(void);
 static bool ui_reading_detail_render_text_bitmap(const char *formatted_text);
@@ -150,6 +203,25 @@ static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
                                                        uint32_t codepoint_next,
                                                        uint16_t fallback_width);
 static const lv_font_t *ui_reading_detail_get_text_font(void);
+static bool ui_reading_detail_append_page_entry(ui_reading_detail_page_type_t type,
+                                                uint32_t start,
+                                                uint32_t end,
+                                                uint16_t image_index);
+static void ui_reading_detail_reset_text_source(void);
+static void ui_reading_detail_use_memory_text(void);
+static bool ui_reading_detail_open_text_stream(const char *file_path);
+static uint32_t ui_reading_detail_get_text_length(void);
+static char ui_reading_detail_get_text_byte(uint32_t index);
+static uint32_t ui_reading_detail_source_utf8_next(uint32_t *index);
+static size_t ui_reading_detail_copy_text_range(char *buffer,
+                                                size_t buffer_size,
+                                                uint32_t start,
+                                                uint32_t end);
+static uint32_t ui_reading_detail_measure_page_range(uint32_t start,
+                                                     uint32_t end_limit,
+                                                     char *formatted_buffer,
+                                                     size_t formatted_buffer_size);
+static bool ui_reading_detail_paginate_text_range(uint32_t start, uint32_t end);
 
 static uint16_t ui_reading_detail_get_actual_font_size(void)
 {
@@ -298,6 +370,243 @@ static uint32_t ui_reading_detail_utf8_next(const char *text, uint32_t *index)
     return codepoint;
 }
 
+static void ui_reading_detail_reset_text_source(void)
+{
+    if (s_reading_detail_text_fd >= 0)
+    {
+        close(s_reading_detail_text_fd);
+        s_reading_detail_text_fd = -1;
+    }
+
+    s_reading_detail_text_source = UI_READING_DETAIL_TEXT_SOURCE_NONE;
+    s_reading_detail_text_length = 0U;
+    s_reading_detail_text_bom_skip = 0U;
+    s_reading_detail_text_window_start = 0U;
+    s_reading_detail_text_window_len = 0U;
+    memset(s_reading_detail_text_stream_window, 0, sizeof(s_reading_detail_text_stream_window));
+}
+
+static void ui_reading_detail_use_memory_text(void)
+{
+    ui_reading_detail_reset_text_source();
+    s_reading_detail_text_source = UI_READING_DETAIL_TEXT_SOURCE_MEMORY;
+    s_reading_detail_text_length = (uint32_t)strlen(s_reading_detail_text);
+}
+
+static bool ui_reading_detail_open_text_stream(const char *file_path)
+{
+    int fd;
+    off_t file_size;
+    unsigned char bom[3];
+    ssize_t bom_read;
+
+    ui_reading_detail_reset_text_source();
+    if (file_path == NULL || file_path[0] == '\0')
+    {
+        return false;
+    }
+
+    fd = open(file_path, O_RDONLY);
+    if (fd < 0)
+    {
+        return false;
+    }
+
+    file_size = lseek(fd, 0, SEEK_END);
+    if (file_size < 0 || lseek(fd, 0, SEEK_SET) < 0)
+    {
+        close(fd);
+        return false;
+    }
+
+    memset(bom, 0, sizeof(bom));
+    bom_read = read(fd, bom, sizeof(bom));
+    if (bom_read >= 3 &&
+        bom[0] == 0xEFU &&
+        bom[1] == 0xBBU &&
+        bom[2] == 0xBFU)
+    {
+        s_reading_detail_text_bom_skip = 3U;
+    }
+    if (lseek(fd, 0, SEEK_SET) < 0)
+    {
+        close(fd);
+        return false;
+    }
+
+    s_reading_detail_text_fd = fd;
+    s_reading_detail_text_source = UI_READING_DETAIL_TEXT_SOURCE_FILE;
+    s_reading_detail_text_length =
+        (uint32_t)((file_size > (off_t)s_reading_detail_text_bom_skip) ?
+                       (file_size - (off_t)s_reading_detail_text_bom_skip) :
+                       0);
+    return true;
+}
+
+static uint32_t ui_reading_detail_get_text_length(void)
+{
+    if (s_reading_detail_text_source == UI_READING_DETAIL_TEXT_SOURCE_MEMORY)
+    {
+        return (uint32_t)strlen(s_reading_detail_text);
+    }
+
+    if (s_reading_detail_text_source == UI_READING_DETAIL_TEXT_SOURCE_FILE)
+    {
+        return s_reading_detail_text_length;
+    }
+
+    return 0U;
+}
+
+static bool ui_reading_detail_ensure_text_window(uint32_t index)
+{
+    uint32_t read_start;
+    ssize_t read_size;
+
+    if (s_reading_detail_text_source != UI_READING_DETAIL_TEXT_SOURCE_FILE ||
+        s_reading_detail_text_fd < 0)
+    {
+        return false;
+    }
+
+    if (index < s_reading_detail_text_window_start ||
+        index >= (s_reading_detail_text_window_start + s_reading_detail_text_window_len))
+    {
+        read_start = index;
+        if (lseek(s_reading_detail_text_fd,
+                  (off_t)(read_start + s_reading_detail_text_bom_skip),
+                  SEEK_SET) < 0)
+        {
+            s_reading_detail_text_window_len = 0U;
+            return false;
+        }
+
+        read_size = read(s_reading_detail_text_fd,
+                         s_reading_detail_text_stream_window,
+                         sizeof(s_reading_detail_text_stream_window));
+        if (read_size <= 0)
+        {
+            s_reading_detail_text_window_len = 0U;
+            return false;
+        }
+
+        s_reading_detail_text_window_start = read_start;
+        s_reading_detail_text_window_len = (uint32_t)read_size;
+    }
+
+    return true;
+}
+
+static char ui_reading_detail_get_text_byte(uint32_t index)
+{
+    if (s_reading_detail_text_source == UI_READING_DETAIL_TEXT_SOURCE_MEMORY)
+    {
+        return s_reading_detail_text[index];
+    }
+
+    if (s_reading_detail_text_source == UI_READING_DETAIL_TEXT_SOURCE_FILE)
+    {
+        if (index >= s_reading_detail_text_length || !ui_reading_detail_ensure_text_window(index))
+        {
+            return '\0';
+        }
+
+        return s_reading_detail_text_stream_window[index - s_reading_detail_text_window_start];
+    }
+
+    return '\0';
+}
+
+static uint32_t ui_reading_detail_source_utf8_next(uint32_t *index)
+{
+    uint32_t i;
+    uint32_t codepoint;
+    unsigned char first;
+    char second;
+    char third;
+    char fourth;
+
+    i = index != NULL ? *index : 0U;
+    first = (unsigned char)ui_reading_detail_get_text_byte(i);
+    if (first == '\0')
+    {
+        return 0U;
+    }
+
+    second = ui_reading_detail_get_text_byte(i + 1U);
+    third = ui_reading_detail_get_text_byte(i + 2U);
+    fourth = ui_reading_detail_get_text_byte(i + 3U);
+
+    if ((first & 0x80U) == 0U)
+    {
+        codepoint = first;
+        i += 1U;
+    }
+    else if ((first & 0xE0U) == 0xC0U && second != '\0')
+    {
+        codepoint = ((uint32_t)(first & 0x1FU) << 6) |
+                    (uint32_t)((unsigned char)second & 0x3FU);
+        i += 2U;
+    }
+    else if ((first & 0xF0U) == 0xE0U && second != '\0' && third != '\0')
+    {
+        codepoint = ((uint32_t)(first & 0x0FU) << 12) |
+                    ((uint32_t)((unsigned char)second & 0x3FU) << 6) |
+                    (uint32_t)((unsigned char)third & 0x3FU);
+        i += 3U;
+    }
+    else if ((first & 0xF8U) == 0xF0U && second != '\0' && third != '\0' && fourth != '\0')
+    {
+        codepoint = ((uint32_t)(first & 0x07U) << 18) |
+                    ((uint32_t)((unsigned char)second & 0x3FU) << 12) |
+                    ((uint32_t)((unsigned char)third & 0x3FU) << 6) |
+                    (uint32_t)((unsigned char)fourth & 0x3FU);
+        i += 4U;
+    }
+    else
+    {
+        codepoint = first;
+        i += 1U;
+    }
+
+    if (index != NULL)
+    {
+        *index = i;
+    }
+
+    return codepoint;
+}
+
+static size_t ui_reading_detail_copy_text_range(char *buffer,
+                                                size_t buffer_size,
+                                                uint32_t start,
+                                                uint32_t end)
+{
+    size_t written = 0U;
+    uint32_t i;
+
+    if (buffer == NULL || buffer_size == 0U)
+    {
+        return 0U;
+    }
+
+    buffer[0] = '\0';
+    for (i = start; i < end && written + 1U < buffer_size; ++i)
+    {
+        char ch = ui_reading_detail_get_text_byte(i);
+
+        if (ch == '\0')
+        {
+            break;
+        }
+
+        buffer[written++] = ch;
+    }
+
+    buffer[written] = '\0';
+    return written;
+}
+
 static uint16_t ui_reading_detail_snapshot_page_count(bool *has_last_page)
 {
     rt_base_t level;
@@ -340,12 +649,16 @@ static void ui_reading_detail_reset_pages(void)
     rt_base_t level;
 
     level = rt_hw_interrupt_disable();
-    memset(s_reading_detail_page_offsets, 0, sizeof(s_reading_detail_page_offsets));
-    s_reading_detail_page_offsets[0] = 0U;
+    memset(s_reading_detail_pages, 0, sizeof(s_reading_detail_pages));
     s_reading_detail_page_count = 0U;
     s_reading_detail_has_last_page = false;
+    memset(s_reading_detail_epub_blocks, 0, sizeof(s_reading_detail_epub_blocks));
+    memset(s_reading_detail_epub_images, 0, sizeof(s_reading_detail_epub_images));
+    s_reading_detail_epub_block_count = 0U;
+    s_reading_detail_epub_image_count = 0U;
     rt_hw_interrupt_enable(level);
 
+    reading_epub_release_image(&s_reading_detail_current_image_dsc);
     s_reading_detail_current_page = 0U;
 }
 
@@ -652,9 +965,36 @@ static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
     return width;
 }
 
-static uint32_t ui_reading_detail_measure_page(uint32_t start,
-                                               char *formatted_buffer,
-                                               size_t formatted_buffer_size)
+static bool ui_reading_detail_append_page_entry(ui_reading_detail_page_type_t type,
+                                                uint32_t start,
+                                                uint32_t end,
+                                                uint16_t image_index)
+{
+    rt_base_t level;
+    uint16_t next_index;
+
+    level = rt_hw_interrupt_disable();
+    next_index = s_reading_detail_page_count;
+    if (next_index >= UI_READING_DETAIL_MAX_PAGE_COUNT)
+    {
+        rt_hw_interrupt_enable(level);
+        return false;
+    }
+
+    s_reading_detail_pages[next_index].type = type;
+    s_reading_detail_pages[next_index].start = start;
+    s_reading_detail_pages[next_index].end = end;
+    s_reading_detail_pages[next_index].image_index = image_index;
+    s_reading_detail_page_count = (uint16_t)(next_index + 1U);
+    s_reading_detail_has_last_page = true;
+    rt_hw_interrupt_enable(level);
+    return true;
+}
+
+static uint32_t ui_reading_detail_measure_page_range(uint32_t start,
+                                                     uint32_t end_limit,
+                                                     char *formatted_buffer,
+                                                     size_t formatted_buffer_size)
 {
     uint32_t end = start;
     uint32_t current_index = start;
@@ -686,21 +1026,35 @@ static uint32_t ui_reading_detail_measure_page(uint32_t start,
         fallback_width = 1U;
     }
 
-    while (s_reading_detail_text[current_index] != '\0')
+    while (current_index < end_limit)
     {
         int32_t char_width;
         size_t char_len;
+        char current_byte;
 
         previous_index = current_index;
         char_start = current_index;
-        letter = ui_reading_detail_utf8_next(s_reading_detail_text, &current_index);
+        current_byte = ui_reading_detail_get_text_byte(current_index);
+        if (current_byte == '\0')
+        {
+            break;
+        }
+
+        if (current_byte == '\r')
+        {
+            ++current_index;
+            end = current_index;
+            continue;
+        }
+
+        letter = ui_reading_detail_source_utf8_next(&current_index);
         if (letter == 0U)
         {
             current_index = previous_index + 1U;
             end = current_index;
             if (formatted_buffer != NULL && formatted_buffer_size > 1U && written + 1U < formatted_buffer_size)
             {
-                formatted_buffer[written++] = s_reading_detail_text[previous_index];
+                formatted_buffer[written++] = current_byte;
                 formatted_buffer[written] = '\0';
             }
             continue;
@@ -725,9 +1079,16 @@ static uint32_t ui_reading_detail_measure_page(uint32_t start,
             continue;
         }
 
-        letter_next = s_reading_detail_text[current_index] != '\0' ?
-                          ui_reading_detail_utf8_next(&s_reading_detail_text[current_index], NULL) :
-                          0U;
+        if (current_index < end_limit && ui_reading_detail_get_text_byte(current_index) != '\0')
+        {
+            uint32_t next_index = current_index;
+
+            letter_next = ui_reading_detail_source_utf8_next(&next_index);
+        }
+        else
+        {
+            letter_next = 0U;
+        }
         char_width = (int32_t)ui_reading_detail_get_glyph_width_fast(font,
                                                                      letter,
                                                                      letter_next,
@@ -764,16 +1125,23 @@ static uint32_t ui_reading_detail_measure_page(uint32_t start,
             formatted_buffer_size > 1U &&
             written + char_len < formatted_buffer_size)
         {
-            memcpy(&formatted_buffer[written], &s_reading_detail_text[char_start], char_len);
-            written += char_len;
+            written += ui_reading_detail_copy_text_range(&formatted_buffer[written],
+                                                         formatted_buffer_size - written,
+                                                         char_start,
+                                                         current_index);
             formatted_buffer[written] = '\0';
         }
     }
 
-    if (end <= start && s_reading_detail_text[start] != '\0')
+    if (end < end_limit && current_index >= end_limit)
+    {
+        end = end_limit;
+    }
+
+    if (end <= start && start < end_limit && ui_reading_detail_get_text_byte(start) != '\0')
     {
         previous_index = start;
-        (void)ui_reading_detail_utf8_next(s_reading_detail_text, &previous_index);
+        (void)ui_reading_detail_source_utf8_next(&previous_index);
         end = previous_index;
         if (formatted_buffer != NULL && formatted_buffer_size > 1U)
         {
@@ -782,104 +1150,36 @@ static uint32_t ui_reading_detail_measure_page(uint32_t start,
             {
                 char_len = formatted_buffer_size - 1U;
             }
-            memcpy(formatted_buffer, &s_reading_detail_text[start], char_len);
-            formatted_buffer[char_len] = '\0';
+            (void)ui_reading_detail_copy_text_range(formatted_buffer,
+                                                    char_len + 1U,
+                                                    start,
+                                                    previous_index);
         }
     }
 
     return end;
 }
 
-static bool ui_reading_detail_append_next_page(char *formatted_buffer,
-                                               size_t formatted_buffer_size,
-                                               uint16_t *page_count_out,
-                                               bool *has_last_page_out)
+static bool ui_reading_detail_paginate_text_range(uint32_t start, uint32_t end)
 {
-    uint32_t start;
-    uint32_t end;
-    uint16_t local_page_count;
-    bool has_last_page;
-    bool is_last_page;
-    rt_base_t level;
-
-    local_page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
-    if (has_last_page || local_page_count >= UI_READING_DETAIL_MAX_PAGE_COUNT)
+    while (start < end && ui_reading_detail_get_text_byte(start) != '\0')
     {
-        if (page_count_out != NULL)
-        {
-            *page_count_out = local_page_count;
-        }
-        if (has_last_page_out != NULL)
-        {
-            *has_last_page_out = has_last_page;
-        }
-        return false;
-    }
+        uint32_t page_end = ui_reading_detail_measure_page_range(start, end, NULL, 0U);
 
-    start = s_reading_detail_page_offsets[local_page_count];
-    if (s_reading_detail_text[start] == '\0')
-    {
-        level = rt_hw_interrupt_disable();
-        s_reading_detail_has_last_page = true;
-        rt_hw_interrupt_enable(level);
-        if (page_count_out != NULL)
-        {
-            *page_count_out = local_page_count;
-        }
-        if (has_last_page_out != NULL)
-        {
-            *has_last_page_out = true;
-        }
-        return false;
-    }
-
-    end = ui_reading_detail_measure_page(start, formatted_buffer, formatted_buffer_size);
-    ++local_page_count;
-    is_last_page = s_reading_detail_text[end] == '\0' ||
-                   local_page_count >= UI_READING_DETAIL_MAX_PAGE_COUNT;
-
-    level = rt_hw_interrupt_disable();
-    s_reading_detail_page_offsets[local_page_count] = end;
-    s_reading_detail_page_count = local_page_count;
-    if (is_last_page)
-    {
-        s_reading_detail_has_last_page = true;
-    }
-    rt_hw_interrupt_enable(level);
-
-    if (page_count_out != NULL)
-    {
-        *page_count_out = local_page_count;
-    }
-    if (has_last_page_out != NULL)
-    {
-        *has_last_page_out = is_last_page;
-    }
-
-    return true;
-}
-
-static bool ui_reading_detail_ensure_page_available(uint16_t page_index)
-{
-    bool has_last_page = false;
-    uint16_t page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
-
-    while (page_count <= page_index && !has_last_page)
-    {
-        uint32_t page_start_ms = ui_reading_detail_now_ms();
-
-        if (!ui_reading_detail_append_next_page(NULL, 0U, &page_count, &has_last_page))
+        if (page_end <= start)
         {
             break;
         }
 
-        rt_kprintf("reading_detail: lazy page_ready=%u known_last=%u page_ms=%lu\n",
-                   (unsigned int)page_count,
-                   has_last_page ? 1U : 0U,
-                   (unsigned long)(ui_reading_detail_now_ms() - page_start_ms));
+        if (!ui_reading_detail_append_page_entry(UI_READING_DETAIL_PAGE_TEXT, start, page_end, 0U))
+        {
+            return false;
+        }
+
+        start = page_end;
     }
 
-    return page_index < page_count;
+    return true;
 }
 
 static void ui_reading_detail_load_thread_entry(void *parameter)
@@ -909,12 +1209,24 @@ static void ui_reading_detail_load_thread_entry(void *parameter)
                         "%s",
                         ui_i18n_pick("TF 卡中还没有可阅读的文本文件。\n\n请先返回列表页确认文件是否已经识别。",
                                      "There are no readable text files on the TF card yet.\n\nPlease go back to the list and check whether the file has been detected."));
+            ui_reading_detail_use_memory_text();
+            ui_reading_detail_reset_pages();
+            ui_reading_detail_use_memory_text();
+            (void)ui_reading_detail_paginate_text_range(0U, ui_reading_detail_get_text_length());
             rt_kprintf("reading_detail: request=%lu fallback without selected file\n",
                        (unsigned long)request_id);
         }
         else
         {
-            (void)ui_reading_detail_load_text_from_path(file_path);
+            if (strrchr(file_path, '.') != NULL &&
+                strcasecmp(strrchr(file_path, '.'), ".epub") == 0)
+            {
+                (void)ui_reading_detail_load_epub_from_path(file_path);
+            }
+            else
+            {
+                (void)ui_reading_detail_load_text_from_path(file_path);
+            }
         }
 
         if (!ui_reading_detail_request_is_current(request_id))
@@ -925,38 +1237,21 @@ static void ui_reading_detail_load_thread_entry(void *parameter)
         }
 
         {
-            bool has_last_page = false;
-            uint16_t page_count = 0U;
-            uint32_t page_start_ms = ui_reading_detail_now_ms();
             rt_base_t level;
-
-            if (!ui_reading_detail_append_next_page(s_reading_detail_first_page_layout,
-                                                    sizeof(s_reading_detail_first_page_layout),
-                                                    &page_count,
-                                                    &has_last_page))
-            {
-                rt_kprintf("reading_detail: request=%lu first page build failed\n",
-                           (unsigned long)request_id);
-                continue;
-            }
+            bool has_last_page = false;
+            uint16_t page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
 
             level = rt_hw_interrupt_disable();
-            s_reading_detail_first_page_layout_ready = true;
+            s_reading_detail_first_page_layout_ready = page_count > 0U;
             s_reading_detail_load_state = UI_READING_DETAIL_LOAD_READY;
             s_reading_detail_completed_request_id = request_id;
             rt_hw_interrupt_enable(level);
 
-            rt_kprintf("reading_detail: request=%lu first_page_ready pages=%u last=%u page_ms=%lu total_ms=%lu\n",
+            rt_kprintf("reading_detail: request=%lu pages=%u last=%u total_ms=%lu\n",
                        (unsigned long)request_id,
                        (unsigned int)page_count,
                        has_last_page ? 1U : 0U,
-                       (unsigned long)(ui_reading_detail_now_ms() - page_start_ms),
                        (unsigned long)(ui_reading_detail_now_ms() - load_start_ms));
-            rt_kprintf("reading_detail: request=%lu first_page_text_len=%lu first_page_start=%lu first_page_end=%lu\n",
-                       (unsigned long)request_id,
-                       (unsigned long)strlen(s_reading_detail_first_page_layout),
-                       (unsigned long)s_reading_detail_page_offsets[0],
-                       (unsigned long)s_reading_detail_page_offsets[1]);
         }
     }
 }
@@ -1096,10 +1391,7 @@ static void ui_reading_detail_set_settings_visible(bool visible)
 
 static void ui_reading_detail_rebuild_layout(void)
 {
-    bool has_last_page = false;
-    uint16_t page_count = 0U;
-
-    if (s_reading_detail_load_state != UI_READING_DETAIL_LOAD_READY || s_reading_detail_text[0] == '\0')
+    if (s_reading_detail_load_state != UI_READING_DETAIL_LOAD_READY || ui_reading_detail_get_text_length() == 0U)
     {
         return;
     }
@@ -1113,12 +1405,34 @@ static void ui_reading_detail_rebuild_layout(void)
     s_reading_detail_last_reported_has_last_page = false;
     memset(s_reading_detail_first_page_layout, 0, sizeof(s_reading_detail_first_page_layout));
     memset(s_reading_detail_page_buffer, 0, sizeof(s_reading_detail_page_buffer));
-    ui_reading_detail_reset_pages();
+    memset(s_reading_detail_pages, 0, sizeof(s_reading_detail_pages));
+    s_reading_detail_page_count = 0U;
+    s_reading_detail_has_last_page = false;
 
-    if (!ui_reading_detail_append_next_page(s_reading_detail_first_page_layout,
-                                            sizeof(s_reading_detail_first_page_layout),
-                                            &page_count,
-                                            &has_last_page))
+    if (s_reading_detail_epub_block_count > 0U)
+    {
+        uint16_t i;
+
+        for (i = 0; i < s_reading_detail_epub_block_count; ++i)
+        {
+            if (s_reading_detail_epub_blocks[i].type == READING_EPUB_BLOCK_TEXT)
+            {
+                if (!ui_reading_detail_paginate_text_range(s_reading_detail_epub_blocks[i].text_start,
+                                                           s_reading_detail_epub_blocks[i].text_end))
+                {
+                    return;
+                }
+            }
+            else if (!ui_reading_detail_append_page_entry(UI_READING_DETAIL_PAGE_IMAGE,
+                                                          0U,
+                                                          0U,
+                                                          s_reading_detail_epub_blocks[i].image_index))
+            {
+                return;
+            }
+        }
+    }
+    else if (!ui_reading_detail_paginate_text_range(0U, ui_reading_detail_get_text_length()))
     {
         return;
     }
@@ -1141,18 +1455,14 @@ static void ui_reading_detail_rebuild_layout(void)
 
 static bool ui_reading_detail_load_text_from_path(const char *file_path)
 {
-    int fd;
-    ssize_t read_size;
-    size_t total = 0U;
-    size_t src = 0U;
-    size_t dst = 0U;
     uint32_t open_start_ms;
-    uint32_t read_start_ms;
-    uint32_t normalize_start_ms;
-    uint32_t read_elapsed_ms;
-    uint32_t normalize_elapsed_ms;
+    uint32_t open_elapsed_ms;
+    uint32_t paginate_start_ms;
+    uint32_t paginate_elapsed_ms;
+    bool using_memory_fallback = false;
 
     memset(s_reading_detail_text, 0, sizeof(s_reading_detail_text));
+    ui_reading_detail_reset_text_source();
 
     if (file_path == NULL || file_path[0] == '\0')
     {
@@ -1161,12 +1471,12 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
                     "%s",
                     ui_i18n_pick("TF 卡中还没有可阅读的文本文件。\n\n请先返回列表页确认文件是否已经识别。",
                                  "There are no readable text files on the TF card yet.\n\nPlease go back to the list and check whether the file has been detected."));
+        ui_reading_detail_use_memory_text();
         return false;
     }
 
     open_start_ms = ui_reading_detail_now_ms();
-    fd = open(file_path, O_RDONLY);
-    if (fd < 0)
+    if (!ui_reading_detail_open_text_stream(file_path))
     {
         rt_kprintf("reading_detail: open failed path=%s errno=%d\n", file_path, rt_get_errno());
         rt_snprintf(s_reading_detail_text,
@@ -1174,62 +1484,131 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
                     ui_i18n_pick("打开文件失败：\n%s\n\n请确认文件存在且 TF 卡可正常读取。",
                                  "Failed to open file:\n%s\n\nPlease confirm the file exists and the TF card is readable."),
                     file_path);
+        ui_reading_detail_use_memory_text();
         return false;
     }
+    open_elapsed_ms = ui_reading_detail_now_ms() - open_start_ms;
 
-    read_start_ms = ui_reading_detail_now_ms();
-    while (total < UI_READING_DETAIL_MAX_FILE_BYTES)
-    {
-        read_size = read(fd,
-                         &s_reading_detail_text[total],
-                         UI_READING_DETAIL_MAX_FILE_BYTES - total);
-        if (read_size <= 0)
-        {
-            break;
-        }
-        total += (size_t)read_size;
-    }
-    close(fd);
-    read_elapsed_ms = ui_reading_detail_now_ms() - read_start_ms;
-
-    normalize_start_ms = ui_reading_detail_now_ms();
-    if (total >= 3U &&
-        (unsigned char)s_reading_detail_text[0] == 0xEFU &&
-        (unsigned char)s_reading_detail_text[1] == 0xBBU &&
-        (unsigned char)s_reading_detail_text[2] == 0xBFU)
-    {
-        src = 3U;
-    }
-
-    while (src < total)
-    {
-        char ch = s_reading_detail_text[src++];
-
-        if (ch == '\r')
-        {
-            continue;
-        }
-
-        s_reading_detail_text[dst++] = ch;
-    }
-    s_reading_detail_text[dst] = '\0';
-    normalize_elapsed_ms = ui_reading_detail_now_ms() - normalize_start_ms;
-
-    if (dst == 0U)
+    if (ui_reading_detail_get_text_length() == 0U)
     {
         rt_snprintf(s_reading_detail_text,
                     sizeof(s_reading_detail_text),
                     "%s",
                     ui_i18n_pick("这个文本文件目前是空的。", "This text file is currently empty."));
+        ui_reading_detail_use_memory_text();
+        using_memory_fallback = true;
     }
 
-    rt_kprintf("reading_detail: file=%s bytes=%lu open_ms=%lu read_ms=%lu normalize_ms=%lu total_ms=%lu\n",
+    ui_reading_detail_reset_pages();
+    if (using_memory_fallback)
+    {
+        ui_reading_detail_use_memory_text();
+        paginate_elapsed_ms = 0U;
+        (void)ui_reading_detail_paginate_text_range(0U, ui_reading_detail_get_text_length());
+    }
+    else
+    {
+        paginate_start_ms = ui_reading_detail_now_ms();
+        if (!ui_reading_detail_paginate_text_range(0U, ui_reading_detail_get_text_length()))
+        {
+            rt_snprintf(s_reading_detail_text,
+                        sizeof(s_reading_detail_text),
+                        "%s",
+                        ui_i18n_pick("文本分页失败，请尝试更换文件。", "Failed to paginate the text file."));
+            ui_reading_detail_use_memory_text();
+            ui_reading_detail_reset_pages();
+            ui_reading_detail_use_memory_text();
+            (void)ui_reading_detail_paginate_text_range(0U, ui_reading_detail_get_text_length());
+            using_memory_fallback = true;
+        }
+        paginate_elapsed_ms = ui_reading_detail_now_ms() - paginate_start_ms;
+    }
+
+    rt_kprintf("reading_detail: file=%s bytes=%lu open_ms=%lu paginate_ms=%lu total_ms=%lu\n",
                file_path,
-               (unsigned long)dst,
-               (unsigned long)(read_start_ms - open_start_ms),
-               (unsigned long)read_elapsed_ms,
-               (unsigned long)normalize_elapsed_ms,
+               (unsigned long)ui_reading_detail_get_text_length(),
+               (unsigned long)open_elapsed_ms,
+               (unsigned long)paginate_elapsed_ms,
                (unsigned long)(ui_reading_detail_now_ms() - open_start_ms));
+
+    return true;
+}
+
+static bool ui_reading_detail_load_epub_from_path(const char *file_path)
+{
+    char error_text[128];
+    uint16_t block_count = 0U;
+    uint16_t image_count = 0U;
+    uint16_t i;
+
+    ui_reading_detail_reset_text_source();
+    ui_reading_detail_reset_pages();
+    memset(s_reading_detail_text, 0, sizeof(s_reading_detail_text));
+    memset(s_reading_detail_epub_blocks, 0, sizeof(s_reading_detail_epub_blocks));
+    memset(s_reading_detail_epub_images, 0, sizeof(s_reading_detail_epub_images));
+    error_text[0] = '\0';
+
+    if (!reading_epub_load(file_path,
+                           s_reading_detail_text,
+                           sizeof(s_reading_detail_text),
+                           s_reading_detail_epub_blocks,
+                           UI_READING_DETAIL_MAX_BLOCK_COUNT,
+                           &block_count,
+                           s_reading_detail_epub_images,
+                           UI_READING_DETAIL_MAX_IMAGE_COUNT,
+                           &image_count,
+                           error_text,
+                           sizeof(error_text)))
+    {
+        rt_snprintf(s_reading_detail_text,
+                    sizeof(s_reading_detail_text),
+                    ui_i18n_pick("EPUB 解析失败：\n%s", "Failed to parse EPUB:\n%s"),
+                    error_text[0] != '\0' ? error_text : ui_i18n_pick("未知错误", "Unknown error"));
+        ui_reading_detail_use_memory_text();
+        ui_reading_detail_reset_pages();
+        ui_reading_detail_use_memory_text();
+        (void)ui_reading_detail_paginate_text_range(0U, (uint32_t)strlen(s_reading_detail_text));
+        return false;
+    }
+
+    ui_reading_detail_use_memory_text();
+
+    memset(s_reading_detail_pages, 0, sizeof(s_reading_detail_pages));
+    s_reading_detail_page_count = 0U;
+    s_reading_detail_has_last_page = false;
+    s_reading_detail_epub_block_count = block_count;
+    s_reading_detail_epub_image_count = image_count;
+
+    for (i = 0; i < block_count; ++i)
+    {
+        if (s_reading_detail_epub_blocks[i].type == READING_EPUB_BLOCK_TEXT)
+        {
+            if (!ui_reading_detail_paginate_text_range(s_reading_detail_epub_blocks[i].text_start,
+                                                       s_reading_detail_epub_blocks[i].text_end))
+            {
+                break;
+            }
+        }
+        else if (!ui_reading_detail_append_page_entry(UI_READING_DETAIL_PAGE_IMAGE,
+                                                      0U,
+                                                      0U,
+                                                      s_reading_detail_epub_blocks[i].image_index))
+        {
+            break;
+        }
+    }
+
+    if (s_reading_detail_page_count == 0U)
+    {
+        rt_snprintf(s_reading_detail_text,
+                    sizeof(s_reading_detail_text),
+                    "%s",
+                    ui_i18n_pick("EPUB 中没有可显示内容。", "The EPUB has no readable content."));
+        ui_reading_detail_use_memory_text();
+        ui_reading_detail_reset_pages();
+        ui_reading_detail_use_memory_text();
+        (void)ui_reading_detail_paginate_text_range(0U, (uint32_t)strlen(s_reading_detail_text));
+    }
 
     return true;
 }
@@ -1238,6 +1617,7 @@ static void ui_reading_detail_request_async_load(void)
 {
     char file_path[sizeof(s_reading_detail_request_path)];
 
+    ui_reading_detail_reset_text_source();
     ui_reading_detail_reset_pages();
     memset(s_reading_detail_text, 0, sizeof(s_reading_detail_text));
     memset(s_reading_detail_first_page_layout, 0, sizeof(s_reading_detail_first_page_layout));
@@ -1299,15 +1679,12 @@ static void ui_reading_detail_set_button_enabled(lv_obj_t *button, bool enabled)
 
 static bool ui_reading_detail_render_page(void)
 {
-    uint32_t start;
-    uint32_t end;
-    uint32_t page_len;
-    rt_base_t level;
     bool has_last_page = false;
     uint16_t page_count;
     uint32_t render_start_ms;
-    const char *page_text;
-    size_t page_text_len;
+    const ui_reading_detail_page_entry_t *page;
+    lv_coord_t image_max_width;
+    lv_coord_t image_max_height;
 
     if (s_reading_detail_refs.content_label == NULL || s_reading_detail_refs.content_image == NULL)
     {
@@ -1319,60 +1696,71 @@ static bool ui_reading_detail_render_page(void)
         return false;
     }
 
-    if (!ui_reading_detail_ensure_page_available(s_reading_detail_current_page))
-    {
-        return false;
-    }
-
     page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
     if (page_count == 0U || s_reading_detail_current_page >= page_count)
     {
         return false;
     }
 
-    level = rt_hw_interrupt_disable();
-    start = s_reading_detail_page_offsets[s_reading_detail_current_page];
-    end = s_reading_detail_page_offsets[s_reading_detail_current_page + 1U];
-    rt_hw_interrupt_enable(level);
-
-    if (end < start)
-    {
-        end = start;
-    }
-
-    page_len = end - start;
     render_start_ms = ui_reading_detail_now_ms();
-    if (s_reading_detail_current_page == 0U && s_reading_detail_first_page_layout_ready)
+    page = &s_reading_detail_pages[s_reading_detail_current_page];
+    image_max_width = s_reading_detail_refs.reading_box != NULL ?
+                          lv_obj_get_content_width(s_reading_detail_refs.reading_box) :
+                          ui_px_w(UI_READING_DETAIL_TEXT_WIDTH);
+    image_max_height = s_reading_detail_refs.reading_box != NULL ?
+                           lv_obj_get_content_height(s_reading_detail_refs.reading_box) :
+                           ui_px_h(UI_READING_DETAIL_TEXT_HEIGHT);
+
+    if (page->type == UI_READING_DETAIL_PAGE_IMAGE)
     {
-        page_text = s_reading_detail_first_page_layout;
+        reading_epub_release_image(&s_reading_detail_current_image_dsc);
+        if (!reading_epub_decode_image(s_reading_detail_request_path,
+                                       s_reading_detail_epub_images[page->image_index].internal_path,
+                                       (uint16_t)image_max_width,
+                                       (uint16_t)image_max_height,
+                                       &s_reading_detail_current_image_dsc))
+        {
+            lv_label_set_text(s_reading_detail_refs.content_label,
+                              ui_i18n_pick("图片加载失败。", "Failed to load image."));
+            lv_obj_clear_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            lv_image_set_src(s_reading_detail_refs.content_image, &s_reading_detail_current_image_dsc);
+            lv_obj_set_pos(s_reading_detail_refs.content_image,
+                           10 + (image_max_width - s_reading_detail_current_image_dsc.header.w) / 2,
+                           8 + (image_max_height - s_reading_detail_current_image_dsc.header.h) / 2);
+            lv_obj_clear_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_HIDDEN);
+        }
     }
     else
     {
-        (void)ui_reading_detail_measure_page(start,
-                                             s_reading_detail_page_buffer,
-                                             sizeof(s_reading_detail_page_buffer));
-        page_text = s_reading_detail_page_buffer;
+        (void)ui_reading_detail_measure_page_range(page->start,
+                                                   page->end,
+                                                   s_reading_detail_page_buffer,
+                                                   sizeof(s_reading_detail_page_buffer));
+        if (s_reading_detail_page_buffer[0] == '\0')
+        {
+            rt_snprintf(s_reading_detail_page_buffer,
+                        sizeof(s_reading_detail_page_buffer),
+                        "%s",
+                        ui_i18n_pick("正文为空。", "The page is empty."));
+        }
+
+        lv_label_set_text(s_reading_detail_refs.content_label, s_reading_detail_page_buffer);
+        lv_obj_clear_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
     }
 
-    page_text_len = strlen(page_text);
-    if (page_text_len == 0U)
-    {
-        page_text = ui_i18n_pick("正文为空。", "The page is empty.");
-        page_text_len = strlen(page_text);
-    }
-
-    lv_label_set_text(s_reading_detail_refs.content_label, page_text);
-    lv_obj_clear_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
     lv_obj_invalidate(s_reading_detail_refs.content_label);
     ui_reading_detail_refresh_page_label();
     ui_reading_detail_refresh_nav_buttons();
-    rt_kprintf("reading_detail: render page=%u ready_pages=%u known=%u chars=%lu text_len=%lu render_ms=%lu\n",
+    rt_kprintf("reading_detail: render page=%u ready_pages=%u kind=%u render_ms=%lu\n",
                (unsigned int)(s_reading_detail_current_page + 1U),
                (unsigned int)page_count,
-               has_last_page ? 1U : 0U,
-               (unsigned long)page_len,
-               (unsigned long)page_text_len,
+               (unsigned int)page->type,
                (unsigned long)(ui_reading_detail_now_ms() - render_start_ms));
     return true;
 }
@@ -1456,12 +1844,6 @@ static void ui_reading_detail_next_page(void)
     }
 
     page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
-    if ((uint16_t)(s_reading_detail_current_page + 1U) >= page_count && !has_last_page)
-    {
-        (void)ui_reading_detail_ensure_page_available((uint16_t)(s_reading_detail_current_page + 1U));
-        page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
-    }
-
     if ((uint16_t)(s_reading_detail_current_page + 1U) < page_count)
     {
         ++s_reading_detail_current_page;
@@ -1473,12 +1855,6 @@ static void ui_reading_detail_next_page(void)
     {
         s_reading_detail_current_page = 0U;
         (void)ui_reading_detail_render_page();
-    }
-    else
-    {
-        rt_kprintf("reading_detail: next pending current=%u ready_pages=%u\n",
-                   (unsigned int)(s_reading_detail_current_page + 1U),
-                   (unsigned int)page_count);
     }
 }
 
@@ -1895,6 +2271,7 @@ void ui_Reading_Detail_screen_destroy(void)
         rt_free(s_reading_detail_bitmap_buffer);
         s_reading_detail_bitmap_buffer = NULL;
     }
+    reading_epub_release_image(&s_reading_detail_current_image_dsc);
     memset(&s_reading_detail_bitmap_dsc, 0, sizeof(s_reading_detail_bitmap_dsc));
     s_reading_detail_bitmap_inited = false;
 

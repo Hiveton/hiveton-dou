@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <string.h>
 
 #include "dfs_fs.h"
@@ -29,7 +30,14 @@ typedef struct
 {
     char name[UI_READING_MAX_NAME_LEN];
     uint32_t size_bytes;
+    uint8_t file_type;
 } ui_reading_file_entry_t;
+
+enum
+{
+    UI_READING_FILE_TYPE_TXT = 0,
+    UI_READING_FILE_TYPE_EPUB,
+};
 
 typedef struct
 {
@@ -95,12 +103,54 @@ static bool ui_reading_snapshot_changed(const ui_reading_snapshot_t *before,
 
 static bool ui_reading_is_listable_file(const char *name)
 {
+    const char *dot;
+
     if (name == NULL)
     {
         return false;
     }
 
-    return !(strcmp(name, ".") == 0 || strcmp(name, "..") == 0);
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+    {
+        return false;
+    }
+
+    if (name[0] == '.')
+    {
+        return false;
+    }
+
+    dot = strrchr(name, '.');
+    if (dot == NULL)
+    {
+        return false;
+    }
+
+    return strcasecmp(dot, ".txt") == 0 || strcasecmp(dot, ".epub") == 0;
+}
+
+static uint8_t ui_reading_detect_file_type(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+
+    if (dot != NULL && strcasecmp(dot, ".epub") == 0)
+    {
+        return UI_READING_FILE_TYPE_EPUB;
+    }
+
+    return UI_READING_FILE_TYPE_TXT;
+}
+
+static const char *ui_reading_file_type_label(uint8_t file_type)
+{
+    switch (file_type)
+    {
+    case UI_READING_FILE_TYPE_EPUB:
+        return "EPUB";
+    case UI_READING_FILE_TYPE_TXT:
+    default:
+        return "TXT";
+    }
 }
 
 static void ui_reading_format_size(uint32_t size_bytes, char *buffer, size_t buffer_size)
@@ -302,6 +352,7 @@ static bool ui_reading_scan_directory(const char *directory_path)
                     "%s",
                     entry->d_name);
         s_reading_files[s_reading_file_count].size_bytes = (uint32_t)stat_buffer.st_size;
+        s_reading_files[s_reading_file_count].file_type = ui_reading_detect_file_type(entry->d_name);
         ++s_reading_file_count;
 
         if (s_reading_file_count >= UI_READING_MAX_FILES)
@@ -653,7 +704,8 @@ static void ui_reading_list_render(void)
             ui_reading_format_size(s_reading_files[file_index].size_bytes, meta_text, sizeof(meta_text));
             rt_snprintf(status_text,
                         sizeof(status_text),
-                        ui_i18n_pick("%s · 点击查看", "%s · Tap to open"),
+                        ui_i18n_pick("%s · %s · 点击查看", "%s · %s · Tap to open"),
+                        ui_reading_file_type_label(s_reading_files[file_index].file_type),
                         meta_text);
             ui_reading_show_card(visible_index,
                                  s_reading_files[file_index].name,
