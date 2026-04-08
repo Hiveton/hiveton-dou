@@ -7,7 +7,9 @@
 #include "audio_server.h"
 #include "lv_tiny_ttf.h"
 #include "rtdevice.h"
+#include "rtthread.h"
 #include "ui_i18n.h"
+#include "ui_dispatch.h"
 #include "ui_runtime_adapter.h"
 #include "../xiaozhi/weather/weather.h"
 
@@ -22,6 +24,9 @@
 #define UI_NAV_INTERACTION_DEBOUNCE_MS 250
 #define UI_STATUS_DETAIL_RELOAD_DEBOUNCE_MS 1500
 #define UI_STATUS_MASK_SOLID_GRAY 0xB3B3B3
+#define UI_STATUS_BAR_REFRESH_THREAD_STACK_SIZE 1024
+#define UI_STATUS_BAR_REFRESH_THREAD_PRIORITY 22
+#define UI_STATUS_BAR_REFRESH_THREAD_TICK 10
 
 typedef enum
 {
@@ -116,9 +121,11 @@ static ui_screen_refs_entry_t s_screen_refs[UI_SCREEN_COUNT];
 static bool s_ui_helpers_initialized = false;
 static lv_coord_t s_screen_width = UI_FIGMA_WIDTH;
 static lv_coord_t s_screen_height = UI_FIGMA_HEIGHT;
-static lv_timer_t *s_status_bar_time_timer = NULL;
 static const size_t UI_TINY_TTF_GLYPH_CACHE_COUNT = 32U;
 static ui_status_panel_state_t s_status_panel = {0};
+static struct rt_thread s_status_bar_refresh_thread;
+static rt_uint8_t s_status_bar_refresh_thread_stack[UI_STATUS_BAR_REFRESH_THREAD_STACK_SIZE];
+static bool s_status_bar_refresh_thread_started = false;
 static volatile int s_status_pending_brightness = -1;
 static volatile int s_status_pending_volume = -1;
 static volatile int s_status_pending_charge = -1;
@@ -145,8 +152,8 @@ static bool ui_status_detail_is_active(void);
 static void ui_status_detail_reload_async_cb(void *user_data);
 static void ui_status_refresh_connection_icons(bool force);
 static void ui_status_bar_refresh_datetime(void);
-static void ui_status_bar_time_timer_cb(lv_timer_t *timer);
-static void ui_status_bar_schedule_next_minute_refresh(void);
+static uint32_t ui_status_bar_next_refresh_delay_ms(void);
+static void ui_status_bar_refresh_thread_entry(void *parameter);
 static bool ui_status_backlight_read(uint8_t *brightness);
 static void ui_status_backlight_write(uint8_t brightness);
 
@@ -165,15 +172,10 @@ static bool ui_bt_network_ready(void)
     return false;
 }
 
-static void ui_status_bar_schedule_next_minute_refresh(void)
+static uint32_t ui_status_bar_next_refresh_delay_ms(void)
 {
     date_time_t current_time;
     uint32_t delay_ms = 60000U;
-
-    if (s_status_bar_time_timer == NULL)
-    {
-        return;
-    }
 
     if (xiaozhi_time_get_current(&current_time) == RT_EOK)
     {
@@ -195,9 +197,7 @@ static void ui_status_bar_schedule_next_minute_refresh(void)
         }
     }
 
-    lv_timer_set_period(s_status_bar_time_timer, delay_ms);
-    lv_timer_resume(s_status_bar_time_timer);
-    lv_timer_reset(s_status_bar_time_timer);
+    return delay_ms;
 }
 
 static void ui_status_bar_refresh_datetime(void)
@@ -217,7 +217,6 @@ static void ui_status_bar_refresh_datetime(void)
 
     if (xiaozhi_time_get_current(&current_time) != RT_EOK)
     {
-        ui_status_bar_schedule_next_minute_refresh();
         return;
     }
 
@@ -233,7 +232,6 @@ static void ui_status_bar_refresh_datetime(void)
         current_time.minute == last_minute &&
         (!weather_available || current_weather.temperature == last_temperature))
     {
-        ui_status_bar_schedule_next_minute_refresh();
         return;
     }
 
@@ -291,14 +289,24 @@ static void ui_status_bar_refresh_datetime(void)
             lv_label_set_text(refs->meta_label, meta_text);
         }
     }
-
-    ui_status_bar_schedule_next_minute_refresh();
 }
 
-static void ui_status_bar_time_timer_cb(lv_timer_t *timer)
+static void ui_status_bar_refresh_thread_entry(void *parameter)
 {
-    LV_UNUSED(timer);
-    ui_status_bar_refresh_datetime();
+    LV_UNUSED(parameter);
+
+    while (1)
+    {
+        uint32_t delay_ms = ui_status_bar_next_refresh_delay_ms();
+
+        if (delay_ms < 1000U)
+        {
+            delay_ms = 1000U;
+        }
+
+        rt_thread_mdelay(delay_ms);
+        ui_dispatch_request_time_refresh();
+    }
 }
 
 static bool ui_status_backlight_read(uint8_t *brightness)
@@ -1790,12 +1798,22 @@ void ui_helpers_init(void)
         lv_timer_set_repeat_count(s_status_panel.toast_timer, 1);
         lv_timer_pause(s_status_panel.toast_timer);
     }
-    s_status_bar_time_timer = lv_timer_create(ui_status_bar_time_timer_cb, 60000, NULL);
-    if (s_status_bar_time_timer != NULL)
+    if (!s_status_bar_refresh_thread_started)
     {
-        lv_timer_pause(s_status_bar_time_timer);
-        ui_status_bar_refresh_datetime();
+        if (rt_thread_init(&s_status_bar_refresh_thread,
+                           "ui_status",
+                           ui_status_bar_refresh_thread_entry,
+                           RT_NULL,
+                           s_status_bar_refresh_thread_stack,
+                           sizeof(s_status_bar_refresh_thread_stack),
+                           UI_STATUS_BAR_REFRESH_THREAD_PRIORITY,
+                           UI_STATUS_BAR_REFRESH_THREAD_TICK) == RT_EOK)
+        {
+            rt_thread_startup(&s_status_bar_refresh_thread);
+            s_status_bar_refresh_thread_started = true;
+        }
     }
+    ui_status_bar_refresh_datetime();
     s_ui_helpers_initialized = true;
 }
 
@@ -1815,11 +1833,6 @@ void ui_helpers_deinit(void)
     {
         lv_timer_delete(s_status_panel.toast_timer);
         s_status_panel.toast_timer = NULL;
-    }
-    if (s_status_bar_time_timer != NULL)
-    {
-        lv_timer_delete(s_status_bar_time_timer);
-        s_status_bar_time_timer = NULL;
     }
     ui_helpers_reset_font_cache();
 
@@ -2398,6 +2411,13 @@ bool ui_status_panel_is_visible(void)
 {
     return (s_status_panel.root != NULL) &&
            !lv_obj_has_flag(s_status_panel.root, LV_OBJ_FLAG_HIDDEN);
+}
+
+void ui_refresh_global_status_bar(void)
+{
+    ui_status_bar_refresh_datetime();
+    ui_status_refresh_charging_icons();
+    ui_status_refresh_connection_icons(true);
 }
 
 void xiaozhi_ui_update_brightness(int brightness)

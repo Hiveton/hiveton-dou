@@ -1,6 +1,7 @@
 #ifndef WEATHER_H
 #define WEATHER_H
 #include "time.h"
+#include <sys/time.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -42,6 +43,7 @@ typedef struct {
 
 //初始化时间管理模块 天气模块
 int xiaozhi_time_weather_init(void);
+void xiaozhi_time_use_china_timezone(void);
 int xiaozhi_ntp_sync(void);
 int xiaozhi_weather_get(weather_info_t *weather_info);
 int xiaozhi_weather_peek(weather_info_t *weather_info);

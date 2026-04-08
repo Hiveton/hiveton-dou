@@ -494,6 +494,7 @@ int main(void)
 
     check_poweron_reason();
     set_pinmux();
+    xiaozhi_time_use_china_timezone();
     board_backlight_set(0U);
     rt_kprintf("ui: boot\n");
 
@@ -563,6 +564,12 @@ int main(void)
         else if (bt_event == BT_APP_CONNECT_PAN_SUCCESS)
         {
             rt_kprintf("bt: PAN connected\n");
+
+            /* Refresh the global date/time immediately once PAN networking is up,
+             * then request a background time/weather sync so RTC-adjusted values
+             * can be reflected again after NTP completes. */
+            ui_dispatch_request_time_refresh();
+            xiaozhi_weather_request_refresh();
 
             if (s_xiaozhi_registered == 0U)
             {
