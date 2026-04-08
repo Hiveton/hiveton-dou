@@ -32,6 +32,31 @@ typedef struct
     char internal_path[READING_EPUB_MAX_INTERNAL_PATH];
 } reading_epub_image_ref_t;
 
+typedef struct
+{
+    char internal_path[READING_EPUB_MAX_INTERNAL_PATH];
+} reading_epub_spine_item_t;
+
+bool reading_epub_build_index(const char *epub_path,
+                              reading_epub_spine_item_t *items,
+                              uint16_t max_item_count,
+                              uint16_t *item_count_out,
+                              char *error_buffer,
+                              size_t error_buffer_size);
+
+bool reading_epub_load_chapter(const char *epub_path,
+                               const char *chapter_internal_path,
+                               char *text_buffer,
+                               size_t text_buffer_size,
+                               reading_epub_block_t *blocks,
+                               uint16_t max_block_count,
+                               uint16_t *block_count_out,
+                               reading_epub_image_ref_t *images,
+                               uint16_t max_image_count,
+                               uint16_t *image_count_out,
+                               char *error_buffer,
+                               size_t error_buffer_size);
+
 bool reading_epub_load(const char *epub_path,
                        char *text_buffer,
                        size_t text_buffer_size,

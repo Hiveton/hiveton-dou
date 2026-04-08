@@ -6,6 +6,8 @@
 #include "dfs_posix.h"
 #include "rtthread.h"
 #include "rthw.h"
+#include "audio_mem.h"
+#include "drv_lcd.h"
 #include "mem_section.h"
 #include "reading_epub.h"
 #include "ui.h"
@@ -18,15 +20,16 @@
 #define STB_TRUETYPE_IMPLEMENTATION
 #include "../../../../sdk/external/lvgl_v9/src/libs/tiny_ttf/stb_truetype_htcw.h"
 
-#define UI_READING_DETAIL_MAX_FILE_BYTES (2 * 1024 * 1024)
+#define UI_READING_DETAIL_MAX_FILE_BYTES (256 * 1024)
 #define UI_READING_DETAIL_MAX_PAGE_COUNT 768U
 #define UI_READING_DETAIL_PAGE_BUFFER_BYTES 12288U
-#define UI_READING_DETAIL_AUTO_PAGE_MS 5000U
 #define UI_READING_DETAIL_LOAD_THREAD_STACK_SIZE (64 * 1024)
 #define UI_READING_DETAIL_LOAD_THREAD_PRIORITY 22
 #define UI_READING_DETAIL_LOAD_THREAD_TICK 10
 #define UI_READING_DETAIL_LOAD_TIMER_MS 30U
 #define UI_READING_DETAIL_PROGRESS_TIMER_MS 200U
+#define UI_READING_DETAIL_IMAGE_WIDTH LCD_HOR_RES_MAX
+#define UI_READING_DETAIL_IMAGE_DECODE_HEIGHT 4095
 #define UI_READING_DETAIL_TEXT_WIDTH 460
 #define UI_READING_DETAIL_TEXT_HEIGHT 558
 #define UI_READING_DETAIL_TEXT_FONT 20
@@ -38,12 +41,14 @@
 #define UI_READING_DETAIL_TEXT_LINE_SPACE_MAX 12
 #define UI_READING_DETAIL_TEXT_LINE_SPACE_STEP 1
 #define UI_READING_DETAIL_FONT_DELTA 0
+#define UI_READING_DETAIL_GLYPH_COVERAGE_THRESHOLD 160U
 #define UI_READING_DETAIL_BITMAP_GLYPH_SCRATCH_BYTES 4096U
 #define UI_READING_DETAIL_SETTINGS_PANEL_HEIGHT 172
 #define UI_READING_DETAIL_SETTINGS_VALUE_WIDTH 76
 #define UI_READING_DETAIL_SWIPE_HANDLE_HEIGHT 48
 #define UI_READING_DETAIL_MAX_BLOCK_COUNT 256U
 #define UI_READING_DETAIL_MAX_IMAGE_COUNT 48U
+#define UI_READING_DETAIL_MAX_SPINE_ITEM_COUNT 96U
 #define UI_READING_DETAIL_TEXT_STREAM_WINDOW_BYTES (128 * 1024U)
 
 typedef struct
@@ -126,13 +131,16 @@ static char s_reading_detail_page_text[32];
 static ui_reading_detail_page_entry_t s_reading_detail_pages[UI_READING_DETAIL_MAX_PAGE_COUNT];
 static reading_epub_block_t s_reading_detail_epub_blocks[UI_READING_DETAIL_MAX_BLOCK_COUNT];
 static reading_epub_image_ref_t s_reading_detail_epub_images[UI_READING_DETAIL_MAX_IMAGE_COUNT];
+static reading_epub_spine_item_t s_reading_detail_epub_spine[UI_READING_DETAIL_MAX_SPINE_ITEM_COUNT];
 static volatile uint16_t s_reading_detail_page_count = 0U;
 static uint16_t s_reading_detail_current_page = 0U;
-static lv_timer_t *s_reading_detail_auto_timer = NULL;
 static lv_timer_t *s_reading_detail_load_timer = NULL;
 static volatile bool s_reading_detail_has_last_page = false;
 static volatile uint16_t s_reading_detail_epub_block_count = 0U;
 static volatile uint16_t s_reading_detail_epub_image_count = 0U;
+static volatile uint16_t s_reading_detail_epub_spine_count = 0U;
+static uint16_t s_reading_detail_epub_current_chapter = 0U;
+static bool s_reading_detail_epub_lazy_mode = false;
 static bool s_reading_detail_load_worker_started = false;
 static bool s_reading_detail_first_render_done = false;
 static uint16_t s_reading_detail_last_reported_page_count = 0U;
@@ -144,7 +152,7 @@ static volatile bool s_reading_detail_first_page_layout_ready = false;
 static volatile bool s_reading_detail_first_page_bitmap_ready = false;
 static char s_reading_detail_request_path[256];
 static lv_image_dsc_t s_reading_detail_current_image_dsc;
-static const lv_font_t *s_reading_detail_width_cache_font = NULL;
+static uint16_t s_reading_detail_width_cache_size = 0U;
 static uint16_t s_reading_detail_ascii_width_cache[128];
 static uint16_t s_reading_detail_cjk_width = 0U;
 static uint16_t s_reading_detail_fullwidth_width = 0U;
@@ -175,6 +183,20 @@ static char s_reading_detail_text_stream_window[UI_READING_DETAIL_TEXT_STREAM_WI
 static uint16_t s_reading_detail_font_size = UI_READING_DETAIL_TEXT_FONT;
 static uint16_t s_reading_detail_line_space = UI_READING_DETAIL_TEXT_LINE_SPACE;
 static ui_reading_detail_swipe_state_t s_reading_detail_swipe_state;
+static lv_coord_t ui_reading_detail_get_text_offset_x(void)
+{
+    return (lv_coord_t)((UI_READING_DETAIL_IMAGE_WIDTH - UI_READING_DETAIL_TEXT_WIDTH) / 2);
+}
+
+static void ui_reading_detail_set_label_text(lv_obj_t *label, const char *text)
+{
+    if (label == NULL)
+    {
+        return;
+    }
+
+    lv_label_set_text(label, text != NULL ? text : "");
+}
 
 extern const unsigned char xiaozhi_font[];
 extern const int xiaozhi_font_size;
@@ -190,6 +212,7 @@ static void ui_reading_detail_refresh_nav_buttons(void);
 static void ui_reading_detail_set_button_enabled(lv_obj_t *button, bool enabled);
 static bool ui_reading_detail_load_text_from_path(const char *file_path);
 static bool ui_reading_detail_load_epub_from_path(const char *file_path);
+static void ui_reading_detail_load_selected_sync(void);
 static bool ui_reading_detail_render_page(void);
 static bool ui_reading_detail_selected_matches_request(void);
 static bool ui_reading_detail_render_text_bitmap(const char *formatted_text);
@@ -202,6 +225,7 @@ static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
                                                        uint32_t codepoint,
                                                        uint32_t codepoint_next,
                                                        uint16_t fallback_width);
+static int32_t ui_reading_detail_get_text_line_height_px(void);
 static const lv_font_t *ui_reading_detail_get_text_font(void);
 static bool ui_reading_detail_append_page_entry(ui_reading_detail_page_type_t type,
                                                 uint32_t start,
@@ -222,6 +246,8 @@ static uint32_t ui_reading_detail_measure_page_range(uint32_t start,
                                                      char *formatted_buffer,
                                                      size_t formatted_buffer_size);
 static bool ui_reading_detail_paginate_text_range(uint32_t start, uint32_t end);
+static void ui_reading_detail_reset_epub_lazy_state(void);
+static bool ui_reading_detail_load_epub_chapter(uint16_t chapter_index);
 
 static uint16_t ui_reading_detail_get_actual_font_size(void)
 {
@@ -284,7 +310,7 @@ static bool ui_reading_detail_ensure_bitmap_buffer(void)
     pixel_count = (uint32_t)ui_px_w(UI_READING_DETAIL_TEXT_WIDTH) *
                   (uint32_t)ui_px_h(UI_READING_DETAIL_TEXT_HEIGHT);
     data_size = pixel_count * (uint32_t)sizeof(lv_color_t);
-    s_reading_detail_bitmap_buffer = (lv_color_t *)rt_malloc(data_size);
+    s_reading_detail_bitmap_buffer = (lv_color_t *)audio_mem_malloc(data_size);
     if (s_reading_detail_bitmap_buffer == NULL)
     {
         rt_kprintf("reading_detail: bitmap alloc failed bytes=%lu\n",
@@ -662,6 +688,19 @@ static void ui_reading_detail_reset_pages(void)
     s_reading_detail_current_page = 0U;
 }
 
+static void ui_reading_detail_reset_epub_lazy_state(void)
+{
+    rt_base_t level;
+
+    level = rt_hw_interrupt_disable();
+    memset(s_reading_detail_epub_spine, 0, sizeof(s_reading_detail_epub_spine));
+    s_reading_detail_epub_spine_count = 0U;
+    rt_hw_interrupt_enable(level);
+
+    s_reading_detail_epub_current_chapter = 0U;
+    s_reading_detail_epub_lazy_mode = false;
+}
+
 static void ui_reading_detail_show_loading_state(void)
 {
     rt_snprintf(s_reading_detail_page_buffer,
@@ -673,7 +712,8 @@ static void ui_reading_detail_show_loading_state(void)
     if (s_reading_detail_refs.content_label != NULL)
     {
         lv_obj_clear_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_HIDDEN);
-        lv_label_set_text(s_reading_detail_refs.content_label, s_reading_detail_page_buffer);
+        ui_reading_detail_set_label_text(s_reading_detail_refs.content_label,
+                                         s_reading_detail_page_buffer);
     }
 
     if (s_reading_detail_refs.content_image != NULL)
@@ -683,7 +723,8 @@ static void ui_reading_detail_show_loading_state(void)
 
     if (s_reading_detail_refs.page_label != NULL)
     {
-        lv_label_set_text(s_reading_detail_refs.page_label, s_reading_detail_page_text);
+        ui_reading_detail_set_label_text(s_reading_detail_refs.page_label,
+                                         s_reading_detail_page_text);
     }
 
     ui_reading_detail_set_button_enabled(s_reading_detail_refs.prev_button, false);
@@ -701,13 +742,11 @@ static uint16_t ui_reading_detail_get_max_lines(void)
     int32_t max_height;
     int32_t line_space;
     int32_t line_height;
-    const lv_font_t *font;
     uint16_t max_lines;
 
     max_height = ui_px_h(UI_READING_DETAIL_TEXT_HEIGHT);
-    font = ui_reading_detail_get_text_font();
     line_space = ui_reading_detail_get_line_space();
-    line_height = lv_font_get_line_height(font) + line_space;
+    line_height = ui_reading_detail_get_text_line_height_px() + line_space;
     if (line_height <= 0)
     {
         line_height = 1;
@@ -753,7 +792,6 @@ static void ui_reading_detail_blend_glyph(const uint8_t *glyph_bitmap,
         {
             uint8_t coverage;
             int px = dst_x + gx;
-            uint8_t gray;
 
             if (px < 0 || px >= max_w)
             {
@@ -761,20 +799,18 @@ static void ui_reading_detail_blend_glyph(const uint8_t *glyph_bitmap,
             }
 
             coverage = glyph_bitmap[gy * glyph_w + gx];
-            if (coverage == 0U)
+            if (coverage < UI_READING_DETAIL_GLYPH_COVERAGE_THRESHOLD)
             {
                 continue;
             }
 
-            gray = (uint8_t)(255U - coverage);
-            s_reading_detail_bitmap_buffer[py * max_w + px] = lv_color_make(gray, gray, gray);
+            s_reading_detail_bitmap_buffer[py * max_w + px] = lv_color_make(0, 0, 0);
         }
     }
 }
 
 static bool ui_reading_detail_render_text_bitmap(const char *formatted_text)
 {
-    const lv_font_t *font;
     uint8_t *glyph_bitmap;
     uint32_t index;
     int pen_x;
@@ -794,8 +830,7 @@ static bool ui_reading_detail_render_text_bitmap(const char *formatted_text)
     }
 
     memset(s_reading_detail_bitmap_buffer, 0xFF, s_reading_detail_bitmap_dsc.data_size);
-    font = ui_reading_detail_get_text_font();
-    line_step = lv_font_get_line_height(font) + ui_reading_detail_get_line_space();
+    line_step = ui_reading_detail_get_text_line_height_px() + ui_reading_detail_get_line_space();
     if (line_step <= 0)
     {
         line_step = 1;
@@ -826,7 +861,7 @@ static bool ui_reading_detail_render_text_bitmap(const char *formatted_text)
             continue;
         }
 
-        advance_px = (int)ui_reading_detail_get_glyph_width_fast(font,
+        advance_px = (int)ui_reading_detail_get_glyph_width_fast(NULL,
                                                                  codepoint,
                                                                  next_codepoint,
                                                                  (uint16_t)ui_px_x(UI_READING_DETAIL_TEXT_FONT));
@@ -900,19 +935,26 @@ static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
                                                        uint32_t next_codepoint,
                                                        uint16_t fallback_width)
 {
+    int advance = 0;
+    int lsb = 0;
+    int kern_advance = 0;
+    uint16_t actual_font_size;
     uint16_t width;
 
-    if (font == NULL)
+    LV_UNUSED(font);
+
+    if (!ui_reading_detail_init_stb_font())
     {
         return fallback_width;
     }
 
-    if (s_reading_detail_width_cache_font != font)
+    actual_font_size = ui_reading_detail_get_actual_font_size();
+    if (s_reading_detail_width_cache_size != actual_font_size)
     {
         memset(s_reading_detail_ascii_width_cache, 0, sizeof(s_reading_detail_ascii_width_cache));
         s_reading_detail_cjk_width = 0U;
         s_reading_detail_fullwidth_width = 0U;
-        s_reading_detail_width_cache_font = font;
+        s_reading_detail_width_cache_size = actual_font_size;
     }
 
     if (codepoint < 128U)
@@ -920,11 +962,14 @@ static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
         width = s_reading_detail_ascii_width_cache[codepoint];
         if (width == 0U)
         {
-            width = (uint16_t)lv_font_get_glyph_width(font, codepoint, next_codepoint);
-            if (width == 0U)
-            {
-                width = fallback_width;
-            }
+            stbtt_GetCodepointHMetrics(&s_reading_detail_stb_info, (int)codepoint, &advance, &lsb);
+            kern_advance = next_codepoint != 0U
+                               ? stbtt_GetCodepointKernAdvance(&s_reading_detail_stb_info,
+                                                               (int)codepoint,
+                                                               (int)next_codepoint)
+                               : 0;
+            width = (uint16_t)((advance + kern_advance) * s_reading_detail_stb_scale + 0.5f);
+            if (width == 0U) width = fallback_width;
             s_reading_detail_ascii_width_cache[codepoint] = width;
         }
         return width;
@@ -934,11 +979,9 @@ static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
     {
         if (s_reading_detail_cjk_width == 0U)
         {
-            s_reading_detail_cjk_width = (uint16_t)lv_font_get_glyph_width(font, 0x4E2DU, 0U);
-            if (s_reading_detail_cjk_width == 0U)
-            {
-                s_reading_detail_cjk_width = fallback_width;
-            }
+            stbtt_GetCodepointHMetrics(&s_reading_detail_stb_info, 0x4E2D, &advance, &lsb);
+            s_reading_detail_cjk_width = (uint16_t)(advance * s_reading_detail_stb_scale + 0.5f);
+            if (s_reading_detail_cjk_width == 0U) s_reading_detail_cjk_width = fallback_width;
         }
         return s_reading_detail_cjk_width;
     }
@@ -947,22 +990,45 @@ static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
     {
         if (s_reading_detail_fullwidth_width == 0U)
         {
-            s_reading_detail_fullwidth_width = (uint16_t)lv_font_get_glyph_width(font, 0x3002U, 0U);
-            if (s_reading_detail_fullwidth_width == 0U)
-            {
-                s_reading_detail_fullwidth_width = fallback_width;
-            }
+            stbtt_GetCodepointHMetrics(&s_reading_detail_stb_info, 0x3002, &advance, &lsb);
+            s_reading_detail_fullwidth_width = (uint16_t)(advance * s_reading_detail_stb_scale + 0.5f);
+            if (s_reading_detail_fullwidth_width == 0U) s_reading_detail_fullwidth_width = fallback_width;
         }
         return s_reading_detail_fullwidth_width;
     }
 
-    width = (uint16_t)lv_font_get_glyph_width(font, codepoint, next_codepoint);
+    stbtt_GetCodepointHMetrics(&s_reading_detail_stb_info, (int)codepoint, &advance, &lsb);
+    kern_advance = next_codepoint != 0U
+                       ? stbtt_GetCodepointKernAdvance(&s_reading_detail_stb_info,
+                                                       (int)codepoint,
+                                                       (int)next_codepoint)
+                       : 0;
+    width = (uint16_t)((advance + kern_advance) * s_reading_detail_stb_scale + 0.5f);
     if (width == 0U)
     {
         width = fallback_width;
     }
 
     return width;
+}
+
+static int32_t ui_reading_detail_get_text_line_height_px(void)
+{
+    float line_height;
+
+    if (!ui_reading_detail_init_stb_font())
+    {
+        return ui_px_h(UI_READING_DETAIL_TEXT_FONT);
+    }
+
+    line_height = (float)(s_reading_detail_stb_ascent - s_reading_detail_stb_descent + s_reading_detail_stb_line_gap) *
+                  s_reading_detail_stb_scale;
+    if (line_height <= 0.0f)
+    {
+        line_height = (float)ui_px_h(UI_READING_DETAIL_TEXT_FONT);
+    }
+
+    return (int32_t)(line_height + 0.5f);
 }
 
 static bool ui_reading_detail_append_page_entry(ui_reading_detail_page_type_t type,
@@ -1007,7 +1073,6 @@ static uint32_t ui_reading_detail_measure_page_range(uint32_t start,
     uint16_t lines_used = 1U;
     int32_t max_width;
     int32_t letter_space;
-    const lv_font_t *font;
     uint16_t fallback_width;
     size_t written = 0U;
 
@@ -1018,9 +1083,8 @@ static uint32_t ui_reading_detail_measure_page_range(uint32_t start,
 
     max_lines = ui_reading_detail_get_max_lines();
     max_width = ui_px_w(UI_READING_DETAIL_TEXT_WIDTH);
-    font = ui_reading_detail_get_text_font();
     letter_space = 0;
-    fallback_width = (uint16_t)(lv_font_get_line_height(font) / 2);
+    fallback_width = (uint16_t)(ui_reading_detail_get_text_line_height_px() / 2);
     if (fallback_width == 0U)
     {
         fallback_width = 1U;
@@ -1089,7 +1153,7 @@ static uint32_t ui_reading_detail_measure_page_range(uint32_t start,
         {
             letter_next = 0U;
         }
-        char_width = (int32_t)ui_reading_detail_get_glyph_width_fast(font,
+        char_width = (int32_t)ui_reading_detail_get_glyph_width_fast(NULL,
                                                                      letter,
                                                                      letter_next,
                                                                      fallback_width);
@@ -1295,12 +1359,19 @@ static void ui_reading_detail_refresh_nav_buttons(void)
 {
     bool has_last_page = false;
     uint16_t page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
+    bool has_prev = s_reading_detail_current_page > 0U;
+    bool has_next = !has_last_page ||
+                    (uint16_t)(s_reading_detail_current_page + 1U) < page_count;
 
-    ui_reading_detail_set_button_enabled(s_reading_detail_refs.prev_button,
-                                         s_reading_detail_current_page > 0U);
-    ui_reading_detail_set_button_enabled(s_reading_detail_refs.next_button,
-                                         !has_last_page ||
-                                             (uint16_t)(s_reading_detail_current_page + 1U) < page_count);
+    if (s_reading_detail_epub_lazy_mode)
+    {
+        has_prev = has_prev || s_reading_detail_epub_current_chapter > 0U;
+        has_next = has_next ||
+                   (uint16_t)(s_reading_detail_epub_current_chapter + 1U) < s_reading_detail_epub_spine_count;
+    }
+
+    ui_reading_detail_set_button_enabled(s_reading_detail_refs.prev_button, has_prev);
+    ui_reading_detail_set_button_enabled(s_reading_detail_refs.next_button, has_next);
 }
 
 static void ui_reading_detail_refresh_page_label(void)
@@ -1324,23 +1395,49 @@ static void ui_reading_detail_refresh_page_label(void)
         display_current = display_total;
     }
 
-    if (has_last_page)
+    if (s_reading_detail_epub_lazy_mode && s_reading_detail_epub_spine_count > 1U)
     {
-        rt_snprintf(s_reading_detail_page_text,
-                    sizeof(s_reading_detail_page_text),
-                    "%u / %u",
-                    (unsigned int)display_current,
-                    (unsigned int)display_total);
+        if (has_last_page)
+        {
+            rt_snprintf(s_reading_detail_page_text,
+                        sizeof(s_reading_detail_page_text),
+                        "C%u/%u P%u/%u",
+                        (unsigned int)(s_reading_detail_epub_current_chapter + 1U),
+                        (unsigned int)s_reading_detail_epub_spine_count,
+                        (unsigned int)display_current,
+                        (unsigned int)display_total);
+        }
+        else
+        {
+            rt_snprintf(s_reading_detail_page_text,
+                        sizeof(s_reading_detail_page_text),
+                        "C%u/%u P%u/--",
+                        (unsigned int)(s_reading_detail_epub_current_chapter + 1U),
+                        (unsigned int)s_reading_detail_epub_spine_count,
+                        (unsigned int)display_current);
+        }
     }
     else
     {
-        rt_snprintf(s_reading_detail_page_text,
-                    sizeof(s_reading_detail_page_text),
-                    "%u / --",
-                    (unsigned int)display_current);
+        if (has_last_page)
+        {
+            rt_snprintf(s_reading_detail_page_text,
+                        sizeof(s_reading_detail_page_text),
+                        "%u / %u",
+                        (unsigned int)display_current,
+                        (unsigned int)display_total);
+        }
+        else
+        {
+            rt_snprintf(s_reading_detail_page_text,
+                        sizeof(s_reading_detail_page_text),
+                        "%u / --",
+                        (unsigned int)display_current);
+        }
     }
 
-    lv_label_set_text(s_reading_detail_refs.page_label, s_reading_detail_page_text);
+    ui_reading_detail_set_label_text(s_reading_detail_refs.page_label,
+                                     s_reading_detail_page_text);
 }
 
 static bool ui_reading_detail_settings_visible(void)
@@ -1356,13 +1453,13 @@ static void ui_reading_detail_refresh_settings_panel(void)
     if (s_reading_detail_refs.font_value_label != NULL)
     {
         rt_snprintf(value_text, sizeof(value_text), "%u", (unsigned int)s_reading_detail_font_size);
-        lv_label_set_text(s_reading_detail_refs.font_value_label, value_text);
+        ui_reading_detail_set_label_text(s_reading_detail_refs.font_value_label, value_text);
     }
 
     if (s_reading_detail_refs.line_space_value_label != NULL)
     {
         rt_snprintf(value_text, sizeof(value_text), "%u", (unsigned int)s_reading_detail_line_space);
-        lv_label_set_text(s_reading_detail_refs.line_space_value_label, value_text);
+        ui_reading_detail_set_label_text(s_reading_detail_refs.line_space_value_label, value_text);
     }
 }
 
@@ -1397,7 +1494,7 @@ static void ui_reading_detail_rebuild_layout(void)
     }
 
     s_reading_detail_stb_ready = false;
-    s_reading_detail_width_cache_font = NULL;
+    s_reading_detail_width_cache_size = 0U;
     s_reading_detail_first_page_layout_ready = false;
     s_reading_detail_first_page_bitmap_ready = false;
     s_reading_detail_first_render_done = false;
@@ -1440,16 +1537,6 @@ static void ui_reading_detail_rebuild_layout(void)
     s_reading_detail_first_page_layout_ready = true;
     s_reading_detail_current_page = 0U;
 
-    if (s_reading_detail_refs.content_label != NULL)
-    {
-        lv_obj_set_style_text_font(s_reading_detail_refs.content_label,
-                                   ui_reading_detail_get_text_font(),
-                                   0);
-        lv_obj_set_style_text_line_space(s_reading_detail_refs.content_label,
-                                         ui_reading_detail_get_line_space(),
-                                         0);
-    }
-
     (void)ui_reading_detail_render_page();
 }
 
@@ -1463,6 +1550,7 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
 
     memset(s_reading_detail_text, 0, sizeof(s_reading_detail_text));
     ui_reading_detail_reset_text_source();
+    ui_reading_detail_reset_epub_lazy_state();
 
     if (file_path == NULL || file_path[0] == '\0')
     {
@@ -1534,31 +1622,35 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
     return true;
 }
 
-static bool ui_reading_detail_load_epub_from_path(const char *file_path)
+static bool ui_reading_detail_load_epub_chapter(uint16_t chapter_index)
 {
     char error_text[128];
     uint16_t block_count = 0U;
     uint16_t image_count = 0U;
     uint16_t i;
 
-    ui_reading_detail_reset_text_source();
+    if (!s_reading_detail_epub_lazy_mode ||
+        chapter_index >= s_reading_detail_epub_spine_count)
+    {
+        return false;
+    }
+
     ui_reading_detail_reset_pages();
     memset(s_reading_detail_text, 0, sizeof(s_reading_detail_text));
-    memset(s_reading_detail_epub_blocks, 0, sizeof(s_reading_detail_epub_blocks));
-    memset(s_reading_detail_epub_images, 0, sizeof(s_reading_detail_epub_images));
     error_text[0] = '\0';
 
-    if (!reading_epub_load(file_path,
-                           s_reading_detail_text,
-                           sizeof(s_reading_detail_text),
-                           s_reading_detail_epub_blocks,
-                           UI_READING_DETAIL_MAX_BLOCK_COUNT,
-                           &block_count,
-                           s_reading_detail_epub_images,
-                           UI_READING_DETAIL_MAX_IMAGE_COUNT,
-                           &image_count,
-                           error_text,
-                           sizeof(error_text)))
+    if (!reading_epub_load_chapter(s_reading_detail_request_path,
+                                   s_reading_detail_epub_spine[chapter_index].internal_path,
+                                   s_reading_detail_text,
+                                   sizeof(s_reading_detail_text),
+                                   s_reading_detail_epub_blocks,
+                                   UI_READING_DETAIL_MAX_BLOCK_COUNT,
+                                   &block_count,
+                                   s_reading_detail_epub_images,
+                                   UI_READING_DETAIL_MAX_IMAGE_COUNT,
+                                   &image_count,
+                                   error_text,
+                                   sizeof(error_text)))
     {
         rt_snprintf(s_reading_detail_text,
                     sizeof(s_reading_detail_text),
@@ -1610,6 +1702,53 @@ static bool ui_reading_detail_load_epub_from_path(const char *file_path)
         (void)ui_reading_detail_paginate_text_range(0U, (uint32_t)strlen(s_reading_detail_text));
     }
 
+    s_reading_detail_epub_current_chapter = chapter_index;
+    return true;
+}
+
+static bool ui_reading_detail_load_epub_from_path(const char *file_path)
+{
+    char error_text[128];
+    uint16_t spine_count = 0U;
+
+    ui_reading_detail_reset_text_source();
+    ui_reading_detail_reset_pages();
+    ui_reading_detail_reset_epub_lazy_state();
+    memset(s_reading_detail_text, 0, sizeof(s_reading_detail_text));
+    error_text[0] = '\0';
+
+    if (!reading_epub_build_index(file_path,
+                                  s_reading_detail_epub_spine,
+                                  UI_READING_DETAIL_MAX_SPINE_ITEM_COUNT,
+                                  &spine_count,
+                                  error_text,
+                                  sizeof(error_text)))
+    {
+        rt_snprintf(s_reading_detail_text,
+                    sizeof(s_reading_detail_text),
+                    ui_i18n_pick("EPUB 解析失败：\n%s", "Failed to parse EPUB:\n%s"),
+                    error_text[0] != '\0' ? error_text : ui_i18n_pick("未知错误", "Unknown error"));
+        ui_reading_detail_use_memory_text();
+        ui_reading_detail_reset_pages();
+        ui_reading_detail_use_memory_text();
+        (void)ui_reading_detail_paginate_text_range(0U, (uint32_t)strlen(s_reading_detail_text));
+        return false;
+    }
+
+    s_reading_detail_epub_lazy_mode = true;
+    s_reading_detail_epub_spine_count = spine_count;
+    s_reading_detail_epub_current_chapter = 0U;
+
+    if (!ui_reading_detail_load_epub_chapter(0U))
+    {
+        ui_reading_detail_reset_epub_lazy_state();
+        return false;
+    }
+
+    rt_kprintf("reading_detail: epub indexed chapters=%u current=%u pages=%u\n",
+               (unsigned int)s_reading_detail_epub_spine_count,
+               (unsigned int)(s_reading_detail_epub_current_chapter + 1U),
+               (unsigned int)s_reading_detail_page_count);
     return true;
 }
 
@@ -1644,11 +1783,84 @@ static void ui_reading_detail_request_async_load(void)
     rt_sem_release(&s_reading_detail_load_sem);
 }
 
+static void ui_reading_detail_load_selected_sync(void)
+{
+    char file_path[sizeof(s_reading_detail_request_path)];
+    uint32_t request_id;
+    uint32_t load_start_ms;
+
+    ui_reading_detail_reset_text_source();
+    ui_reading_detail_reset_pages();
+    memset(s_reading_detail_text, 0, sizeof(s_reading_detail_text));
+    memset(s_reading_detail_first_page_layout, 0, sizeof(s_reading_detail_first_page_layout));
+    memset(s_reading_detail_page_buffer, 0, sizeof(s_reading_detail_page_buffer));
+    file_path[0] = '\0';
+    s_reading_detail_first_render_done = false;
+    s_reading_detail_last_reported_page_count = 0U;
+    s_reading_detail_last_reported_has_last_page = false;
+    s_reading_detail_first_page_layout_ready = false;
+    s_reading_detail_first_page_bitmap_ready = false;
+
+    (void)ui_reading_list_get_selected_path(file_path, sizeof(file_path));
+
+    rt_snprintf(s_reading_detail_request_path,
+                sizeof(s_reading_detail_request_path),
+                "%s",
+                file_path);
+    ++s_reading_detail_request_id;
+    request_id = s_reading_detail_request_id;
+    s_reading_detail_load_state = UI_READING_DETAIL_LOAD_LOADING;
+    s_reading_detail_completed_request_id = 0U;
+    load_start_ms = ui_reading_detail_now_ms();
+
+    rt_kprintf("reading_detail: request=%lu queued path=%s\n",
+               (unsigned long)request_id,
+               s_reading_detail_request_path[0] != '\0' ? s_reading_detail_request_path : "<none>");
+
+    if (file_path[0] == '\0')
+    {
+        rt_snprintf(s_reading_detail_text,
+                    sizeof(s_reading_detail_text),
+                    "%s",
+                    ui_i18n_pick("TF 卡中还没有可阅读的文本文件。\n\n请先返回列表页确认文件是否已经识别。",
+                                 "There are no readable text files on the TF card yet.\n\nPlease go back to the list and check whether the file has been detected."));
+        ui_reading_detail_use_memory_text();
+        ui_reading_detail_reset_pages();
+        ui_reading_detail_use_memory_text();
+        (void)ui_reading_detail_paginate_text_range(0U, ui_reading_detail_get_text_length());
+        rt_kprintf("reading_detail: request=%lu fallback without selected file\n",
+                   (unsigned long)request_id);
+    }
+    else if (strrchr(file_path, '.') != NULL &&
+             strcasecmp(strrchr(file_path, '.'), ".epub") == 0)
+    {
+        (void)ui_reading_detail_load_epub_from_path(file_path);
+    }
+    else
+    {
+        (void)ui_reading_detail_load_text_from_path(file_path);
+    }
+
+    {
+        bool has_last_page = false;
+        uint16_t page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
+
+        s_reading_detail_first_page_layout_ready = page_count > 0U;
+        s_reading_detail_load_state = UI_READING_DETAIL_LOAD_READY;
+        s_reading_detail_completed_request_id = request_id;
+
+        rt_kprintf("reading_detail: request=%lu pages=%u last=%u total_ms=%lu\n",
+                   (unsigned long)request_id,
+                   (unsigned int)page_count,
+                   has_last_page ? 1U : 0U,
+                   (unsigned long)(ui_reading_detail_now_ms() - load_start_ms));
+    }
+}
+
 bool ui_reading_detail_prepare_selected_async(void)
 {
-    ui_reading_detail_start_load_worker();
-    ui_reading_detail_request_async_load();
-    return s_reading_detail_request_path[0] != '\0' || s_reading_detail_load_state == UI_READING_DETAIL_LOAD_LOADING;
+    ui_reading_detail_load_selected_sync();
+    return false;
 }
 
 bool ui_reading_detail_is_selected_ready(void)
@@ -1684,7 +1896,6 @@ static bool ui_reading_detail_render_page(void)
     uint32_t render_start_ms;
     const ui_reading_detail_page_entry_t *page;
     lv_coord_t image_max_width;
-    lv_coord_t image_max_height;
 
     if (s_reading_detail_refs.content_label == NULL || s_reading_detail_refs.content_image == NULL)
     {
@@ -1706,10 +1917,8 @@ static bool ui_reading_detail_render_page(void)
     page = &s_reading_detail_pages[s_reading_detail_current_page];
     image_max_width = s_reading_detail_refs.reading_box != NULL ?
                           lv_obj_get_content_width(s_reading_detail_refs.reading_box) :
-                          ui_px_w(UI_READING_DETAIL_TEXT_WIDTH);
-    image_max_height = s_reading_detail_refs.reading_box != NULL ?
-                           lv_obj_get_content_height(s_reading_detail_refs.reading_box) :
-                           ui_px_h(UI_READING_DETAIL_TEXT_HEIGHT);
+                          ui_px_w(UI_READING_DETAIL_IMAGE_WIDTH);
+    lcd_set_epd_mono_dither_enabled(RT_FALSE);
 
     if (page->type == UI_READING_DETAIL_PAGE_IMAGE)
     {
@@ -1717,20 +1926,23 @@ static bool ui_reading_detail_render_page(void)
         if (!reading_epub_decode_image(s_reading_detail_request_path,
                                        s_reading_detail_epub_images[page->image_index].internal_path,
                                        (uint16_t)image_max_width,
-                                       (uint16_t)image_max_height,
+                                       (uint16_t)UI_READING_DETAIL_IMAGE_DECODE_HEIGHT,
                                        &s_reading_detail_current_image_dsc))
         {
-            lv_label_set_text(s_reading_detail_refs.content_label,
-                              ui_i18n_pick("图片加载失败。", "Failed to load image."));
+            ui_reading_detail_set_label_text(s_reading_detail_refs.content_label,
+                                             ui_i18n_pick("图片加载失败。", "Failed to load image."));
             lv_obj_clear_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
         }
         else
         {
             lv_image_set_src(s_reading_detail_refs.content_image, &s_reading_detail_current_image_dsc);
+            lv_obj_set_size(s_reading_detail_refs.content_image,
+                            s_reading_detail_current_image_dsc.header.w,
+                            s_reading_detail_current_image_dsc.header.h);
             lv_obj_set_pos(s_reading_detail_refs.content_image,
-                           10 + (image_max_width - s_reading_detail_current_image_dsc.header.w) / 2,
-                           8 + (image_max_height - s_reading_detail_current_image_dsc.header.h) / 2);
+                           (image_max_width - s_reading_detail_current_image_dsc.header.w) / 2,
+                           8);
             lv_obj_clear_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_HIDDEN);
         }
@@ -1749,12 +1961,18 @@ static bool ui_reading_detail_render_page(void)
                         ui_i18n_pick("正文为空。", "The page is empty."));
         }
 
-        lv_label_set_text(s_reading_detail_refs.content_label, s_reading_detail_page_buffer);
+        ui_reading_detail_set_label_text(s_reading_detail_refs.content_label,
+                                         s_reading_detail_page_buffer);
         lv_obj_clear_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
     }
 
     lv_obj_invalidate(s_reading_detail_refs.content_label);
+    lv_obj_invalidate(s_reading_detail_refs.content_image);
+    if (s_reading_detail_refs.reading_box != NULL)
+    {
+        lv_obj_invalidate(s_reading_detail_refs.reading_box);
+    }
     ui_reading_detail_refresh_page_label();
     ui_reading_detail_refresh_nav_buttons();
     rt_kprintf("reading_detail: render page=%u ready_pages=%u kind=%u render_ms=%lu\n",
@@ -1763,18 +1981,6 @@ static bool ui_reading_detail_render_page(void)
                (unsigned int)page->type,
                (unsigned long)(ui_reading_detail_now_ms() - render_start_ms));
     return true;
-}
-
-static void ui_reading_detail_auto_page_timer_cb(lv_timer_t *timer)
-{
-    LV_UNUSED(timer);
-
-    if (ui_Reading_Detail == NULL)
-    {
-        return;
-    }
-
-    ui_reading_detail_next_page();
 }
 
 static void ui_reading_detail_load_timer_cb(lv_timer_t *timer)
@@ -1801,13 +2007,6 @@ static void ui_reading_detail_load_timer_cb(lv_timer_t *timer)
         s_reading_detail_first_render_done = true;
         s_reading_detail_last_reported_page_count =
             ui_reading_detail_snapshot_page_count(&s_reading_detail_last_reported_has_last_page);
-
-        if (s_reading_detail_auto_timer == NULL)
-        {
-            s_reading_detail_auto_timer = lv_timer_create(ui_reading_detail_auto_page_timer_cb,
-                                                          UI_READING_DETAIL_AUTO_PAGE_MS,
-                                                          NULL);
-        }
         if (s_reading_detail_load_timer != NULL)
         {
             lv_timer_delete(s_reading_detail_load_timer);
@@ -1819,6 +2018,8 @@ static void ui_reading_detail_load_timer_cb(lv_timer_t *timer)
 
 static void ui_reading_detail_prev_page(void)
 {
+    uint16_t page_count;
+
     if (!ui_reading_detail_is_content_ready())
     {
         return;
@@ -1826,6 +2027,23 @@ static void ui_reading_detail_prev_page(void)
 
     if (s_reading_detail_current_page == 0U)
     {
+        if (s_reading_detail_epub_lazy_mode && s_reading_detail_epub_current_chapter > 0U)
+        {
+            if (ui_reading_detail_load_epub_chapter((uint16_t)(s_reading_detail_epub_current_chapter - 1U)))
+            {
+                page_count = ui_reading_detail_snapshot_page_count(NULL);
+                if (page_count > 0U)
+                {
+                    s_reading_detail_current_page = (uint16_t)(page_count - 1U);
+                }
+                (void)ui_reading_detail_render_page();
+            }
+            else
+            {
+                s_reading_detail_current_page = 0U;
+                (void)ui_reading_detail_render_page();
+            }
+        }
         return;
     }
 
@@ -1848,6 +2066,22 @@ static void ui_reading_detail_next_page(void)
     {
         ++s_reading_detail_current_page;
         (void)ui_reading_detail_render_page();
+        return;
+    }
+
+    if (s_reading_detail_epub_lazy_mode &&
+        (uint16_t)(s_reading_detail_epub_current_chapter + 1U) < s_reading_detail_epub_spine_count)
+    {
+        if (ui_reading_detail_load_epub_chapter((uint16_t)(s_reading_detail_epub_current_chapter + 1U)))
+        {
+            s_reading_detail_current_page = 0U;
+            (void)ui_reading_detail_render_page();
+        }
+        else
+        {
+            s_reading_detail_current_page = 0U;
+            (void)ui_reading_detail_render_page();
+        }
         return;
     }
 
@@ -2050,14 +2284,15 @@ void ui_Reading_Detail_screen_init(void)
     lv_obj_t *reading_box;
     lv_obj_t *row;
     lv_obj_t *button;
-    const char *title;
+    const char *title = ui_i18n_pick("在线阅读", "Reading");
 
     if (ui_Reading_Detail != NULL)
     {
         return;
     }
 
-    ui_reading_detail_start_load_worker();
+    (void)ui_reading_list_prepare_selected_file();
+
     memset(&s_reading_detail_refs, 0, sizeof(s_reading_detail_refs));
     memset(s_reading_detail_page_text, 0, sizeof(s_reading_detail_page_text));
     s_reading_detail_first_render_done = false;
@@ -2065,17 +2300,17 @@ void ui_Reading_Detail_screen_init(void)
     s_reading_detail_last_reported_has_last_page = false;
 
     ui_Reading_Detail = ui_create_screen_base();
-    title = ui_reading_list_get_selected_name();
-    rt_kprintf("reading_detail: init title=%s\n", title);
+    rt_kprintf("reading_detail: init title=%s\n", title != NULL ? title : "<null>");
     ui_build_standard_screen(&page, ui_Reading_Detail, title, UI_SCREEN_READING_LIST);
 
-    reading_box = ui_create_card(page.content, 24, 12, 480, 572, UI_SCREEN_NONE, false, 0);
+    reading_box = ui_create_card(page.content, 0, 12, UI_READING_DETAIL_IMAGE_WIDTH, 572, UI_SCREEN_NONE, false, 0);
     s_reading_detail_refs.reading_box = reading_box;
     lv_obj_set_style_border_width(reading_box, 0, 0);
     lv_obj_set_style_bg_opa(reading_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(reading_box, 0, 0);
     s_reading_detail_refs.content_label = ui_create_label(reading_box,
                                                           "",
-                                                          10,
+                                                          ui_reading_detail_get_text_offset_x(),
                                                           8,
                                                           UI_READING_DETAIL_TEXT_WIDTH,
                                                           UI_READING_DETAIL_TEXT_HEIGHT,
@@ -2096,9 +2331,9 @@ void ui_Reading_Detail_screen_init(void)
                                      ui_px_y(UI_READING_DETAIL_TEXT_LINE_SPACE),
                                      0);
     s_reading_detail_refs.content_image = lv_image_create(reading_box);
-    lv_obj_set_pos(s_reading_detail_refs.content_image, 10, 8);
+    lv_obj_set_pos(s_reading_detail_refs.content_image, 0, 8);
     lv_obj_set_size(s_reading_detail_refs.content_image,
-                    ui_px_w(UI_READING_DETAIL_TEXT_WIDTH),
+                    ui_px_w(UI_READING_DETAIL_IMAGE_WIDTH),
                     ui_px_h(UI_READING_DETAIL_TEXT_HEIGHT));
     lv_obj_add_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_flag(reading_box, LV_OBJ_FLAG_CLICKABLE);
@@ -2222,27 +2457,22 @@ void ui_Reading_Detail_screen_init(void)
                         (void *)(intptr_t)UI_READING_DETAIL_TEXT_LINE_SPACE_STEP);
     ui_reading_detail_refresh_settings_panel();
 
+    ui_reading_detail_show_loading_state();
+    ui_reading_detail_load_selected_sync();
+
     if (ui_reading_detail_is_selected_ready())
     {
+        rt_kprintf("reading_detail: refs after load box=%p label=%p image=%p page=%p\n",
+                   s_reading_detail_refs.reading_box,
+                   s_reading_detail_refs.content_label,
+                   s_reading_detail_refs.content_image,
+                   s_reading_detail_refs.page_label);
         (void)ui_reading_detail_render_page();
         s_reading_detail_first_render_done = true;
-        if (s_reading_detail_auto_timer == NULL)
-        {
-            s_reading_detail_auto_timer = lv_timer_create(ui_reading_detail_auto_page_timer_cb,
-                                                          UI_READING_DETAIL_AUTO_PAGE_MS,
-                                                          NULL);
-        }
-        return;
     }
-
-    ui_reading_detail_show_loading_state();
-    ui_reading_detail_request_async_load();
-
-    if (s_reading_detail_load_timer == NULL)
+    else
     {
-        s_reading_detail_load_timer = lv_timer_create(ui_reading_detail_load_timer_cb,
-                                                      UI_READING_DETAIL_LOAD_TIMER_MS,
-                                                      NULL);
+        ui_reading_detail_show_loading_state();
     }
 }
 
@@ -2254,12 +2484,6 @@ void ui_Reading_Detail_screen_destroy(void)
         s_reading_detail_load_timer = NULL;
     }
 
-    if (s_reading_detail_auto_timer != NULL)
-    {
-        lv_timer_delete(s_reading_detail_auto_timer);
-        s_reading_detail_auto_timer = NULL;
-    }
-
     if (ui_Reading_Detail != NULL)
     {
         lv_obj_delete(ui_Reading_Detail);
@@ -2268,7 +2492,7 @@ void ui_Reading_Detail_screen_destroy(void)
 
     if (s_reading_detail_bitmap_buffer != NULL)
     {
-        rt_free(s_reading_detail_bitmap_buffer);
+        audio_mem_free(s_reading_detail_bitmap_buffer);
         s_reading_detail_bitmap_buffer = NULL;
     }
     reading_epub_release_image(&s_reading_detail_current_image_dsc);
@@ -2284,6 +2508,7 @@ void ui_Reading_Detail_screen_destroy(void)
     s_reading_detail_last_reported_page_count = 0U;
     s_reading_detail_last_reported_has_last_page = false;
     s_reading_detail_request_path[0] = '\0';
+    ui_reading_detail_reset_epub_lazy_state();
     ++s_reading_detail_request_id;
     s_reading_detail_load_state = UI_READING_DETAIL_LOAD_IDLE;
     s_reading_detail_completed_request_id = 0U;

@@ -247,8 +247,8 @@ static void EPD_SetBacklight(uint8_t br)
  * 0 = hard threshold (sharper text, less edge noise)
  * 1 = Bayer dithering (smoother gradients, may look grainy on text)
  */
-#define EPD_MONO_USE_DITHER 0
 #define EPD_MONO_THRESHOLD_LEVEL 2U
+#define EPD_USE_GRAY2_REFRESH 0
 
 #define REG_LUT_VCOM 0x20
 #define REG_LUT_W2W 0x21
@@ -324,13 +324,14 @@ static void LUTGC(LCDC_HandleTypeDef *hlcdc);
 static void EPD_Refresh(LCDC_HandleTypeDef *hlcdc);
 static void EPD_ReadBusy(void);
 static void EPD_SendCommandDataBuf(LCDC_HandleTypeDef *hlcdc, uint8_t cmd,
-                                   const uint8_t *data, uint16_t len);
+                                   const uint8_t *data, uint32_t len);
 static void EPD_SetFullWindow(LCDC_HandleTypeDef *hlcdc);
 static void EPD_SetPartialWindow(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
                                  uint16_t y0, uint16_t x1, uint16_t y1);
 static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
                                         uint16_t y0, uint16_t x1, uint16_t y1);
 static void EPD_FrameBuffer_FlushFast(LCDC_HandleTypeDef *hlcdc);
+static void EPD_FrameBuffer_FlushGray2(LCDC_HandleTypeDef *hlcdc);
 static void EPD_MarkDirtyPhysicalRegion(uint16_t x0, uint16_t y0, uint16_t x1,
                                         uint16_t y1);
 static void EPD_MarkDirtyLogicalRegion(uint16_t x0, uint16_t y0, uint16_t x1,
@@ -356,6 +357,12 @@ L2_NON_RET_BSS_SECT(frambuf,
 L2_NON_RET_BSS_SECT_END
 
 static uint8_t framebuffer_initialized = 0;
+static rt_bool_t s_epd_mono_dither_enabled = RT_FALSE;
+static rt_bool_t s_epd_mono_dither_region_valid = RT_FALSE;
+static uint16_t s_epd_mono_dither_x0 = 0;
+static uint16_t s_epd_mono_dither_y0 = 0;
+static uint16_t s_epd_mono_dither_x1 = 0;
+static uint16_t s_epd_mono_dither_y1 = 0;
 
 static rt_sem_t epd_busy_sem = RT_NULL;
 
@@ -497,6 +504,62 @@ static void EPD_Gray2ToMonoDither(void)
     }
 }
 
+static inline rt_bool_t epd_gray2_use_dither(uint16_t x, uint16_t y)
+{
+    if (!s_epd_mono_dither_enabled)
+    {
+        return RT_FALSE;
+    }
+
+    if (!s_epd_mono_dither_region_valid)
+    {
+        return RT_TRUE;
+    }
+
+    return (x >= s_epd_mono_dither_x0 && x <= s_epd_mono_dither_x1 &&
+            y >= s_epd_mono_dither_y0 && y <= s_epd_mono_dither_y1) ? RT_TRUE : RT_FALSE;
+}
+
+static void EPD_Gray2ToMonoRegionDither(void)
+{
+    static const uint8_t bayer2x2[2][2] = {
+        {0, 2},
+        {3, 1},
+    };
+
+    memset(mixed_framebuffer_mono, 0xFF, sizeof(mixed_framebuffer_mono));
+
+    for (uint16_t y = 0; y < EPD_HEIGHT; y++)
+    {
+        for (uint16_t x = 0; x < EPD_WIDTH; x++)
+        {
+            uint8_t lv = epd_get_gray2_pixel(x, y); /* 0=black ... 3=white */
+            uint8_t is_white;
+            uint32_t byte_idx = (uint32_t)y * (EPD_WIDTH / 8) + (x / 8);
+            uint8_t bit_pos = (uint8_t)(7 - (x % 8));
+
+            if (epd_gray2_use_dither(x, y))
+            {
+                uint8_t threshold = bayer2x2[y & 1][x & 1];
+                is_white = (lv == 3U) ? 1U : ((lv > threshold) ? 1U : 0U);
+            }
+            else
+            {
+                is_white = (lv >= EPD_MONO_THRESHOLD_LEVEL) ? 1U : 0U;
+            }
+
+            if (is_white)
+            {
+                mixed_framebuffer_mono[byte_idx] |= (uint8_t)(1u << bit_pos);
+            }
+            else
+            {
+                mixed_framebuffer_mono[byte_idx] &= (uint8_t)~(1u << bit_pos);
+            }
+        }
+    }
+}
+
 static void EPD_Gray2ToMonoThreshold(void)
 {
     memset(mixed_framebuffer_mono, 0xFF, sizeof(mixed_framebuffer_mono));
@@ -524,11 +587,63 @@ static void EPD_Gray2ToMonoThreshold(void)
 
 static void EPD_Gray2ToMono(void)
 {
-#if EPD_MONO_USE_DITHER
-    EPD_Gray2ToMonoDither();
-#else
-    EPD_Gray2ToMonoThreshold();
-#endif
+    if (!s_epd_mono_dither_enabled)
+    {
+        EPD_Gray2ToMonoThreshold();
+    }
+    else if (s_epd_mono_dither_region_valid)
+    {
+        EPD_Gray2ToMonoRegionDither();
+    }
+    else
+    {
+        EPD_Gray2ToMonoDither();
+    }
+}
+
+void lcd_set_epd_mono_dither_enabled(rt_bool_t enabled)
+{
+    s_epd_mono_dither_enabled = enabled ? RT_TRUE : RT_FALSE;
+    s_epd_mono_dither_region_valid = RT_FALSE;
+}
+
+void lcd_set_epd_mono_dither_region(rt_bool_t enabled,
+                                    uint16_t x0,
+                                    uint16_t y0,
+                                    uint16_t x1,
+                                    uint16_t y1)
+{
+    if (!enabled)
+    {
+        s_epd_mono_dither_enabled = RT_FALSE;
+        s_epd_mono_dither_region_valid = RT_FALSE;
+        return;
+    }
+
+    if (x0 > x1)
+    {
+        uint16_t tmp = x0;
+        x0 = x1;
+        x1 = tmp;
+    }
+    if (y0 > y1)
+    {
+        uint16_t tmp = y0;
+        y0 = y1;
+        y1 = tmp;
+    }
+
+    if (x0 >= EPD_WIDTH) x0 = (uint16_t)(EPD_WIDTH - 1U);
+    if (x1 >= EPD_WIDTH) x1 = (uint16_t)(EPD_WIDTH - 1U);
+    if (y0 >= EPD_HEIGHT) y0 = (uint16_t)(EPD_HEIGHT - 1U);
+    if (y1 >= EPD_HEIGHT) y1 = (uint16_t)(EPD_HEIGHT - 1U);
+
+    s_epd_mono_dither_enabled = RT_TRUE;
+    s_epd_mono_dither_region_valid = RT_TRUE;
+    s_epd_mono_dither_x0 = x0;
+    s_epd_mono_dither_y0 = y0;
+    s_epd_mono_dither_x1 = x1;
+    s_epd_mono_dither_y1 = y1;
 }
 
 static void EPD_MarkDirtyPhysicalRegion(uint16_t x0, uint16_t y0, uint16_t x1,
@@ -975,7 +1090,16 @@ static void EPD_FrameBuffer_Flush(LCDC_HandleTypeDef *hlcdc)
 #if EPD_USE_SCAN_MODE3
     EPD_SetFullWindow(hlcdc);
 #endif
-    
+
+#if EPD_USE_GRAY2_REFRESH
+    if (s_epd_stats_dump_count < 3U)
+    {
+        epd_debug_dump_stats("flush_gc_gray2");
+        s_epd_stats_dump_count++;
+    }
+    EPD_SendCommandDataBuf(hlcdc, REG_WRITE_NEW_DATA, mixed_framebuffer,
+                           EPD_GRAY2_FRAME_SIZE);
+#else
     // 使用Layer方式发送帧缓冲区数据
     EPD_Gray2ToMono();
     if (s_epd_stats_dump_count < 3U)
@@ -987,7 +1111,8 @@ static void EPD_FrameBuffer_Flush(LCDC_HandleTypeDef *hlcdc)
     /* The new panel sample updates visible content through 0x13 only. */
     EPD_SendCommandDataBuf(hlcdc, REG_WRITE_NEW_DATA, mixed_framebuffer_mono,
                            EPD_MONO_FRAME_SIZE);
-    
+#endif
+
     // 刷新显示
     s_epd_refresh_fallback_ms = EPD_GC_FULL_REFRESH_FALLBACK_MS;
     refresh_start = rt_tick_get();
@@ -995,8 +1120,10 @@ static void EPD_FrameBuffer_Flush(LCDC_HandleTypeDef *hlcdc)
     refresh_end = rt_tick_get();
     rt_kprintf("[standby_dbg] epd full refresh done elapsed=%u ms\n",
                epd_ticks_to_ms(refresh_end - refresh_start));
+#if !EPD_USE_GRAY2_REFRESH
     memcpy(mixed_framebuffer_prev_mono, mixed_framebuffer_mono,
            sizeof(mixed_framebuffer_prev_mono));
+#endif
     s_partial_refresh_count = 0;
     EPD_ClearDirtyRegion();
 }
@@ -1011,12 +1138,23 @@ static void EPD_FrameBuffer_FlushFast(LCDC_HandleTypeDef *hlcdc)
         EPD_FrameBuffer_Init();
     }
 
+    if (s_epd_mono_dither_enabled)
+    {
+        EPD_FrameBuffer_Flush(hlcdc);
+        return;
+    }
+
     EPD_ReadBusy();
     EPD_LoadLUT(hlcdc, 2);
 #if EPD_USE_SCAN_MODE3
     EPD_SetFullWindow(hlcdc);
 #endif
 
+#if EPD_USE_GRAY2_REFRESH
+    /* DU is mono-only on this panel path; keep the grayscale experiment on GC refresh. */
+    EPD_FrameBuffer_Flush(hlcdc);
+    return;
+#else
     EPD_Gray2ToMono();
     if (s_epd_stats_dump_count < 3U)
     {
@@ -1040,6 +1178,12 @@ static void EPD_FrameBuffer_FlushFast(LCDC_HandleTypeDef *hlcdc)
         s_partial_refresh_count++;
     }
     EPD_ClearDirtyRegion();
+#endif
+}
+
+static void EPD_FrameBuffer_FlushGray2(LCDC_HandleTypeDef *hlcdc)
+{
+    EPD_FrameBuffer_Flush(hlcdc);
 }
 
 /**
@@ -1116,7 +1260,7 @@ static void EPD_SendCommandData(LCDC_HandleTypeDef *hlcdc, uint8_t cmd,
 
 // 发送命令+多字节数据
 static void EPD_SendCommandDataBuf(LCDC_HandleTypeDef *hlcdc, uint8_t cmd,
-                                   const uint8_t *data, uint16_t len)
+                                   const uint8_t *data, uint32_t len)
 {
     HAL_LCDC_WriteU8Reg(hlcdc, cmd, (uint8_t *)data, len);
 }
@@ -1185,6 +1329,14 @@ static void EPD_SetPartialWindow(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
 static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
                                         uint16_t y0, uint16_t x1, uint16_t y1)
 {
+#if EPD_USE_GRAY2_REFRESH
+    (void)x0;
+    (void)y0;
+    (void)x1;
+    (void)y1;
+    EPD_FrameBuffer_FlushGray2(hlcdc);
+    return;
+#else
     uint8_t *old_region;
     uint8_t *new_region;
     uint32_t old_len;
@@ -1199,6 +1351,12 @@ static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
     if (!framebuffer_initialized)
     {
         EPD_FrameBuffer_Init();
+    }
+
+    if (s_epd_mono_dither_enabled)
+    {
+        EPD_FrameBuffer_Flush(hlcdc);
+        return;
     }
 
     x0 = (uint16_t)(x0 & ~0x7u);
@@ -1225,7 +1383,7 @@ static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
      * Send old data first, then refill workspace with new data.
      */
     s_epd_refresh_fallback_ms = EPD_PARTIAL_REFRESH_FALLBACK_MS;
-    EPD_SendCommandDataBuf(hlcdc, REG_WRITE_OLD_DATA, old_region, (uint16_t)old_len);
+    EPD_SendCommandDataBuf(hlcdc, REG_WRITE_OLD_DATA, old_region, old_len);
 
     new_region = EPD_AllocMonoRegionBuffer(mixed_framebuffer_mono, x0, y0, x1,
                                            y1, &new_len);
@@ -1243,7 +1401,7 @@ static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
         EPD_FrameBuffer_Flush(hlcdc);
         return;
     }
-    EPD_SendCommandDataBuf(hlcdc, REG_WRITE_NEW_DATA, new_region, (uint16_t)new_len);
+    EPD_SendCommandDataBuf(hlcdc, REG_WRITE_NEW_DATA, new_region, new_len);
     refresh_start = rt_tick_get();
     EPD_Refresh(hlcdc);
     refresh_end = rt_tick_get();
@@ -1269,6 +1427,7 @@ static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
         s_partial_refresh_count++;
     }
     EPD_ClearDirtyRegion();
+#endif
 }
 static void epd_busy_callback(void *args)
 {
@@ -1431,8 +1590,13 @@ static void LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc, uint8_t Mode)
     EPD_SendCommandData(hlcdc, 0xE1, 0x02);
 
     EPD_FrameBuffer_Init();
+#if EPD_USE_GRAY2_REFRESH
+    EPD_SendCommandDataBuf(hlcdc, 0x10, mixed_framebuffer,
+                           EPD_GRAY2_FRAME_SIZE);
+#else
     EPD_SendCommandDataBuf(hlcdc, 0x10, mixed_framebuffer_mono,
                            EPD_MONO_FRAME_SIZE);
+#endif
 
     EPD_SendCommand(hlcdc, 0x04);
     s_epd_busy_stage = "init:0x04";
@@ -1469,7 +1633,11 @@ void EPD_Clear(LCDC_HandleTypeDef *hlcdc)
 {
     LUTGC(hlcdc);
     EPD_FrameBuffer_Clear();
+#if EPD_USE_GRAY2_REFRESH
+    EPD_SendCommandDataBuf(hlcdc, 0x13, mixed_framebuffer, EPD_GRAY2_FRAME_SIZE);
+#else
     EPD_SendCommandDataBuf(hlcdc, 0x13, mixed_framebuffer_mono, EPD_MONO_FRAME_SIZE);
+#endif
     EPD_Refresh(hlcdc);
     EPD_Refresh(hlcdc);
 }
@@ -1611,6 +1779,9 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc,
                                                        s_dirty_y0,
                                                        s_dirty_x1,
                                                        s_dirty_y1);
+#if EPD_USE_GRAY2_REFRESH
+        prefer_full_refresh = 1;
+#endif
 
         if (!prefer_full_refresh)
         {

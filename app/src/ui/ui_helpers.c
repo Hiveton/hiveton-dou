@@ -2224,6 +2224,8 @@ void ui_build_standard_screen_ex(ui_screen_scaffold_t *scaffold,
     lv_obj_t *section;
     lv_obj_t *content;
     lv_obj_t *title_bar;
+    char title_buffer[128];
+    size_t title_len = 0U;
 
     if (scaffold == NULL || screen == NULL)
     {
@@ -2232,6 +2234,13 @@ void ui_build_standard_screen_ex(ui_screen_scaffold_t *scaffold,
 
     memset(scaffold, 0, sizeof(*scaffold));
     scaffold->screen = screen;
+    title_buffer[0] = '\0';
+    if (title != NULL)
+    {
+        title_len = strnlen(title, sizeof(title_buffer) - 1U);
+        memcpy(title_buffer, title, title_len);
+        title_buffer[title_len] = '\0';
+    }
 
     ui_build_status_bar_ex(screen, &scaffold->status_refs, enable_detail_touch);
 
@@ -2247,7 +2256,7 @@ void ui_build_standard_screen_ex(ui_screen_scaffold_t *scaffold,
     lv_obj_set_size(title_bar, s_screen_width, ui_px_h(58));
 
     ui_create_label(title_bar,
-                    title,
+                    title_buffer,
                     96,
                     13,
                     s_screen_width - 192,

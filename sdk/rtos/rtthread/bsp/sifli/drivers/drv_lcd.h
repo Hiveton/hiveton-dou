@@ -172,4 +172,11 @@ typedef struct _sf_graphic_lcdc_layer_t
     #define AUTO_SELECTED_DPI_INTFACE LCDC_INTF_DPI_AUX
 #endif /* (LCDC_DPI_MAX_WIDTH >= LCD_HOR_RES_MAX) */
 
+void lcd_set_epd_mono_dither_enabled(rt_bool_t enabled);
+void lcd_set_epd_mono_dither_region(rt_bool_t enabled,
+                                    uint16_t x0,
+                                    uint16_t y0,
+                                    uint16_t x1,
+                                    uint16_t y1);
+
 #endif
