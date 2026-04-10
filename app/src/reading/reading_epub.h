@@ -75,6 +75,11 @@ bool reading_epub_decode_image(const char *epub_path,
                                uint16_t max_height,
                                lv_image_dsc_t *out_image);
 
+bool reading_epub_probe_image_size(const char *epub_path,
+                                   const char *internal_path,
+                                   uint16_t *width_out,
+                                   uint16_t *height_out);
+
 void reading_epub_release_image(lv_image_dsc_t *image);
 
 #ifdef __cplusplus

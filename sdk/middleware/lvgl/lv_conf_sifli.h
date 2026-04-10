@@ -48,6 +48,16 @@
         #define LV_MEM_CUSTOM_ALLOC   rt_malloc
         #define LV_MEM_CUSTOM_FREE    rt_free
         #define LV_MEM_CUSTOM_REALLOC rt_realloc
+
+        /*
+         * Force LVGL v9 to use the RT-Thread allocator path. The Kconfig remap
+         * is not sufficient in this project because both builtin and rtthread
+         * allocator objects can be compiled in, and the linker was selecting the
+         * builtin TLSF implementation. That put LVGL object allocations into a
+         * PSRAM-backed pool that overlapped our reader buffers.
+         */
+        #undef LV_USE_STDLIB_MALLOC
+        #define LV_USE_STDLIB_MALLOC LV_STDLIB_RTTHREAD
     #endif
 
 
