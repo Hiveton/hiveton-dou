@@ -665,8 +665,6 @@ void time_ui_update_callback(void)
     static int last_year = -1;
     static int last_month = -1;
     static int last_day = -1;
-    static int last_bt_icon_state = -1;
-    static int last_network_connected = -1;
 
     static int last_hour_tens = -1;
     static int last_hour_units = -1;
@@ -695,9 +693,6 @@ void time_ui_update_callback(void)
     lv_obj_t *ui_Label_second = refs != NULL ? refs->ui_Label_second : NULL;
     lv_obj_t *ui_Label_day = refs != NULL ? refs->ui_Label_day : NULL;
     lv_obj_t *ui_Label_year = refs != NULL ? refs->ui_Label_year : NULL;
-    lv_obj_t *bluetooth_icon = refs != NULL ? refs->bluetooth_icon : NULL;
-    lv_obj_t *network_icon = refs != NULL ? refs->network_icon : NULL;
-
     // 更新待机界面的时间显示
     // 根据小时和分钟更新数字图片
     // 更新小时显示
@@ -767,30 +762,6 @@ void time_ui_update_callback(void)
             lv_label_set_text(ui_Label_day, date_text);
         }
     }
-
-   // 更新蓝牙和网络图标（仅在状态变化时更新）
-    extern const lv_image_dsc_t ble_icon_img_close;
-    extern const lv_image_dsc_t network_icon_img;
-    extern const lv_image_dsc_t network_icon_img_close;
-
-    if (last_bt_icon_state != 0) {
-        if (bluetooth_icon) {
-            lv_img_set_src(bluetooth_icon, &ble_icon_img_close);
-        }
-        last_bt_icon_state = 0;
-    }
-
-    if (g_network_available != last_network_connected) {
-        if (network_icon) {
-            if (g_network_available) {
-                lv_img_set_src(network_icon, &network_icon_img);
-            } else {
-                lv_img_set_src(network_icon, &network_icon_img_close);
-            }
-        }
-        last_network_connected = g_network_available;
-    }
-
 
 }
 

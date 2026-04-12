@@ -12,6 +12,7 @@ rt_err_t ui_dispatch_init(void);
 void ui_dispatch_process_pending(void);
 
 void ui_dispatch_request_activity(void);
+void ui_dispatch_request_status_refresh(void);
 void ui_dispatch_request_time_refresh(void);
 void ui_dispatch_request_weather_refresh(void);
 void ui_dispatch_request_screen_switch(ui_screen_id_t screen_id);

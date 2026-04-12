@@ -2437,8 +2437,8 @@ static void ui_reading_detail_next_event_cb(lv_event_t *e)
 static void ui_reading_detail_content_event_cb(lv_event_t *e)
 {
     lv_point_t point;
-    lv_obj_t *target;
     lv_indev_t *indev;
+    lv_coord_t split_x;
 
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
     {
@@ -2456,9 +2456,9 @@ static void ui_reading_detail_content_event_cb(lv_event_t *e)
         return;
     }
 
-    target = lv_event_get_target(e);
     lv_indev_get_point(indev, &point);
-    if (point.x < (lv_obj_get_x(target) + lv_obj_get_width(target) / 2))
+    split_x = ui_px_w(UI_READING_DETAIL_IMAGE_WIDTH) / 2;
+    if (point.x < split_x)
     {
         ui_reading_detail_prev_page();
     }
@@ -2664,6 +2664,11 @@ void ui_Reading_Detail_screen_init(void)
     lv_obj_set_style_text_line_space(s_reading_detail_refs.content_label,
                                      ui_px_y(UI_READING_DETAIL_TEXT_LINE_SPACE),
                                      0);
+    lv_obj_add_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_reading_detail_refs.content_label,
+                        ui_reading_detail_content_event_cb,
+                        LV_EVENT_CLICKED,
+                        NULL);
     s_reading_detail_refs.content_image = lv_image_create(reading_box);
     lv_image_set_pivot(s_reading_detail_refs.content_image, 0, 0);
     lv_image_set_scale(s_reading_detail_refs.content_image, LV_SCALE_NONE);
@@ -2674,6 +2679,11 @@ void ui_Reading_Detail_screen_init(void)
                     ui_px_w(UI_READING_DETAIL_IMAGE_WIDTH),
                     ui_px_h(UI_READING_DETAIL_READING_BOX_HEIGHT));
     lv_obj_add_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_reading_detail_refs.content_image,
+                        ui_reading_detail_content_event_cb,
+                        LV_EVENT_CLICKED,
+                        NULL);
     lv_obj_add_flag(reading_box, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(reading_box, ui_reading_detail_content_event_cb, LV_EVENT_CLICKED, NULL);
     s_reading_detail_refs.page_label = ui_create_label(page.content,
@@ -2686,12 +2696,8 @@ void ui_Reading_Detail_screen_init(void)
                                                        LV_TEXT_ALIGN_LEFT,
                                                        false,
                                                        false);
-    s_reading_detail_refs.prev_button = ui_create_button(page.content, 198, 603, 175, 40, ui_i18n_pick("上一页", "Previous"), 20, UI_SCREEN_NONE, false);
-    s_reading_detail_refs.next_button = ui_create_button(page.content, 329, 603, 175, 40, ui_i18n_pick("下一页", "Next"), 20, UI_SCREEN_NONE, true);
-    lv_obj_add_flag(s_reading_detail_refs.prev_button, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_add_flag(s_reading_detail_refs.next_button, LV_OBJ_FLAG_EVENT_BUBBLE);
-    lv_obj_add_event_cb(s_reading_detail_refs.prev_button, ui_reading_detail_prev_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(s_reading_detail_refs.next_button, ui_reading_detail_next_event_cb, LV_EVENT_CLICKED, NULL);
+    s_reading_detail_refs.prev_button = NULL;
+    s_reading_detail_refs.next_button = NULL;
 
     s_reading_detail_refs.swipe_handle = lv_obj_create(ui_Reading_Detail);
     lv_obj_set_pos(s_reading_detail_refs.swipe_handle,

@@ -160,9 +160,11 @@ static void BSP_PIN_Common(void)
     HAL_PIN_Set(PAD_PA18, USART1_RXD, PIN_PULLUP, 1);
     HAL_PIN_Set(PAD_PA19, USART1_TXD, PIN_PULLUP, 1);
 
-    // UART2 - log
-    // HAL_PIN_Set(PAD_PA20, USART2_RXD, PIN_PULLUP, 1);
-    // HAL_PIN_Set(PAD_PA27, USART2_TXD, PIN_PULLUP, 1);
+    // CAT1 modem
+    HAL_PIN_Set(PAD_PA09, GPIO_A9,  PIN_NOPULL, 1);        // 4G VDD_EN (high active)
+    HAL_PIN_Set(PAD_PA20, GPIO_A20, PIN_PULLUP, 1);        // 4G PowerKey (idle high, active low)
+    HAL_PIN_Set(PAD_PA26, USART2_TXD, PIN_NOPULL, 1);      // 4G TXD
+    HAL_PIN_Set(PAD_PA27, USART2_RXD, PIN_PULLUP, 1);      // 4G RXD
 
     // Key1 - Power key
     /* Keep default pull-down unchanged. Uart download driver would use this function,
@@ -194,13 +196,17 @@ static void BSP_PIN_Common(void)
 //     HAL_PIN_Set_DS1(PAD_PA25, 1, 1);
 //     HAL_PIN_Set_DS1(PAD_PA28, 1, 1);
 //     HAL_PIN_Set_DS1(PAD_PA29, 1, 1);
+    // AW32001 NVDC (I2C2 on PA31/PA32)
+    HAL_PIN_Set(PAD_PA31, I2C2_SCL, PIN_PULLUP, 1);
+    HAL_PIN_Set(PAD_PA32, I2C2_SDA, PIN_PULLUP, 1);
+
 #if defined(BSP_USING_PWM3) || defined(BSP_USING_RGBLED_WITCH_PWM3)
-    HAL_PIN_Set(PAD_PA32, GPTIM2_CH1, PIN_PULLUP, 1);   // RGB LED
+    // PA32 is used by AW32001 I2C2 SDA on this board; keep RGB LED disabled here.
 #endif
     // GPIOs
     HAL_PIN_Set(PAD_PA21, GPIO_A21, PIN_PULLDOWN, 1);
     // HAL_PIN_Set(PAD_PA26, GPIO_A26, PIN_NOPULL, 1);
-    HAL_PIN_Set(PAD_PA32, GPIO_A32, PIN_PULLDOWN, 1);   // RGB LED
+    // HAL_PIN_Set(PAD_PA32, GPIO_A32, PIN_PULLDOWN, 1);   // RGB LED
     HAL_PIN_Set(PAD_PA38, GPIO_A38, PIN_PULLDOWN, 1);
     HAL_PIN_Set(PAD_PA44, GPIO_A44, PIN_PULLDOWN, 1);   // VBUS_DET
 #endif

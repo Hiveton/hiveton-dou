@@ -1,6 +1,7 @@
 #include "ui_dispatch.h"
 
 #include "lvgl.h"
+#include "ui/ui_helpers.h"
 #include "ui_runtime_adapter.h"
 #include "xiaozhi/weather/weather.h"
 
@@ -9,6 +10,7 @@
 #define UI_DISPATCH_EVT_WEATHER_REFRESH (1UL << 2)
 #define UI_DISPATCH_EVT_SWITCH_HOME     (1UL << 3)
 #define UI_DISPATCH_EVT_SWITCH_AI_DOU   (1UL << 4)
+#define UI_DISPATCH_EVT_STATUS_REFRESH  (1UL << 5)
 
 static rt_event_t s_ui_dispatch_event = RT_NULL;
 static volatile ui_screen_id_t s_ui_active_screen = UI_SCREEN_NONE;
@@ -48,6 +50,7 @@ void ui_dispatch_process_pending(void)
 
     while (rt_event_recv(s_ui_dispatch_event,
                          UI_DISPATCH_EVT_ACTIVITY |
+                         UI_DISPATCH_EVT_STATUS_REFRESH |
                          UI_DISPATCH_EVT_TIME_REFRESH |
                          UI_DISPATCH_EVT_WEATHER_REFRESH |
                          UI_DISPATCH_EVT_SWITCH_HOME |
@@ -59,6 +62,11 @@ void ui_dispatch_process_pending(void)
         if ((events & UI_DISPATCH_EVT_ACTIVITY) != 0U)
         {
             lv_display_trigger_activity(NULL);
+        }
+
+        if ((events & UI_DISPATCH_EVT_STATUS_REFRESH) != 0U)
+        {
+            ui_refresh_global_status_bar();
         }
 
         if ((events & UI_DISPATCH_EVT_SWITCH_HOME) != 0U)
@@ -86,6 +94,11 @@ void ui_dispatch_process_pending(void)
 void ui_dispatch_request_activity(void)
 {
     ui_dispatch_send(UI_DISPATCH_EVT_ACTIVITY);
+}
+
+void ui_dispatch_request_status_refresh(void)
+{
+    ui_dispatch_send(UI_DISPATCH_EVT_STATUS_REFRESH);
 }
 
 void ui_dispatch_request_time_refresh(void)

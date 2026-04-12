@@ -132,7 +132,7 @@ bool aw32001_get_charge_status(uint8_t *status)
             return RT_FALSE;
         }
     }
-    *status = reg & 0x18 >> 3;  //get bit3~bit4
+    *status = (reg & 0x18U) >> 3;  // get bit3~bit4
     return RT_TRUE;
 }
 bool aw32001_get_fault_status(uint8_t *status)
@@ -572,4 +572,3 @@ int32_t aw32001(int32_t argc, char **argv)
 
 MSH_CMD_EXPORT(aw32001, aw32001 test     cmd);
 #endif
-
