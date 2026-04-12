@@ -529,7 +529,7 @@ void ui_AI_Dou_screen_init(void)
     /* 网络状态标签（右上角） */
     s_network_label = lv_label_create(ui_AI_Dou);
     lv_obj_set_pos(s_network_label, 426, 20);
-    lv_obj_set_style_text_font(s_network_label, ui_font_get(16), 0);
+    lv_obj_set_style_text_font(s_network_label, ui_font_get(18), 0);
     ai_set_label_if_changed(s_network_label, s_ai_network_cache,
                             sizeof(s_ai_network_cache), ui_i18n_pick("检查中...", "Checking..."));
     update_network_status();
@@ -549,7 +549,7 @@ void ui_AI_Dou_screen_init(void)
                                        20,
                                        480,
                                        39,
-                                       30,
+                                       32,
                                        LV_TEXT_ALIGN_CENTER,
                                        false,
                                        false);
@@ -559,7 +559,7 @@ void ui_AI_Dou_screen_init(void)
                                       76,
                                       432,
                                       84,
-                                      19,
+                                      21,
                                       LV_TEXT_ALIGN_CENTER,
                                       false,
                                       true);
@@ -570,7 +570,7 @@ void ui_AI_Dou_screen_init(void)
                                    200,
                                    64,
                                    ui_i18n_pick("点击开始说话", "Tap to talk"),
-                                   26,
+                                   28,
                                    UI_SCREEN_NONE,
                                    true);
     s_talk_button = talk_button;
@@ -583,7 +583,7 @@ void ui_AI_Dou_screen_init(void)
                     555,
                     424,
                     32,
-                    15,
+                    17,
                     LV_TEXT_ALIGN_CENTER,
                     false,
                     true);

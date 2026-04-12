@@ -18,6 +18,7 @@ void ui_runtime_screen_change(lv_obj_t **target,
 lv_obj_t *ui_runtime_get_home_screen(void);
 void ui_runtime_ensure_home_screen(void);
 ui_screen_id_t ui_runtime_get_active_screen_id(void);
+void ui_runtime_exit_standby(void);
 
 #ifdef __cplusplus
 }

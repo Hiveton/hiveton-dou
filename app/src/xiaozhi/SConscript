@@ -10,6 +10,7 @@ src = [
     'xiaozhi_audio.c',
     'xiaozhi_client_public.c',
     'xiaozhi_mqtt.c',
+    'recorder_service.c',
     'kws/app_recorder_process.c',
     'kws/bsp_et_asr_ctrl.c',
     'kws/et_asr_default_state.c',

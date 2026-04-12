@@ -6,19 +6,23 @@
 #include "ui/ui_helpers.h"
 #include "xiaozhi/weather/weather.h"
 #include "cat1_modem.h"
+#include "bts2_app_inc.h"
+#include "bts2_app_interface.h"
 
 #define NET_MANAGER_THREAD_STACK_SIZE 3072
 #define NET_MANAGER_THREAD_PRIORITY   17
 #define NET_MANAGER_THREAD_TICK       10
 #define NET_MANAGER_EVAL_INTERVAL_MS  1000U
-#define NET_MANAGER_4G_FALLBACK_DELAY_MS 5000U
-
 static struct rt_thread s_net_manager_thread;
 static rt_uint8_t s_net_manager_stack[NET_MANAGER_THREAD_STACK_SIZE];
 static volatile rt_uint8_t s_bt_connected = 0U;
 static volatile rt_uint8_t s_pan_ready = 0U;
 static volatile rt_uint8_t s_cat1_ready = 0U;
 static volatile rt_uint8_t s_initialized = 0U;
+static volatile rt_uint8_t s_bt_enabled = 0U;
+static volatile rt_uint8_t s_4g_enabled = 1U;
+static rt_uint8_t s_bt_applied = 1U;
+static rt_uint8_t s_4g_applied = 0U;
 static rt_tick_t s_bt_last_loss_tick = 0U;
 static net_manager_link_t s_active_link = NET_MANAGER_LINK_NONE;
 
@@ -64,29 +68,47 @@ static void net_manager_update_link_state(void)
     }
 }
 
+static void net_manager_apply_mode(void)
+{
+    if (s_bt_applied != s_bt_enabled)
+    {
+        if (s_bt_enabled)
+        {
+            bt_interface_open_bt();
+        }
+        else
+        {
+            bt_interface_close_bt();
+            s_bt_connected = 0U;
+            s_pan_ready = 0U;
+        }
+        s_bt_applied = s_bt_enabled;
+    }
+
+    if (s_4g_applied != s_4g_enabled)
+    {
+        if (s_4g_enabled)
+        {
+            (void)cat1_modem_request_online();
+        }
+        else
+        {
+            (void)cat1_modem_request_offline();
+            s_cat1_ready = 0U;
+        }
+        s_4g_applied = s_4g_enabled;
+    }
+}
+
 static void net_manager_thread_entry(void *parameter)
 {
-    rt_tick_t fallback_ticks;
-
     (void)parameter;
-
-    fallback_ticks = rt_tick_from_millisecond(NET_MANAGER_4G_FALLBACK_DELAY_MS);
     s_bt_last_loss_tick = rt_tick_get();
 
     while (1)
     {
-        rt_tick_t now = rt_tick_get();
+        net_manager_apply_mode();
         s_cat1_ready = cat1_modem_is_ready() ? 1U : 0U;
-
-        if (s_pan_ready)
-        {
-            (void)cat1_modem_request_offline();
-        }
-        else if ((now - s_bt_last_loss_tick) >= fallback_ticks)
-        {
-            (void)cat1_modem_request_online();
-        }
-
         net_manager_update_link_state();
         rt_thread_mdelay(NET_MANAGER_EVAL_INTERVAL_MS);
     }
@@ -125,6 +147,22 @@ rt_err_t net_manager_init(void)
     return RT_EOK;
 }
 
+void net_manager_request_bt_mode(void)
+{
+    s_bt_enabled = 1U;
+    s_4g_enabled = 0U;
+    s_bt_last_loss_tick = rt_tick_get();
+    ui_dispatch_request_status_refresh();
+}
+
+void net_manager_request_4g_mode(void)
+{
+    s_bt_enabled = 0U;
+    s_4g_enabled = 1U;
+    s_bt_last_loss_tick = rt_tick_get();
+    ui_dispatch_request_status_refresh();
+}
+
 void net_manager_notify_bt_acl(bool connected)
 {
     s_bt_connected = connected ? 1U : 0U;
@@ -151,9 +189,19 @@ void net_manager_notify_cat1_ready(bool ready)
     net_manager_update_link_state();
 }
 
+bool net_manager_bt_enabled(void)
+{
+    return s_bt_enabled != 0U;
+}
+
 bool net_manager_bt_connected(void)
 {
     return s_bt_connected != 0U;
+}
+
+bool net_manager_4g_enabled(void)
+{
+    return s_4g_enabled != 0U;
 }
 
 bool net_manager_network_ready(void)

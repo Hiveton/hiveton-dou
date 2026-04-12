@@ -17,10 +17,10 @@ static void create_datetime_row(lv_obj_t *parent,
     lv_obj_set_pos(row, ui_px_x(44), ui_px_y(y));
     lv_obj_set_size(row, ui_px_w(440), ui_px_h(84));
 
-    ui_create_label(row, name, 8, 23, 18, 25, 20, LV_TEXT_ALIGN_LEFT, false, false);
-    ui_create_button(row, 140, 23, 42, 42, "-", 24, UI_SCREEN_NONE, false);
-    ui_create_label(row, value, 198, 23, 56, 39, 30, LV_TEXT_ALIGN_CENTER, false, false);
-    ui_create_button(row, 300, 23, 42, 42, "+", 24, UI_SCREEN_NONE, false);
+    ui_create_label(row, name, 8, 23, 18, 25, 22, LV_TEXT_ALIGN_LEFT, false, false);
+    ui_create_button(row, 140, 23, 42, 42, "-", 26, UI_SCREEN_NONE, false);
+    ui_create_label(row, value, 198, 23, 56, 39, 32, LV_TEXT_ALIGN_CENTER, false, false);
+    ui_create_button(row, 300, 23, 42, 42, "+", 26, UI_SCREEN_NONE, false);
 }
 
 void ui_Datetime_screen_init(void)
@@ -41,7 +41,7 @@ void ui_Datetime_screen_init(void)
                     62,
                     440,
                     20,
-                    16,
+                    18,
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     false);
@@ -51,7 +51,7 @@ void ui_Datetime_screen_init(void)
                     102,
                     440,
                     39,
-                    30,
+                    32,
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     false);

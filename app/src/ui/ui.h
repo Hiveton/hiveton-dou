@@ -15,6 +15,7 @@ extern "C" {
 #include "ui_types.h"
 
 extern lv_obj_t *ui_Home;
+extern lv_obj_t *ui_Standby;
 extern lv_obj_t *ui_Reading_List;
 extern lv_obj_t *ui_Reading_Detail;
 extern lv_obj_t *ui_Pet;
@@ -30,10 +31,10 @@ extern lv_obj_t *ui_Record_List;
 extern lv_obj_t *ui_Music_List;
 extern lv_obj_t *ui_Music_Player;
 extern lv_obj_t *ui_Settings;
-extern lv_obj_t *ui_Sleep_Time;
-extern lv_obj_t *ui_Weather_Toggle;
 extern lv_obj_t *ui_Brightness;
 extern lv_obj_t *ui_Language;
+extern lv_obj_t *ui_Bluetooth_Config;
+extern lv_obj_t *ui_Wallpaper;
 
 typedef enum
 {
@@ -45,6 +46,8 @@ typedef enum
 void ui_Home_screen_init(void);
 void ui_Home_screen_destroy(void);
 const xiaozhi_home_screen_refs_t *ui_home_screen_refs_get(void);
+void ui_Standby_screen_init(void);
+void ui_Standby_screen_destroy(void);
 
 void ui_Reading_List_screen_init(void);
 void ui_Reading_List_screen_destroy(void);
@@ -87,17 +90,14 @@ void ui_Settings_screen_destroy(void);
 ui_settings_language_t ui_settings_get_language(void);
 void ui_settings_set_language(ui_settings_language_t language);
 const char *ui_settings_get_language_label(void);
-int ui_settings_get_sleep_start_minutes(void);
-void ui_settings_set_sleep_start_minutes(int minutes);
-void ui_settings_adjust_sleep_start_minutes(int delta_minutes);
-void ui_Sleep_Time_screen_init(void);
-void ui_Sleep_Time_screen_destroy(void);
-void ui_Weather_Toggle_screen_init(void);
-void ui_Weather_Toggle_screen_destroy(void);
 void ui_Brightness_screen_init(void);
 void ui_Brightness_screen_destroy(void);
 void ui_Language_screen_init(void);
 void ui_Language_screen_destroy(void);
+void ui_Bluetooth_Config_screen_init(void);
+void ui_Bluetooth_Config_screen_destroy(void);
+void ui_Wallpaper_screen_init(void);
+void ui_Wallpaper_screen_destroy(void);
 
 ui_screen_id_t ui_rotation_next_screen(ui_screen_id_t current);
 void ui_init(void);

@@ -22,7 +22,7 @@ void ui_Pet_screen_init(void)
                     166,
                     458,
                     50,
-                    42,
+                    44,
                     LV_TEXT_ALIGN_CENTER,
                     false,
                     false);
@@ -33,7 +33,7 @@ void ui_Pet_screen_init(void)
                     234,
                     432,
                     60,
-                    20,
+                    22,
                     LV_TEXT_ALIGN_CENTER,
                     false,
                     true);

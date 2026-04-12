@@ -11,6 +11,7 @@
 #define UI_DISPATCH_EVT_SWITCH_HOME     (1UL << 3)
 #define UI_DISPATCH_EVT_SWITCH_AI_DOU   (1UL << 4)
 #define UI_DISPATCH_EVT_STATUS_REFRESH  (1UL << 5)
+#define UI_DISPATCH_EVT_SWITCH_STANDBY  (1UL << 6)
 
 static rt_event_t s_ui_dispatch_event = RT_NULL;
 static volatile ui_screen_id_t s_ui_active_screen = UI_SCREEN_NONE;
@@ -54,7 +55,8 @@ void ui_dispatch_process_pending(void)
                          UI_DISPATCH_EVT_TIME_REFRESH |
                          UI_DISPATCH_EVT_WEATHER_REFRESH |
                          UI_DISPATCH_EVT_SWITCH_HOME |
-                         UI_DISPATCH_EVT_SWITCH_AI_DOU,
+                         UI_DISPATCH_EVT_SWITCH_AI_DOU |
+                         UI_DISPATCH_EVT_SWITCH_STANDBY,
                          RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
                          0,
                          &events) == RT_EOK)
@@ -77,6 +79,11 @@ void ui_dispatch_process_pending(void)
         if ((events & UI_DISPATCH_EVT_SWITCH_AI_DOU) != 0U)
         {
             ui_runtime_switch_to(UI_SCREEN_AI_DOU);
+        }
+
+        if ((events & UI_DISPATCH_EVT_SWITCH_STANDBY) != 0U)
+        {
+            ui_runtime_switch_to(UI_SCREEN_STANDBY);
         }
 
         if ((events & UI_DISPATCH_EVT_TIME_REFRESH) != 0U)
@@ -120,6 +127,9 @@ void ui_dispatch_request_screen_switch(ui_screen_id_t screen_id)
         break;
     case UI_SCREEN_AI_DOU:
         ui_dispatch_send(UI_DISPATCH_EVT_SWITCH_AI_DOU);
+        break;
+    case UI_SCREEN_STANDBY:
+        ui_dispatch_send(UI_DISPATCH_EVT_SWITCH_STANDBY);
         break;
     default:
         break;

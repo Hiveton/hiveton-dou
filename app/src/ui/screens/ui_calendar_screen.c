@@ -510,7 +510,7 @@ void ui_Calendar_screen_init(void)
                                                   layout.title_y,
                                                   layout.title_w,
                                                   28,
-                                                  24,
+                                                  26,
                                                   LV_TEXT_ALIGN_CENTER,
                                                   false,
                                                   false);
@@ -520,7 +520,7 @@ void ui_Calendar_screen_init(void)
                                                  layout.meta_y,
                                                  layout.meta_w,
                                                  18,
-                                                 15,
+                                                 17,
                                                  LV_TEXT_ALIGN_CENTER,
                                                  false,
                                                  false);
@@ -531,7 +531,7 @@ void ui_Calendar_screen_init(void)
                                                     layout.today_w,
                                                     layout.today_h,
                                                     ui_i18n_pick("今天", "Today"),
-                                                    22,
+                                                    24,
                                                     UI_SCREEN_NONE,
                                                     false);
     lv_obj_add_event_cb(s_calendar_refs.today_button, ui_calendar_today_event_cb, LV_EVENT_CLICKED, NULL);
@@ -563,7 +563,7 @@ void ui_Calendar_screen_init(void)
                         layout.week_y,
                         layout.week_w,
                         layout.week_h,
-                        22,
+                        24,
                         LV_TEXT_ALIGN_CENTER,
                         false,
                         false);
@@ -597,7 +597,7 @@ void ui_Calendar_screen_init(void)
                                               0,
                                               0,
                                               0,
-                                              22,
+                                              24,
                                               LV_TEXT_ALIGN_CENTER,
                                               false,
                                               false);
@@ -618,7 +618,7 @@ void ui_Calendar_screen_init(void)
                                                     14,
                                                     layout.summary_w - 36,
                                                     24,
-                                                    20,
+                                                    22,
                                                     LV_TEXT_ALIGN_LEFT,
                                                     false,
                                                     false);
@@ -628,7 +628,7 @@ void ui_Calendar_screen_init(void)
                                                    44,
                                                    layout.summary_w - 36,
                                                    22,
-                                                   15,
+                                                   17,
                                                    LV_TEXT_ALIGN_LEFT,
                                                    false,
                                                    true);

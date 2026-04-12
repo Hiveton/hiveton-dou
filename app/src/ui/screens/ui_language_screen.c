@@ -47,8 +47,6 @@ static void ui_language_invalidate_all_screens(void)
     ui_Music_List_screen_destroy();
     ui_Music_Player_screen_destroy();
     ui_Settings_screen_destroy();
-    ui_Sleep_Time_screen_destroy();
-    ui_Weather_Toggle_screen_destroy();
     ui_Brightness_screen_destroy();
 }
 
@@ -97,7 +95,7 @@ void ui_Language_screen_init(void)
                            84,
                            440,
                            40,
-                           18,
+                           20,
                            LV_TEXT_ALIGN_LEFT,
                            false,
                            true);
@@ -107,7 +105,7 @@ void ui_Language_screen_init(void)
     {
         bool is_selected = (options[i].language == selected_language);
 
-        button = ui_create_button(panel, 44, y, 440, 50, options[i].label, 20, UI_SCREEN_NONE, is_selected);
+        button = ui_create_button(panel, 44, y, 440, 50, options[i].label, 22, UI_SCREEN_NONE, is_selected);
         lv_obj_add_event_cb(button,
                             ui_language_select_event_cb,
                             LV_EVENT_CLICKED,

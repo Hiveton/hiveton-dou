@@ -21,10 +21,10 @@ static const ui_screen_id_t s_ui_rotation_sequence[] = {
     UI_SCREEN_MUSIC_LIST,
     UI_SCREEN_MUSIC_PLAYER,
     UI_SCREEN_SETTINGS,
-    UI_SCREEN_SLEEP_TIME,
-    UI_SCREEN_WEATHER_TOGGLE,
     UI_SCREEN_BRIGHTNESS,
     UI_SCREEN_LANGUAGE,
+    UI_SCREEN_BLUETOOTH_CONFIG,
+    UI_SCREEN_WALLPAPER,
 };
 
 ui_screen_id_t ui_rotation_next_screen(ui_screen_id_t current)
@@ -65,10 +65,11 @@ void ui_init( void )
 
 void ui_destroy( void )
 {
+    ui_Wallpaper_screen_destroy();
+    ui_Standby_screen_destroy();
+    ui_Bluetooth_Config_screen_destroy();
     ui_Language_screen_destroy();
     ui_Brightness_screen_destroy();
-    ui_Weather_Toggle_screen_destroy();
-    ui_Sleep_Time_screen_destroy();
     ui_Settings_screen_destroy();
     ui_Music_Player_screen_destroy();
     ui_Music_List_screen_destroy();

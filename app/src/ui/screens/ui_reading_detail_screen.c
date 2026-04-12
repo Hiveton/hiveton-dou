@@ -34,10 +34,10 @@
 #define UI_READING_DETAIL_IMAGE_TEXT_GAP 8
 #define UI_READING_DETAIL_TEXT_WIDTH 460
 #define UI_READING_DETAIL_TEXT_HEIGHT 558
-#define UI_READING_DETAIL_TEXT_FONT 20
+#define UI_READING_DETAIL_TEXT_FONT 22
 #define UI_READING_DETAIL_TEXT_LINE_SPACE 2
-#define UI_READING_DETAIL_TEXT_FONT_MIN 16
-#define UI_READING_DETAIL_TEXT_FONT_MAX 28
+#define UI_READING_DETAIL_TEXT_FONT_MIN 18
+#define UI_READING_DETAIL_TEXT_FONT_MAX 30
 #define UI_READING_DETAIL_TEXT_FONT_STEP 2
 #define UI_READING_DETAIL_TEXT_LINE_SPACE_MIN 0
 #define UI_READING_DETAIL_TEXT_LINE_SPACE_MAX 12
@@ -2692,7 +2692,7 @@ void ui_Reading_Detail_screen_init(void)
                                                        611,
                                                        120,
                                                        17,
-                                                       15,
+                                                       17,
                                                        LV_TEXT_ALIGN_LEFT,
                                                        false,
                                                        false);
@@ -2751,7 +2751,7 @@ void ui_Reading_Detail_screen_init(void)
                     16,
                     160,
                     24,
-                    18,
+                    20,
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     false);
@@ -2759,27 +2759,27 @@ void ui_Reading_Detail_screen_init(void)
     row = ui_create_card(s_reading_detail_refs.settings_panel, 24, 52, 480, 42, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    ui_create_label(row, ui_i18n_pick("字号", "Font"), 0, 8, 80, 24, 18, LV_TEXT_ALIGN_LEFT, false, false);
-    button = ui_create_button(row, 256, 0, 56, 42, "-", 22, UI_SCREEN_NONE, false);
+    ui_create_label(row, ui_i18n_pick("字号", "Font"), 0, 8, 80, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
+    button = ui_create_button(row, 256, 0, 56, 42, "-", 24, UI_SCREEN_NONE, false);
     lv_obj_add_event_cb(button, ui_reading_detail_adjust_font_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(-UI_READING_DETAIL_TEXT_FONT_STEP));
     s_reading_detail_refs.font_value_label = ui_create_label(row,
-                                                             "20",
+                                                             "22",
                                                              324,
                                                              8,
                                                              UI_READING_DETAIL_SETTINGS_VALUE_WIDTH,
                                                              24,
-                                                             18,
+                                                             20,
                                                              LV_TEXT_ALIGN_CENTER,
                                                              false,
                                                              false);
-    button = ui_create_button(row, 404, 0, 56, 42, "+", 22, UI_SCREEN_NONE, true);
+    button = ui_create_button(row, 404, 0, 56, 42, "+", 24, UI_SCREEN_NONE, true);
     lv_obj_add_event_cb(button, ui_reading_detail_adjust_font_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)UI_READING_DETAIL_TEXT_FONT_STEP);
 
     row = ui_create_card(s_reading_detail_refs.settings_panel, 24, 102, 480, 42, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    ui_create_label(row, ui_i18n_pick("行距", "Spacing"), 0, 8, 80, 24, 18, LV_TEXT_ALIGN_LEFT, false, false);
-    button = ui_create_button(row, 256, 0, 56, 42, "-", 22, UI_SCREEN_NONE, false);
+    ui_create_label(row, ui_i18n_pick("行距", "Spacing"), 0, 8, 80, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
+    button = ui_create_button(row, 256, 0, 56, 42, "-", 24, UI_SCREEN_NONE, false);
     lv_obj_add_event_cb(button,
                         ui_reading_detail_adjust_line_space_event_cb,
                         LV_EVENT_CLICKED,
@@ -2790,11 +2790,11 @@ void ui_Reading_Detail_screen_init(void)
                                                                    8,
                                                                    UI_READING_DETAIL_SETTINGS_VALUE_WIDTH,
                                                                    24,
-                                                                   18,
+                                                                   20,
                                                                    LV_TEXT_ALIGN_CENTER,
                                                                    false,
                                                                    false);
-    button = ui_create_button(row, 404, 0, 56, 42, "+", 22, UI_SCREEN_NONE, true);
+    button = ui_create_button(row, 404, 0, 56, 42, "+", 24, UI_SCREEN_NONE, true);
     lv_obj_add_event_cb(button,
                         ui_reading_detail_adjust_line_space_event_cb,
                         LV_EVENT_CLICKED,

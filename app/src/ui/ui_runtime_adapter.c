@@ -19,6 +19,7 @@ typedef struct
 
 static const ui_runtime_screen_entry_t s_ui_runtime_screens[] = {
     {UI_SCREEN_HOME, &ui_Home, ui_Home_screen_destroy, ui_Home_screen_init},
+    {UI_SCREEN_STANDBY, &ui_Standby, ui_Standby_screen_destroy, ui_Standby_screen_init},
     {UI_SCREEN_READING_LIST, &ui_Reading_List, ui_Reading_List_screen_destroy, ui_Reading_List_screen_init},
     {UI_SCREEN_READING_DETAIL, &ui_Reading_Detail, ui_Reading_Detail_screen_destroy, ui_Reading_Detail_screen_init},
     {UI_SCREEN_PET, &ui_Pet, ui_Pet_screen_destroy, ui_Pet_screen_init},
@@ -34,12 +35,17 @@ static const ui_runtime_screen_entry_t s_ui_runtime_screens[] = {
     {UI_SCREEN_MUSIC_LIST, &ui_Music_List, ui_Music_List_screen_destroy, ui_Music_List_screen_init},
     {UI_SCREEN_MUSIC_PLAYER, &ui_Music_Player, ui_Music_Player_screen_destroy, ui_Music_Player_screen_init},
     {UI_SCREEN_SETTINGS, &ui_Settings, ui_Settings_screen_destroy, ui_Settings_screen_init},
-    {UI_SCREEN_SLEEP_TIME, &ui_Sleep_Time, ui_Sleep_Time_screen_destroy, ui_Sleep_Time_screen_init},
-    {UI_SCREEN_WEATHER_TOGGLE, &ui_Weather_Toggle, ui_Weather_Toggle_screen_destroy, ui_Weather_Toggle_screen_init},
     {UI_SCREEN_BRIGHTNESS, &ui_Brightness, ui_Brightness_screen_destroy, ui_Brightness_screen_init},
     {UI_SCREEN_LANGUAGE, &ui_Language, ui_Language_screen_destroy, ui_Language_screen_init},
+    {UI_SCREEN_BLUETOOTH_CONFIG, &ui_Bluetooth_Config, ui_Bluetooth_Config_screen_destroy, ui_Bluetooth_Config_screen_init},
+    {UI_SCREEN_WALLPAPER, &ui_Wallpaper, ui_Wallpaper_screen_destroy, ui_Wallpaper_screen_init},
 };
 static bool s_ui_runtime_first_present_done = false;
+static lv_timer_t *s_ui_runtime_idle_timer = NULL;
+static ui_screen_id_t s_ui_runtime_resume_screen = UI_SCREEN_HOME;
+
+#define UI_RUNTIME_STANDBY_IDLE_MS 20000U
+#define UI_RUNTIME_IDLE_POLL_MS    1000U
 
 static void ui_runtime_log_heap(const char *tag,
                                 ui_screen_id_t active_id,
@@ -134,8 +140,40 @@ static const ui_runtime_screen_entry_t *ui_runtime_find_entry_by_ref(lv_obj_t **
     return NULL;
 }
 
+static void ui_runtime_idle_timer_cb(lv_timer_t *timer)
+{
+    ui_screen_id_t active_id;
+
+    LV_UNUSED(timer);
+
+    if (ui_status_panel_is_visible())
+    {
+        return;
+    }
+
+    active_id = ui_runtime_get_active_screen_id();
+    if (active_id == UI_SCREEN_NONE || active_id == UI_SCREEN_STANDBY)
+    {
+        return;
+    }
+
+    if (lv_display_get_inactive_time(NULL) < UI_RUNTIME_STANDBY_IDLE_MS)
+    {
+        return;
+    }
+
+    ui_runtime_switch_to(UI_SCREEN_STANDBY);
+}
+
 static void ui_runtime_prepare_target(const ui_runtime_screen_entry_t *entry)
 {
+    if (s_ui_runtime_idle_timer == NULL)
+    {
+        s_ui_runtime_idle_timer = lv_timer_create(ui_runtime_idle_timer_cb,
+                                                  UI_RUNTIME_IDLE_POLL_MS,
+                                                  NULL);
+    }
+
     if (entry == NULL || entry->screen == NULL || entry->init == NULL)
     {
         return;
@@ -165,6 +203,24 @@ ui_screen_id_t ui_runtime_get_active_screen_id(void)
     return entry != NULL ? entry->id : UI_SCREEN_NONE;
 }
 
+void ui_runtime_exit_standby(void)
+{
+    ui_screen_id_t target = s_ui_runtime_resume_screen;
+
+    if (ui_runtime_get_active_screen_id() != UI_SCREEN_STANDBY)
+    {
+        return;
+    }
+
+    if (target == UI_SCREEN_NONE || target == UI_SCREEN_STANDBY)
+    {
+        target = UI_SCREEN_HOME;
+    }
+
+    lv_display_trigger_activity(NULL);
+    ui_runtime_switch_to(target);
+}
+
 void ui_runtime_switch_to(ui_screen_id_t target)
 {
     const ui_runtime_screen_entry_t *entry = ui_runtime_find_entry_by_id(target);
@@ -176,6 +232,20 @@ void ui_runtime_switch_to(ui_screen_id_t target)
     {
         rt_kprintf("ui_switch: invalid target=%d active=%p\n", target, active_screen);
         return;
+    }
+
+    if (target == UI_SCREEN_STANDBY)
+    {
+        if (active_entry != NULL &&
+            active_entry->id != UI_SCREEN_NONE &&
+            active_entry->id != UI_SCREEN_STANDBY)
+        {
+            s_ui_runtime_resume_screen = active_entry->id;
+        }
+        else
+        {
+            s_ui_runtime_resume_screen = UI_SCREEN_HOME;
+        }
     }
 
     ui_runtime_log_heap("switch_begin",

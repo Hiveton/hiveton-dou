@@ -17,6 +17,7 @@
 #define UI_READING_MAX_FILES 48U
 #define UI_READING_MAX_NAME_LEN 96U
 #define UI_READING_MAX_PATH_LEN 192U
+#define UI_READING_BOOKS_DIRECTORY "books"
 
 typedef enum
 {
@@ -68,6 +69,7 @@ static bool s_reading_has_selection = false;
 static bool s_reading_open_detail_pending = false;
 static ui_reading_scan_state_t s_reading_scan_state = UI_READING_SCAN_NO_CARD;
 static char s_reading_mount_path[32];
+static char s_reading_books_path[UI_READING_MAX_PATH_LEN];
 static char s_reading_selected_name[UI_READING_MAX_NAME_LEN];
 static char s_reading_selected_path[UI_READING_MAX_PATH_LEN];
 static char s_reading_status_text[128];
@@ -127,6 +129,34 @@ static bool ui_reading_snapshot_changed(const ui_reading_snapshot_t *before,
     return before->state != after->state ||
            before->file_count != after->file_count ||
            strcmp(before->mount_path, after->mount_path) != 0;
+}
+
+static void ui_reading_join_path(char *buffer,
+                                 size_t buffer_size,
+                                 const char *base_path,
+                                 const char *child_path)
+{
+    if (buffer == NULL || buffer_size == 0U)
+    {
+        return;
+    }
+
+    if (base_path == NULL || base_path[0] == '\0' || child_path == NULL || child_path[0] == '\0')
+    {
+        rt_snprintf(buffer,
+                    buffer_size,
+                    "%s%s",
+                    base_path != NULL ? base_path : "",
+                    child_path != NULL ? child_path : "");
+        return;
+    }
+
+    rt_snprintf(buffer,
+                buffer_size,
+                "%s%s%s",
+                base_path,
+                strcmp(base_path, "/") == 0 ? "" : "/",
+                child_path);
 }
 
 static bool ui_reading_is_listable_file(const char *name)
@@ -235,7 +265,7 @@ static void ui_reading_update_selected_cache(void)
 {
     if (!s_reading_has_selection ||
         s_reading_selected_index >= s_reading_file_count ||
-        s_reading_mount_path[0] == '\0')
+        s_reading_books_path[0] == '\0')
     {
         s_reading_selected_name[0] = '\0';
         s_reading_selected_path[0] = '\0';
@@ -246,12 +276,10 @@ static void ui_reading_update_selected_cache(void)
                 sizeof(s_reading_selected_name),
                 "%s",
                 s_reading_files[s_reading_selected_index].name);
-    rt_snprintf(s_reading_selected_path,
-                sizeof(s_reading_selected_path),
-                "%s%s%s",
-                s_reading_mount_path,
-                strcmp(s_reading_mount_path, "/") == 0 ? "" : "/",
-                s_reading_files[s_reading_selected_index].name);
+    ui_reading_join_path(s_reading_selected_path,
+                         sizeof(s_reading_selected_path),
+                         s_reading_books_path,
+                         s_reading_files[s_reading_selected_index].name);
 }
 
 static bool ui_reading_try_mount_device(const char *device_name,
@@ -416,6 +444,7 @@ static void ui_reading_refresh_files(void)
     s_reading_file_count = 0;
     s_reading_page_offset = 0;
     s_reading_mount_path[0] = '\0';
+    s_reading_books_path[0] = '\0';
 
     if (!ui_reading_resolve_storage_root(s_reading_mount_path, sizeof(s_reading_mount_path), &had_device))
     {
@@ -426,7 +455,12 @@ static void ui_reading_refresh_files(void)
         return;
     }
 
-    if (!ui_reading_scan_directory(s_reading_mount_path))
+    ui_reading_join_path(s_reading_books_path,
+                         sizeof(s_reading_books_path),
+                         s_reading_mount_path,
+                         UI_READING_BOOKS_DIRECTORY);
+
+    if (!ui_reading_scan_directory(s_reading_books_path))
     {
         s_reading_scan_state = UI_READING_SCAN_MOUNT_FAILED;
         s_reading_has_selection = false;
@@ -669,7 +703,7 @@ static void ui_reading_create_card(lv_obj_t *parent, uint16_t slot_index, int y)
                                         31,
                                         436,
                                         31,
-                                        26,
+                                        28,
                                         LV_TEXT_ALIGN_LEFT,
                                         false,
                                         false);
@@ -679,7 +713,7 @@ static void ui_reading_create_card(lv_obj_t *parent, uint16_t slot_index, int y)
                                        71,
                                        436,
                                        20,
-                                       17,
+                                       19,
                                        LV_TEXT_ALIGN_LEFT,
                                        false,
                                        false);
@@ -710,8 +744,8 @@ static void ui_reading_list_render(void)
     {
         rt_snprintf(status_text,
                     sizeof(status_text),
-                    ui_i18n_pick("挂载点 %s · 共 %u 个文件", "Mount %s · %u files"),
-                    s_reading_mount_path,
+                    ui_i18n_pick("扫描 %s · 共 %u 个文件", "Scan %s · %u files"),
+                    s_reading_books_path,
                     (unsigned int)s_reading_file_count);
         ui_reading_set_label_text_static(s_reading_status_label,
                                          s_reading_status_text,
@@ -748,16 +782,16 @@ static void ui_reading_list_render(void)
     {
         rt_snprintf(status_text,
                     sizeof(status_text),
-                    ui_i18n_pick("挂载点 %s · 当前没有文件", "Mount %s · No files"),
-                    s_reading_mount_path[0] != '\0' ? s_reading_mount_path : "/");
+                    ui_i18n_pick("扫描 %s · 当前没有文件", "Scan %s · No files"),
+                    s_reading_books_path[0] != '\0' ? s_reading_books_path : "/books");
         ui_reading_set_label_text_static(s_reading_status_label,
                                          s_reading_status_text,
                                          sizeof(s_reading_status_text),
                                          status_text);
         ui_reading_show_card(0,
                              ui_i18n_pick("TF 卡里还没有可显示文件", "No readable files on TF card"),
-                             ui_i18n_pick("请将书籍文件复制到 TF 卡后等待列表自动刷新。",
-                                          "Copy book files to the TF card and wait for the list to refresh."),
+                             ui_i18n_pick("请将书籍文件复制到 TF 卡的 /books 目录后等待列表自动刷新。",
+                                          "Copy book files to the TF card /books directory and wait for the list to refresh."),
                              false);
     }
     else if (s_reading_scan_state == UI_READING_SCAN_MOUNT_FAILED)
@@ -872,7 +906,7 @@ void ui_Reading_List_screen_init(void)
                                              14,
                                              360,
                                              18,
-                                             16,
+                                             18,
                                              LV_TEXT_ALIGN_LEFT,
                                              false,
                                              false);

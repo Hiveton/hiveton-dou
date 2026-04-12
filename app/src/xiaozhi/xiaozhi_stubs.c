@@ -78,7 +78,7 @@ void ui_switch_to_xiaozhi_screen(void)
 }
 void ui_swith_to_standby_screen(void)
 {
-    ui_dispatch_request_screen_switch(UI_SCREEN_HOME);
+    ui_dispatch_request_screen_switch(UI_SCREEN_STANDBY);
 }
 void gui_pm_fsm(void) {}
 

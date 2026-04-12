@@ -52,7 +52,7 @@ void ui_Music_Player_screen_init(void)
                     324,
                     528,
                     42,
-                    32,
+                    34,
                     LV_TEXT_ALIGN_CENTER,
                     false,
                     false);
@@ -62,19 +62,19 @@ void ui_Music_Player_screen_init(void)
                     370,
                     528,
                     23,
-                    18,
+                    20,
                     LV_TEXT_ALIGN_CENTER,
                     false,
                     false);
 
-    ui_create_label(page.content, "00:36", 48, 448, 62, 19, 15, LV_TEXT_ALIGN_LEFT, false, false);
-    ui_create_label(page.content, "03:28", 418, 448, 62, 19, 15, LV_TEXT_ALIGN_RIGHT, false, false);
+    ui_create_label(page.content, "00:36", 48, 448, 62, 19, 17, LV_TEXT_ALIGN_LEFT, false, false);
+    ui_create_label(page.content, "03:28", 418, 448, 62, 19, 17, LV_TEXT_ALIGN_RIGHT, false, false);
     create_bar(page.content, 110, 455, 362, 8, false);
     create_bar(page.content, 110, 455, 138, 8, true);
 
-    ui_create_button(page.content, 55, 528, 126, 52, ui_i18n_pick("上一首", "Previous"), 20, UI_SCREEN_NONE, false);
-    ui_create_button(page.content, 201, 528, 126, 52, ui_i18n_pick("播放", "Play"), 20, UI_SCREEN_NONE, true);
-    ui_create_button(page.content, 347, 528, 126, 52, ui_i18n_pick("下一首", "Next"), 20, UI_SCREEN_NONE, false);
+    ui_create_button(page.content, 55, 528, 126, 52, ui_i18n_pick("上一首", "Previous"), 22, UI_SCREEN_NONE, false);
+    ui_create_button(page.content, 201, 528, 126, 52, ui_i18n_pick("播放", "Play"), 22, UI_SCREEN_NONE, true);
+    ui_create_button(page.content, 347, 528, 126, 52, ui_i18n_pick("下一首", "Next"), 22, UI_SCREEN_NONE, false);
 }
 
 void ui_Music_Player_screen_destroy(void)

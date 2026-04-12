@@ -166,7 +166,7 @@ void ui_Weather_screen_init(void)
                                                46,
                                                528,
                                                25,
-                                               20,
+                                               22,
                                                LV_TEXT_ALIGN_CENTER,
                                                false,
                                                false);
@@ -180,7 +180,7 @@ void ui_Weather_screen_init(void)
                                            224,
                                            528,
                                            92,
-                                           74,
+                                           76,
                                            LV_TEXT_ALIGN_CENTER,
                                            false,
                                            false);
@@ -190,15 +190,15 @@ void ui_Weather_screen_init(void)
                                               316,
                                               528,
                                               28,
-                                              22,
+                                              24,
                                               LV_TEXT_ALIGN_CENTER,
                                               false,
                                               false);
 
     metrics_box = ui_create_card(page.content, 24, 376, 480, 88, UI_SCREEN_NONE, false, 0);
-    s_weather_humidity_label = ui_create_label(metrics_box, ui_i18n_pick("湿度 --", "Humidity --"), 12, 30, 152, 20, 16, LV_TEXT_ALIGN_CENTER, false, false);
-    s_weather_wind_label = ui_create_label(metrics_box, ui_i18n_pick("风向 --", "Wind --"), 164, 30, 152, 20, 16, LV_TEXT_ALIGN_CENTER, false, false);
-    s_weather_feels_like_label = ui_create_label(metrics_box, ui_i18n_pick("体感 --", "Feels Like --"), 316, 30, 152, 20, 16, LV_TEXT_ALIGN_CENTER, false, false);
+    s_weather_humidity_label = ui_create_label(metrics_box, ui_i18n_pick("湿度 --", "Humidity --"), 12, 30, 152, 20, 18, LV_TEXT_ALIGN_CENTER, false, false);
+    s_weather_wind_label = ui_create_label(metrics_box, ui_i18n_pick("风向 --", "Wind --"), 164, 30, 152, 20, 18, LV_TEXT_ALIGN_CENTER, false, false);
+    s_weather_feels_like_label = ui_create_label(metrics_box, ui_i18n_pick("体感 --", "Feels Like --"), 316, 30, 152, 20, 18, LV_TEXT_ALIGN_CENTER, false, false);
 
     s_weather_tip_label = ui_create_label(page.content,
                                           ui_i18n_pick("可以点击底部按钮手动刷新一次。", "Tap the button below to refresh once."),
@@ -206,7 +206,7 @@ void ui_Weather_screen_init(void)
                                           492,
                                           446,
                                           34,
-                                          20,
+                                          22,
                                           LV_TEXT_ALIGN_CENTER,
                                           false,
                                           true);
@@ -216,12 +216,12 @@ void ui_Weather_screen_init(void)
                                                   548,
                                                   528,
                                                   24,
-                                                  18,
+                                                  20,
                                                   LV_TEXT_ALIGN_CENTER,
                                                   false,
                                                   false);
 
-    refresh_button = ui_create_button(page.content, 164, 592, 200, 52, ui_i18n_pick("立即刷新", "Refresh"), 22, UI_SCREEN_NONE, true);
+    refresh_button = ui_create_button(page.content, 164, 592, 200, 52, ui_i18n_pick("立即刷新", "Refresh"), 24, UI_SCREEN_NONE, true);
     lv_obj_add_event_cb(refresh_button, ui_weather_refresh_event_cb, LV_EVENT_CLICKED, NULL);
 
     xiaozhi_weather_request_refresh();

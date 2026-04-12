@@ -1,4 +1,5 @@
 SET(SOURCES screens/ui_home_screen.c
+    screens/ui_standby_screen.c
     screens/ui_reading_list_screen.c
     screens/ui_reading_detail_screen.c
     screens/ui_pet_screen.c
@@ -13,10 +14,10 @@ SET(SOURCES screens/ui_home_screen.c
     screens/ui_music_list_screen.c
     screens/ui_music_player_screen.c
     screens/ui_settings_screen.c
-    screens/ui_sleep_time_screen.c
-    screens/ui_weather_toggle_screen.c
     screens/ui_brightness_screen.c
     screens/ui_language_screen.c
+    screens/ui_bluetooth_config_screen.c
+    screens/ui_wallpaper_screen.c
     home_screen.c
     ui.c
     ui_i18n.c

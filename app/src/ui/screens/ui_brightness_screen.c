@@ -218,7 +218,7 @@ void ui_Brightness_screen_init(void)
                     92,
                     140,
                     42,
-                    20,
+                    22,
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     false);
@@ -228,7 +228,7 @@ void ui_Brightness_screen_init(void)
                                                92,
                                                138,
                                                42,
-                                               24,
+                                               26,
                                                LV_TEXT_ALIGN_RIGHT,
                                                false,
                                                false);
@@ -236,9 +236,9 @@ void ui_Brightness_screen_init(void)
     create_brightness_track(panel, 44, 162, 440);
     s_brightness_fill = create_brightness_fill(panel, 48, 166, 0);
 
-    button = ui_create_button(panel, 44, 224, 204, 50, ui_brightness_decrease_label(), 20, UI_SCREEN_NONE, false);
+    button = ui_create_button(panel, 44, 224, 204, 50, ui_brightness_decrease_label(), 22, UI_SCREEN_NONE, false);
     lv_obj_add_event_cb(button, ui_brightness_adjust_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
-    button = ui_create_button(panel, 280, 224, 204, 50, ui_brightness_increase_label(), 20, UI_SCREEN_NONE, true);
+    button = ui_create_button(panel, 280, 224, 204, 50, ui_brightness_increase_label(), 22, UI_SCREEN_NONE, true);
     lv_obj_add_event_cb(button, ui_brightness_adjust_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)1);
 
     ui_create_label(panel,
@@ -247,7 +247,7 @@ void ui_Brightness_screen_init(void)
                     304,
                     440,
                     52,
-                    18,
+                    20,
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     true);
