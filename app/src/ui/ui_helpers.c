@@ -11,6 +11,7 @@
 #include "ui_i18n.h"
 #include "ui_dispatch.h"
 #include "ui_runtime_adapter.h"
+#include "../network/net_manager.h"
 #include "../xiaozhi/weather/weather.h"
 
 #define LCD_DEVICE_NAME "lcd"
@@ -129,6 +130,7 @@ static bool s_status_bar_refresh_thread_started = false;
 static volatile int s_status_pending_brightness = -1;
 static volatile int s_status_pending_volume = -1;
 static volatile int s_status_pending_charge = -1;
+static volatile int s_status_pending_battery_percent = -1;
 static rt_tick_t s_ui_nav_last_tick = 0;
 static rt_tick_t s_status_detail_reload_tick = 0;
 static bool s_status_detail_reload_pending = false;
@@ -159,7 +161,7 @@ static void ui_status_backlight_write(uint8_t brightness);
 
 static bool ui_bt_connection_active(void)
 {
-    return false;
+    return net_manager_bt_connected();
 }
 
 static bool ui_bt_pairing_enabled(void)
@@ -169,7 +171,7 @@ static bool ui_bt_pairing_enabled(void)
 
 static bool ui_bt_network_ready(void)
 {
-    return false;
+    return net_manager_network_ready();
 }
 
 static uint32_t ui_status_bar_next_refresh_delay_ms(void)
@@ -597,18 +599,19 @@ static bool ui_status_detail_is_active(void)
 static void ui_status_refresh_connection_icons(bool force)
 {
     bool bt_connected = ui_bt_connection_active();
-    bool network_ready = ui_bt_network_ready();
+    net_manager_link_t active_link = net_manager_get_active_link();
+    int network_state = (int)active_link;
     size_t i;
 
     if (!force &&
         s_status_last_bt_icon_state == (bt_connected ? 1 : 0) &&
-        s_status_last_network_icon_state == (network_ready ? 1 : 0))
+        s_status_last_network_icon_state == network_state)
     {
         return;
     }
 
     s_status_last_bt_icon_state = bt_connected ? 1 : 0;
-    s_status_last_network_icon_state = network_ready ? 1 : 0;
+    s_status_last_network_icon_state = network_state;
 
     for (i = 0; i < sizeof(s_screen_refs) / sizeof(s_screen_refs[0]); ++i)
     {
@@ -627,7 +630,8 @@ static void ui_status_refresh_connection_icons(bool force)
 
         if (refs->network_icon != NULL)
         {
-            if (network_ready)
+            if (active_link == NET_MANAGER_LINK_BT_PAN ||
+                active_link == NET_MANAGER_LINK_4G_CAT1)
             {
                 lv_img_set_src(refs->network_icon, &network_icon_img);
                 lv_obj_clear_flag(refs->network_icon, LV_OBJ_FLAG_HIDDEN);
@@ -635,6 +639,19 @@ static void ui_status_refresh_connection_icons(bool force)
             else
             {
                 lv_obj_add_flag(refs->network_icon, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+
+        if (refs->ec800_status_label != NULL)
+        {
+            if (active_link == NET_MANAGER_LINK_4G_CAT1)
+            {
+                lv_label_set_text_static(refs->ec800_status_label, "4G");
+                lv_obj_clear_flag(refs->ec800_status_label, LV_OBJ_FLAG_HIDDEN);
+            }
+            else
+            {
+                lv_obj_add_flag(refs->ec800_status_label, LV_OBJ_FLAG_HIDDEN);
             }
         }
     }
@@ -700,6 +717,53 @@ static void ui_status_refresh_charging_icons(void)
             lv_obj_add_flag(icon, LV_OBJ_FLAG_HIDDEN);
         }
     }
+}
+
+static void ui_status_refresh_battery_percent(void)
+{
+    size_t i;
+    char battery_text[8];
+    int percent = s_status_pending_battery_percent;
+
+    if (percent < 0)
+    {
+        return;
+    }
+    if (percent > 100)
+    {
+        percent = 100;
+    }
+
+    rt_snprintf(battery_text, sizeof(battery_text), "%d%%", percent);
+
+    for (i = 0; i < sizeof(s_screen_refs) / sizeof(s_screen_refs[0]); ++i)
+    {
+        lv_obj_t *label;
+
+        if (!s_screen_refs[i].used)
+        {
+            continue;
+        }
+
+        label = s_screen_refs[i].refs.battery_percent_label;
+        if (label != NULL)
+        {
+            lv_label_set_text(label, battery_text);
+        }
+    }
+}
+
+static void ui_status_async_refresh_charge_cb(void *user_data)
+{
+    LV_UNUSED(user_data);
+    ui_status_refresh_charging_icons();
+    ui_status_update_panel_visuals();
+}
+
+static void ui_status_async_refresh_battery_cb(void *user_data)
+{
+    LV_UNUSED(user_data);
+    ui_status_refresh_battery_percent();
 }
 
 static void ui_status_update_slider_visual(lv_obj_t *track,
@@ -966,6 +1030,16 @@ static void ui_status_sync_timer_cb(lv_timer_t *timer)
         s_status_panel.charging = pending != 0;
     }
 
+    pending = s_status_pending_battery_percent;
+    if (pending > 100)
+    {
+        s_status_pending_battery_percent = 100;
+    }
+    else if (pending < 0)
+    {
+        s_status_pending_battery_percent = pending;
+    }
+
     s_status_panel.brightness_steps = ui_status_brightness_to_steps(brightness);
     s_status_panel.volume_steps = ui_status_volume_to_steps(volume);
 
@@ -984,6 +1058,7 @@ static void ui_status_sync_timer_cb(lv_timer_t *timer)
     s_status_panel.last_bt_connected = bt_connected;
 
     ui_status_refresh_charging_icons();
+    ui_status_refresh_battery_percent();
     ui_status_refresh_connection_icons(false);
     ui_status_update_panel_visuals();
 }
@@ -2102,6 +2177,7 @@ void ui_build_status_bar_ex(lv_obj_t *parent,
     lv_obj_t *speaker_img;
     lv_obj_t *bluetooth_img;
     lv_obj_t *network_img;
+    lv_obj_t *cat1_label;
     lv_obj_t *battery_img;
 
     bar = lv_obj_create(parent);
@@ -2166,6 +2242,18 @@ void ui_build_status_bar_ex(lv_obj_t *parent,
                                     false,
                                     false);
 
+    cat1_label = ui_create_label(bar,
+                                 "4G",
+                                 432,
+                                 18,
+                                 32,
+                                 28,
+                                 16,
+                                 LV_TEXT_ALIGN_CENTER,
+                                 false,
+                                 false);
+    lv_obj_add_flag(cat1_label, LV_OBJ_FLAG_HIDDEN);
+
     bar_touch_zone = lv_obj_create(bar);
     ui_apply_basic_object_style(bar_touch_zone, false, 0, 0);
     lv_obj_set_style_bg_opa(bar_touch_zone, LV_OPA_TRANSP, 0);
@@ -2190,6 +2278,7 @@ void ui_build_status_bar_ex(lv_obj_t *parent,
         refs->meta_label = meta_label;
         refs->bluetooth_icon = bluetooth_img;
         refs->network_icon = network_img;
+        refs->ec800_status_label = cat1_label;
         refs->battery_percent_label = battery_label;
         refs->standby_charging_icon = charge_icon;
 
@@ -2201,7 +2290,6 @@ void ui_build_status_bar_ex(lv_obj_t *parent,
         refs->weather_icon = lv_img_create(hidden_refs);
         refs->ui_Label_ip = ui_create_hidden_label(hidden_refs);
         refs->tf_dir_label = ui_create_hidden_label(hidden_refs);
-        refs->ec800_status_label = ui_create_hidden_label(hidden_refs);
         ui_register_screen_refs(parent, refs);
     }
 
@@ -2460,4 +2548,16 @@ void xiaozhi_ui_update_volume(int volume)
 void xiaozhi_ui_update_charge_status(uint8_t is_charging)
 {
     s_status_pending_charge = is_charging ? 1 : 0;
+    lv_async_call(ui_status_async_refresh_charge_cb, NULL);
+}
+
+void xiaozhi_ui_update_battery_percent(uint8_t percent)
+{
+    if (percent > 100U)
+    {
+        percent = 100U;
+    }
+
+    s_status_pending_battery_percent = (int)percent;
+    lv_async_call(ui_status_async_refresh_battery_cb, NULL);
 }

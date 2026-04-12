@@ -251,6 +251,14 @@ config LCD_USING_GC9107
     bool
     default n
 
+config USING_4G_CAT1_MODEM
+    bool "Enable CAT1 4G modem support"
+    default n
+
+config CAT1_MODEM_APN
+    string "CAT1 APN"
+    default "CMNET"
+
 
 
 # LCD interfaces

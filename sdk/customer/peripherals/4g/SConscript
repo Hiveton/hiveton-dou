@@ -1,0 +1,9 @@
+from building import *
+
+cwd = GetCurrentDir()
+objs = []
+
+if GetDepend(['USING_4G_CAT1_MODEM']):
+    objs += SConscript('cat1_modem/SConscript')
+
+Return('objs')

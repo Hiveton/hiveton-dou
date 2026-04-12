@@ -1,0 +1,19 @@
+from building import *
+
+cwd = GetCurrentDir()
+SIFLI_SDK = os.getenv('SIFLI_SDK')
+src = ['cat1_modem.c']
+CPPPATH = [
+    cwd,
+    SIFLI_SDK + '/rtos/rtthread/components/net/at/include',
+]
+
+group = DefineGroup('cat1_modem',
+                    src,
+                    depend=['USING_4G_CAT1_MODEM',
+                            'MULTI_CLIENTS_AT_WORKING',
+                            'RT_USING_AT',
+                            'AT_USING_CLIENT'],
+                    CPPPATH=CPPPATH)
+
+Return('group')

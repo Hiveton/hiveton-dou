@@ -23,10 +23,13 @@
 #include "ui/ui.h"
 #include "ui/ui_dispatch.h"
 #include "ui/ui_runtime_adapter.h"
+#include "network/net_manager.h"
 #include "xiaozhi/weather/weather.h"
 #include "xiaozhi/bt_env.h"
 #include "xiaozhi/xiaozhi_client_public.h"
 #include "mem_section.h"
+#include "aw32001_debug.h"
+#include "bq27220_monitor.h"
 
 #define LCD_DEVICE_NAME "lcd"
 #define UI_BRIGHTNESS 100U
@@ -136,6 +139,7 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
             {
                 g_bt_app_env.bd_addr = *mac;
                 pan_connect_pending = 1;
+                net_manager_notify_bt_acl(true);
             }
             break;
         }
@@ -148,12 +152,15 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
             {
                 g_bt_app_env.bd_addr = info->mac;
                 pan_connect_pending = 1;
+                net_manager_notify_bt_acl(true);
             }
             break;
         }
         case BT_NOTIFY_COMMON_ACL_DISCONNECTED:
             g_bt_app_env.bt_connected = FALSE;
             g_pan_connected = FALSE;
+            net_manager_notify_bt_acl(false);
+            net_manager_notify_pan_ready(false);
             if (g_bt_app_env.pan_connect_timer != RT_NULL)
             {
                 rt_timer_stop(g_bt_app_env.pan_connect_timer);
@@ -197,6 +204,7 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
             }
             g_pan_connected = TRUE;
             first_pan_connected = TRUE;
+            net_manager_notify_pan_ready(true);
             if (g_bt_app_mb != RT_NULL)
             {
                 rt_mb_send(g_bt_app_mb, BT_APP_CONNECT_PAN_SUCCESS);
@@ -204,6 +212,7 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
             break;
         case BT_NOTIFY_PAN_PROFILE_DISCONNECTED:
             g_pan_connected = FALSE;
+            net_manager_notify_pan_ready(false);
             break;
         default:
             break;
@@ -496,6 +505,7 @@ int main(void)
     set_pinmux();
     xiaozhi_time_use_china_timezone();
     board_backlight_set(0U);
+    aw32001_debug_ensure_charge_enabled();
     rt_kprintf("ui: boot\n");
 
     result = start_backlight_thread();
@@ -533,10 +543,18 @@ int main(void)
         return 0;
     }
 
+    bq27220_monitor_start();
+
     result = xiaozhi_weather_service_start();
     if (result != RT_EOK)
     {
         rt_kprintf("weather: service start failed=%d\n", result);
+    }
+
+    result = net_manager_init();
+    if (result != RT_EOK)
+    {
+        rt_kprintf("net: manager init failed=%d\n", result);
     }
 
     while (1)
@@ -564,12 +582,6 @@ int main(void)
         else if (bt_event == BT_APP_CONNECT_PAN_SUCCESS)
         {
             rt_kprintf("bt: PAN connected\n");
-
-            /* Refresh the global date/time immediately once PAN networking is up,
-             * then request a background time/weather sync so RTC-adjusted values
-             * can be reflected again after NTP completes. */
-            ui_dispatch_request_time_refresh();
-            xiaozhi_weather_request_refresh();
 
             if (s_xiaozhi_registered == 0U)
             {
