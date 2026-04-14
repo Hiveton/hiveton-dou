@@ -3,7 +3,9 @@
 #include "ui_helpers.h"
 #include "xiaozhi/xiaozhi_client_public.h"
 #include "xiaozhi/xiaozhi_service.h"
+#include "network/net_manager.h"
 #include "rtthread.h"
+#include "petgame.h"
 #include <string.h>
 
 lv_obj_t *ui_AI_Dou = NULL;
@@ -19,19 +21,19 @@ static lv_timer_t *s_ai_greeting_timer = NULL;
 static rt_mutex_t s_ai_pending_mutex = RT_NULL;
 static bool s_stop_pending = false;
 static rt_tick_t s_ai_last_tts_tick = 0;
-static rt_tick_t s_ai_last_network_check_tick = 0;
-static int s_ai_last_network_ready = -1;
+static net_manager_service_state_t s_ai_last_network_state = (net_manager_service_state_t)-1;
+static xz_service_state_t s_ai_last_service_state = (xz_service_state_t)-1;
+static xz_service_state_t s_ai_prev_service_state = (xz_service_state_t)-1;
 static char s_ai_mouth_cache[48] = {0};
 static char s_ai_copy_cache[200] = {0};
 static char s_ai_button_cache[32] = {0};
-static char s_ai_network_cache[16] = {0};
+static char s_ai_network_cache[96] = {0};
 static const lv_image_dsc_t *s_ai_face_cache = NULL;
 
 #define AI_UI_SYNC_INTERVAL_MS      200
 #define AI_SERVICE_BOOT_DELAY_MS    500
 #define AI_GREETING_DELAY_MS        1200
 #define AI_TTS_UPDATE_INTERVAL_MS   1200
-#define AI_NETWORK_CHECK_INTERVAL_MS 3000
 
 extern const lv_image_dsc_t funny2;
 extern const lv_image_dsc_t sleepy2;
@@ -79,6 +81,53 @@ static const char *ai_ui_text_prompt(void)
 {
     return ui_i18n_pick("今天想聊什么？你可以问我阅读内容、让我整理想法，或者直接说一句想记录的话。",
                         "What would you like to talk about today? Ask about your reading, let me organize your ideas, or just say something you want to remember.");
+}
+
+static const char *ai_ui_service_state_text(xz_service_state_t state)
+{
+    switch (state)
+    {
+    case XZ_SERVICE_IDLE:
+        return ui_i18n_pick("AI已关闭", "AI idle");
+    case XZ_SERVICE_INITING:
+        return ui_i18n_pick("AI连接中", "AI connecting");
+    case XZ_SERVICE_READY:
+        return ui_i18n_pick("AI就绪", "AI ready");
+    case XZ_SERVICE_LISTENING:
+        return ui_i18n_pick("AI聆听中", "AI listening");
+    case XZ_SERVICE_SPEAKING:
+        return ui_i18n_pick("AI回答中", "AI speaking");
+    case XZ_SERVICE_CLOSING:
+        return ui_i18n_pick("AI关闭中", "AI closing");
+    default:
+        return ui_i18n_pick("AI状态未知", "AI unknown");
+    }
+}
+
+static const char *ai_ui_network_state_text(net_manager_service_state_t state)
+{
+    switch (state)
+    {
+    case NET_MANAGER_SERVICE_OFFLINE:
+        return ui_i18n_pick("网络未连接", "Network offline");
+    case NET_MANAGER_SERVICE_RADIO_READY:
+        return ui_i18n_pick("网络准备中", "Network readying");
+    case NET_MANAGER_SERVICE_LINK_READY:
+        return ui_i18n_pick("链路已连接", "Link connected");
+    case NET_MANAGER_SERVICE_DNS_READY:
+        return ui_i18n_pick("DNS已就绪", "DNS ready");
+    case NET_MANAGER_SERVICE_INTERNET_READY:
+        return ui_i18n_pick("已连接", "Connected");
+    default:
+        return ui_i18n_pick("网络状态未知", "Network unknown");
+    }
+}
+
+static const char *ai_ui_network_status_text(net_manager_service_state_t net_state,
+                                             xz_service_state_t svc_state)
+{
+    (void)svc_state;
+    return ai_ui_network_state_text(net_state);
 }
 
 static void ai_set_label_if_changed(lv_obj_t *label,
@@ -196,10 +245,7 @@ static void ai_ui_sync_timer_cb(lv_timer_t *timer)
                                 sizeof(s_ai_copy_cache), pending.copy_text);
     }
 
-    if (pending.network_dirty || pending.state_valid)
-    {
-        update_network_status();
-    }
+    update_network_status();
 }
 
 static void update_talk_button_text(xz_service_state_t state)
@@ -325,35 +371,26 @@ static void ai_restore_runtime_state(void)
 /* 网络状态标签更新 */
 static void update_network_status(void)
 {
-    rt_tick_t now;
-    int network_ready;
+    net_manager_service_state_t net_state;
+    xz_service_state_t service_state;
     const char *text;
 
     if (s_network_label == NULL) return;
 
-    now = rt_tick_get();
-    if (s_ai_last_network_ready < 0 ||
-        s_ai_last_network_check_tick == 0 ||
-        (now - s_ai_last_network_check_tick) >=
-            rt_tick_from_millisecond(AI_NETWORK_CHECK_INTERVAL_MS))
+    net_state = net_manager_get_service_state();
+    service_state = xiaozhi_service_get_state();
+    text = ai_ui_network_status_text(net_state, service_state);
+
+    if (s_ai_last_network_state == net_state &&
+        s_ai_last_service_state == service_state &&
+        strncmp(s_ai_network_cache, text, sizeof(s_ai_network_cache)) == 0)
     {
-        s_ai_last_network_ready = (check_internet_access() == 1) ? 1 : 0;
-        s_ai_last_network_check_tick = now;
+        return;
     }
 
-    network_ready = s_ai_last_network_ready;
-
-    if (network_ready == 1) {
-        text = ui_i18n_pick("已连接", "Connected");
-        lv_obj_set_style_text_color(s_network_label, lv_color_hex(0x000000), 0);
-    } else if (xiaozhi_service_get_state() != XZ_SERVICE_IDLE) {
-        text = ui_i18n_pick("连接中", "Connecting");
-        lv_obj_set_style_text_color(s_network_label, lv_color_hex(0x000000), 0);
-    } else {
-        text = ui_i18n_pick("未连接", "Offline");
-        lv_obj_set_style_text_color(s_network_label, lv_color_hex(0x000000), 0);
-    }
-
+    s_ai_last_network_state = net_state;
+    s_ai_last_service_state = service_state;
+    lv_obj_set_style_text_color(s_network_label, lv_color_hex(0x000000), 0);
     ai_set_label_if_changed(s_network_label, s_ai_network_cache,
                             sizeof(s_ai_network_cache), text);
 }
@@ -361,6 +398,12 @@ static void update_network_status(void)
 /* 服务状态变化回调 */
 static void on_service_state_change(xz_service_state_t state)
 {
+    if (state == XZ_SERVICE_LISTENING && s_ai_prev_service_state != XZ_SERVICE_LISTENING)
+    {
+        petgame_record_ai_interaction();
+    }
+    s_ai_prev_service_state = state;
+
     ai_ui_pending_lock();
     s_ai_pending.state = state;
     s_ai_pending.state_valid = true;
@@ -439,8 +482,12 @@ static void ai_talk_button_event_cb(lv_event_t *e)
     }
     
     /* 检查网络状态 */
-    if (check_internet_access() != 1) {
-        lv_label_set_text(s_ai_copy_label, ui_i18n_pick("请先连接网络", "Please connect to the network first"));
+    if (!net_manager_can_run_ai()) {
+        const char *network_text = ai_ui_network_status_text(net_manager_get_service_state(),
+                                                             xiaozhi_service_get_state());
+        ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
+                                sizeof(s_ai_copy_cache), network_text);
+        update_network_status();
         return;
     }
     
@@ -512,8 +559,9 @@ void ui_AI_Dou_screen_init(void)
     ai_ui_pending_unlock();
     s_stop_pending = false;
     s_ai_last_tts_tick = 0;
-    s_ai_last_network_check_tick = 0;
-    s_ai_last_network_ready = -1;
+    s_ai_last_network_state = (net_manager_service_state_t)-1;
+    s_ai_last_service_state = (xz_service_state_t)-1;
+    s_ai_prev_service_state = (xz_service_state_t)-1;
     memset(s_ai_mouth_cache, 0, sizeof(s_ai_mouth_cache));
     memset(s_ai_copy_cache, 0, sizeof(s_ai_copy_cache));
     memset(s_ai_button_cache, 0, sizeof(s_ai_button_cache));
@@ -526,13 +574,7 @@ void ui_AI_Dou_screen_init(void)
                                           NULL);
     }
     
-    /* 网络状态标签（右上角） */
-    s_network_label = lv_label_create(ui_AI_Dou);
-    lv_obj_set_pos(s_network_label, 426, 20);
-    lv_obj_set_style_text_font(s_network_label, ui_font_get(18), 0);
-    ai_set_label_if_changed(s_network_label, s_ai_network_cache,
-                            sizeof(s_ai_network_cache), ui_i18n_pick("检查中...", "Checking..."));
-    update_network_status();
+    s_network_label = NULL;
     
     face = ui_create_card(page.content, 174, 34, 180, 180, UI_SCREEN_NONE, false, 90);
     s_ai_face_container = face;
@@ -634,8 +676,9 @@ void ui_AI_Dou_screen_destroy(void)
     ai_ui_pending_unlock();
     s_stop_pending = false;
     s_ai_last_tts_tick = 0;
-    s_ai_last_network_check_tick = 0;
-    s_ai_last_network_ready = -1;
+    s_ai_last_network_state = (net_manager_service_state_t)-1;
+    s_ai_last_service_state = (xz_service_state_t)-1;
+    s_ai_prev_service_state = (xz_service_state_t)-1;
     memset(s_ai_mouth_cache, 0, sizeof(s_ai_mouth_cache));
     memset(s_ai_copy_cache, 0, sizeof(s_ai_copy_cache));
     memset(s_ai_button_cache, 0, sizeof(s_ai_button_cache));

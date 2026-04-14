@@ -46,6 +46,9 @@ static void simple_charge_pin_init(void)
 int simple_get_detect_status()
 {
     int status = 0xff;
+#if !defined(BSP_USING_CHARGER_DETECT)
+    return 0;
+#endif
 #ifdef BSP_CHARGER_INT_PIN_ACTIVE_HIGH
     status = rt_pin_read(BSP_CHARGER_INT_PIN);
 #else

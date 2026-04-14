@@ -12,6 +12,7 @@
 #include "xiaozhi_audio.h"
 #include "kws/app_recorder_process.h"
 #include "xiaozhi_client_public.h"
+#include "network/net_manager.h"
 #include "audio_manager.h"
 #include "mem_section.h"
 
@@ -55,6 +56,8 @@ static volatile bool s_waiting_server_reply = false;
 static rt_tick_t s_waiting_reply_tick = 0;
 static rt_tick_t s_last_reconnect_tick = 0;
 static bool s_reconnect_notice_sent = false;
+static net_manager_service_state_t s_last_network_state = (net_manager_service_state_t)-1;
+static bool s_last_network_ready = false;
 
 static void set_state(xz_service_state_t new_state);
 
@@ -76,9 +79,77 @@ static void reset_reconnect_state(void)
     s_reconnect_notice_sent = false;
 }
 
+static void reset_network_notice_state(void)
+{
+    s_last_network_state = (net_manager_service_state_t)-1;
+    s_last_network_ready = false;
+}
+
+static const char *network_unavailable_text(net_manager_service_state_t state)
+{
+    switch (state)
+    {
+    case NET_MANAGER_SERVICE_OFFLINE:
+        return "网络未连接，等待自动重连";
+    case NET_MANAGER_SERVICE_RADIO_READY:
+        return "网络正在建立，等待自动重连";
+    case NET_MANAGER_SERVICE_LINK_READY:
+        return "网络链路已连接，等待自动重连";
+    case NET_MANAGER_SERVICE_DNS_READY:
+        return "DNS 已就绪，等待自动重连";
+    case NET_MANAGER_SERVICE_INTERNET_READY:
+        return "网络已连接，等待自动重连";
+    default:
+        return "网络状态未知，等待自动重连";
+    }
+}
+
+static void xiaozhi_service_sync_network_notice(bool network_ready, bool force_notice)
+{
+    net_manager_service_state_t net_state = net_manager_get_service_state();
+
+    if (network_ready)
+    {
+        if ((!s_last_network_ready && s_reconnect_notice_sent) ||
+            force_notice)
+        {
+            if (s_ui_cbs.on_chat_output)
+            {
+                s_ui_cbs.on_chat_output("网络已恢复，正在自动重连小智...");
+            }
+        }
+
+        if ((!s_last_network_ready && s_reconnect_notice_sent) ||
+            force_notice)
+        {
+            LOG_I("Network recovered, state=%d", (int)net_state);
+        }
+
+        reset_reconnect_state();
+    }
+    else
+    {
+        if (force_notice || s_last_network_ready)
+        {
+            LOG_W("Network unavailable, waiting for auto reconnect (state=%d)",
+                  (int)net_state);
+            if (s_ui_cbs.on_error)
+            {
+                s_ui_cbs.on_error(network_unavailable_text(net_state));
+            }
+        }
+
+        s_reconnect_notice_sent = true;
+    }
+
+    s_last_network_state = net_state;
+    s_last_network_ready = network_ready;
+}
+
 static void xiaozhi_service_watchdog_tick(void)
 {
     rt_tick_t now = rt_tick_get();
+    bool network_ready;
 
     if (s_waiting_server_reply &&
         (now - s_waiting_reply_tick) >=
@@ -100,20 +171,15 @@ static void xiaozhi_service_watchdog_tick(void)
 
     if (xz_websocket_is_connected())
     {
+        xiaozhi_service_sync_network_notice(true, false);
         reset_reconnect_state();
         return;
     }
 
-    if (check_internet_access() != 1)
+    network_ready = net_manager_can_run_ai() ? true : false;
+    xiaozhi_service_sync_network_notice(network_ready, false);
+    if (!network_ready)
     {
-        if (!s_reconnect_notice_sent)
-        {
-            LOG_W("Network unavailable, waiting for auto reconnect");
-            if (s_ui_cbs.on_error) {
-                s_ui_cbs.on_error("网络已断开，等待自动重连");
-            }
-            s_reconnect_notice_sent = true;
-        }
         return;
     }
 
@@ -126,9 +192,6 @@ static void xiaozhi_service_watchdog_tick(void)
 
     s_last_reconnect_tick = now;
     LOG_I("Attempting websocket auto reconnect");
-    if (s_ui_cbs.on_chat_output) {
-        s_ui_cbs.on_chat_output("网络已恢复，正在自动重连小智...");
-    }
     set_state(XZ_SERVICE_INITING);
 
     if (xz_websocket_connect() == 0)
@@ -152,8 +215,10 @@ static void xiaozhi_service_watchdog_tick(void)
 static void set_state(xz_service_state_t new_state)
 {
     if (s_state != new_state) {
+        xz_service_state_t old_state = s_state;
+
         s_state = new_state;
-        LOG_I("State: %d -> %d", s_state, new_state);
+        LOG_I("State: %d -> %d", old_state, new_state);
         
         if (s_ui_cbs.on_state_change) {
             s_ui_cbs.on_state_change(new_state);
@@ -272,12 +337,10 @@ static void xiaozhi_service_thread(void *parameter)
                 set_state(XZ_SERVICE_INITING);
                 
                 /* 检查网络 */
-                if (check_internet_access() != 1) {
+                if (!net_manager_can_run_ai()) {
                     LOG_E("Network not available");
+                    xiaozhi_service_sync_network_notice(false, true);
                     audio_release(AUDIO_OWNER_XIAOZHI);
-                    if (s_ui_cbs.on_error) {
-                        s_ui_cbs.on_error("网络未连接");
-                    }
                     s_initialized = false;
                     set_state(XZ_SERVICE_IDLE);
                     continue;
@@ -303,6 +366,7 @@ static void xiaozhi_service_thread(void *parameter)
                 
                 clear_waiting_server_reply();
                 reset_reconnect_state();
+                xiaozhi_service_sync_network_notice(true, false);
                 set_state(XZ_SERVICE_READY);
                 LOG_I("Service initialized");
             }
@@ -332,6 +396,7 @@ static void xiaozhi_service_thread(void *parameter)
                 s_pending_greeting = false;
                 clear_waiting_server_reply();
                 reset_reconnect_state();
+                reset_network_notice_state();
                 LOG_I("Service deinitialized");
             }
             

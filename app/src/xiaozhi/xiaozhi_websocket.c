@@ -38,6 +38,8 @@
 #include "xiaozhi_client_public.h"
 #include "xiaozhi_ui.h"
 #include "xiaozhi_audio.h"
+#include "network/net_manager.h"
+#include "../sleep_manager.h"
 #include "ui/ui_dispatch.h"
 #include "xiaozhi_service.h"
 
@@ -657,7 +659,7 @@ err_t my_wsapp_fn(int code, char *buf, size_t len)
             xiaozhi_ui_standby_chat_output("小智已断开请按键唤醒");//待机界面
             xiaozhi_ui_update_emoji("sleepy");
             xiaozhi_ui_update_standby_emoji("sleepy");
-            if (check_internet_access() != 1)
+            if (!xiaozhi_network_service_ready())
             {
                 ui_swith_to_standby_screen();
             }
@@ -692,7 +694,7 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
 {
     rt_kprintf("in ws button handle\n");
     ui_dispatch_request_activity();
-    gui_pm_fsm(GUI_PM_ACTION_WAKEUP); // 唤醒设备
+    sleep_manager_request_wakeup();
      rt_kprintf("in ws button handle2\n");
     // 如果当前处于KWS模式，则退出KWS模式
         if (g_kws_running) 
@@ -734,9 +736,7 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
     }
     else if (action == BUTTON_RELEASED)
     {
-#ifdef BSP_USING_PM
-        gui_pm_fsm(GUI_PM_ACTION_WAKEUP);
-#endif
+        sleep_manager_request_wakeup();
         rt_kprintf("released\r\n");
         // 仅在已唤醒时发送停止监听
         if (g_xz_ws.is_connected)
@@ -794,7 +794,7 @@ static void xz_button2_event_handler(int32_t pin, button_action_t action)
             rt_sem_release(g_activation_context.sem);
         }
         shutdown_state = false;
-        gui_pm_fsm(GUI_PM_ACTION_WAKEUP); // 唤醒设备
+        sleep_manager_request_wakeup();
         rt_thread_mdelay(100);
         rt_mb_send(g_ui_task_mb, UI_EVENT_SHUTDOWN);
     }
@@ -807,39 +807,13 @@ static void xz_button2_event_handler(int32_t pin, button_action_t action)
 
 void xz_ws_button_init(void) // Session key
 {
-    static int initialized = 0;
-    rt_kprintf("xz_ws_button_init\n");
-    if (initialized == 0)
-    {
-        // 按键1（对话+唤醒）
-        button_cfg_t cfg1;
-        cfg1.pin = BSP_KEY1_PIN;
-        cfg1.active_state = KEY1_ACTIVE_LEVEL;
-        cfg1.mode = PIN_MODE_INPUT;
-        cfg1.button_handler = xz_button_event_handler; // Session key
-        int32_t id1 = button_init(&cfg1);
-        RT_ASSERT(id1 >= 0);
-        RT_ASSERT(SF_EOK == button_enable(id1));
-        initialized = 1;
-    }
+    extern void app_buttons_init(void);
+    app_buttons_init();
 }
 void xz_ws_button_init2(void)
 {
-    static int initialized = 0;
-    rt_kprintf("xz_ws_button2_init\n");
-    if (initialized == 0)
-    {
-        // 按键2（关机）
-        button_cfg_t cfg2;
-        cfg2.pin = BSP_KEY2_PIN;
-        cfg2.active_state = KEY2_ACTIVE_LEVEL;
-        cfg2.mode = PIN_MODE_INPUT;
-        cfg2.button_handler = xz_button2_event_handler;
-        int32_t id2 = button_init(&cfg2);
-        RT_ASSERT(SF_EOK == button_enable(id2));
-        RT_ASSERT(id2 >= 0);
-        initialized = 1;
-    }
+    extern void app_buttons_init(void);
+    app_buttons_init();
 }
 void xz_ws_audio_init()
 {
@@ -1056,7 +1030,7 @@ static int xiaozhi_ws_connect_internal(rt_bool_t interactive)
 
     xz_prepare_tls_allocator();
 
-    if (check_internet_access() != 1)
+    if (!xiaozhi_network_service_ready())
     {
         xz_report_prepare_error("请在手机上开启网络共享后重新发起连接",
                                 interactive);
@@ -1287,7 +1261,7 @@ static int xiaozhi_prepare_session(rt_bool_t interactive)
             rt_sem_create("activation_sem", 0, RT_IPC_FLAG_FIFO);
     }
 
-    while (network_retry-- > 0 && check_internet_access() != 1)
+    while (network_retry-- > 0 && !xiaozhi_network_service_ready())
     {
         if (interactive)
         {
@@ -1297,7 +1271,7 @@ static int xiaozhi_prepare_session(rt_bool_t interactive)
         rt_thread_mdelay(1000);
     }
 
-    if (check_internet_access() != 1)
+    if (!xiaozhi_network_service_ready())
     {
         xz_report_prepare_error("请在手机上开启网络共享后重新发起连接",
                                 interactive);

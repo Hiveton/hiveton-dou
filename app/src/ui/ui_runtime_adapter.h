@@ -19,6 +19,10 @@ lv_obj_t *ui_runtime_get_home_screen(void);
 void ui_runtime_ensure_home_screen(void);
 ui_screen_id_t ui_runtime_get_active_screen_id(void);
 void ui_runtime_exit_standby(void);
+void ui_runtime_go_back(void);
+void ui_runtime_handle_hardkey_nav(int direction);
+void ui_runtime_request_back(void);
+void ui_runtime_request_hardkey_nav(int direction);
 
 #ifdef __cplusplus
 }

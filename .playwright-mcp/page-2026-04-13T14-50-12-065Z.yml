@@ -1,0 +1,114 @@
+- generic [ref=e2]:
+  - complementary "页面导航" [ref=e3]:
+    - generic [ref=e344]:
+      - generic [ref=e345]: INK UI
+      - heading "墨水屏设计稿" [level=1] [ref=e346]
+      - paragraph [ref=e347]: 528 x 792 / 纯黑白 / 强浮动 / 4级字号
+    - generic [ref=e348]:
+      - button "中文" [ref=e349] [cursor=pointer]
+      - button "English" [ref=e350] [cursor=pointer]
+    - generic [ref=e351]:
+      - generic [ref=e352]:
+        - heading "Home" [level=2] [ref=e353]
+        - button "主页 home" [ref=e354] [cursor=pointer]:
+          - text: 主页
+          - generic [ref=e356]: home
+        - button "待机 standby" [ref=e357] [cursor=pointer]:
+          - text: 待机
+          - generic [ref=e359]: standby
+        - button "快捷状态 status-detail" [ref=e360] [cursor=pointer]:
+          - text: 快捷状态
+          - generic [ref=e362]: status-detail
+      - generic [ref=e363]:
+        - heading "Content" [level=2] [ref=e364]
+        - button "在线阅读 reading-list" [ref=e365] [cursor=pointer]:
+          - text: 在线阅读
+          - generic [ref=e367]: reading-list
+        - button "阅读详情 reading-detail" [ref=e368] [cursor=pointer]:
+          - text: 阅读详情
+          - generic [ref=e370]: reading-detail
+        - button "宠物管理 pet" [ref=e371] [cursor=pointer]:
+          - text: 宠物管理
+          - generic [ref=e373]: pet
+        - button "AI小豆 ai-dou" [ref=e374] [cursor=pointer]:
+          - text: AI小豆
+          - generic [ref=e376]: ai-dou
+        - button "时间管理 time-manage" [ref=e377] [cursor=pointer]:
+          - text: 时间管理
+          - generic [ref=e379]: time-manage
+        - button "番茄时间 pomodoro" [ref=e380] [cursor=pointer]:
+          - text: 番茄时间
+          - generic [ref=e382]: pomodoro
+        - button "日期时间 datetime" [ref=e383] [cursor=pointer]:
+          - text: 日期时间
+          - generic [ref=e385]: datetime
+        - button "天气 weather" [ref=e386] [cursor=pointer]:
+          - text: 天气
+          - generic [ref=e388]: weather
+        - button "日历 calendar" [ref=e389] [cursor=pointer]:
+          - text: 日历
+          - generic [ref=e391]: calendar
+      - generic [ref=e392]:
+        - heading "Media" [level=2] [ref=e393]
+        - button "录音 recorder" [ref=e394] [cursor=pointer]:
+          - text: 录音
+          - generic [ref=e396]: recorder
+        - button "录音记录 record-list" [ref=e397] [cursor=pointer]:
+          - text: 录音记录
+          - generic [ref=e399]: record-list
+        - button "音乐 music-list" [ref=e400] [cursor=pointer]:
+          - text: 音乐
+          - generic [ref=e402]: music-list
+        - button "播放器 music-player" [ref=e403] [cursor=pointer]:
+          - text: 播放器
+          - generic [ref=e405]: music-player
+      - generic [ref=e406]:
+        - heading "Settings" [level=2] [ref=e407]
+        - button "设置 settings" [ref=e408] [cursor=pointer]:
+          - text: 设置
+          - generic [ref=e410]: settings
+        - button "屏幕亮度 brightness" [ref=e411] [cursor=pointer]:
+          - text: 屏幕亮度
+          - generic [ref=e413]: brightness
+        - button "语言 language" [ref=e414] [cursor=pointer]:
+          - text: 语言
+          - generic [ref=e416]: language
+        - button "蓝牙配置 bluetooth-config" [ref=e417] [cursor=pointer]:
+          - text: 蓝牙配置
+          - generic [ref=e419]: bluetooth-config
+        - button "壁纸 wallpaper" [ref=e420] [cursor=pointer]:
+          - text: 壁纸
+          - generic [ref=e422]: wallpaper
+  - main [ref=e83]:
+    - generic [ref=e423]:
+      - generic [ref=e424] [cursor=pointer]:
+        - generic [ref=e425]: 22:50
+        - generic [ref=e426]: 2026/04/13 Mon 晴 23C 东南
+      - generic [ref=e433]:
+        - button "阅读 reading-list" [ref=e434] [cursor=pointer]:
+          - generic [ref=e436]: 阅读
+          - generic [ref=e437]: reading-list
+        - button "宠物 pet" [ref=e438] [cursor=pointer]:
+          - generic [ref=e440]: 宠物
+          - generic [ref=e441]: pet
+        - button "AI豆 ai-dou" [ref=e442] [cursor=pointer]:
+          - generic [ref=e444]: AI豆
+          - generic [ref=e445]: ai-dou
+        - button "时间 time-manage" [ref=e446] [cursor=pointer]:
+          - generic [ref=e448]: 时间
+          - generic [ref=e449]: time-manage
+        - button "天气 weather" [ref=e450] [cursor=pointer]:
+          - generic [ref=e452]: 天气
+          - generic [ref=e453]: weather
+        - button "日历 calendar" [ref=e454] [cursor=pointer]:
+          - generic [ref=e456]: 日历
+          - generic [ref=e457]: calendar
+        - button "录音 recorder" [ref=e458] [cursor=pointer]:
+          - generic [ref=e460]: 录音
+          - generic [ref=e461]: recorder
+        - button "音乐 music-list" [ref=e462] [cursor=pointer]:
+          - generic [ref=e464]: 音乐
+          - generic [ref=e465]: music-list
+        - button "设置 settings" [ref=e466] [cursor=pointer]:
+          - generic [ref=e468]: 设置
+          - generic [ref=e469]: settings

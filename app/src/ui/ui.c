@@ -82,6 +82,7 @@ void ui_destroy( void )
     ui_Pomodoro_screen_destroy();
     ui_Time_Manage_screen_destroy();
     ui_AI_Dou_screen_destroy();
+    ui_Pet_Rules_screen_destroy();
     ui_Pet_screen_destroy();
     ui_Reading_Detail_screen_destroy();
     ui_Reading_List_screen_destroy();

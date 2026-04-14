@@ -60,6 +60,7 @@ static ui_reading_card_refs_t s_reading_cards[UI_READING_VISIBLE_COUNT];
 static lv_obj_t *s_reading_status_label = NULL;
 static lv_obj_t *s_reading_prev_button = NULL;
 static lv_obj_t *s_reading_next_button = NULL;
+static lv_obj_t *s_reading_page_label = NULL;
 static lv_timer_t *s_reading_refresh_timer = NULL;
 static lv_timer_t *s_reading_open_timer = NULL;
 static uint16_t s_reading_file_count = 0;
@@ -99,6 +100,22 @@ static void ui_reading_open_selected_detail(void)
     }
 
     ui_runtime_switch_to(UI_SCREEN_READING_DETAIL);
+}
+
+void ui_reading_list_hardware_prev_page(void)
+{
+    if (s_reading_prev_button != NULL)
+    {
+        lv_obj_send_event(s_reading_prev_button, LV_EVENT_CLICKED, NULL);
+    }
+}
+
+void ui_reading_list_hardware_next_page(void)
+{
+    if (s_reading_next_button != NULL)
+    {
+        lv_obj_send_event(s_reading_next_button, LV_EVENT_CLICKED, NULL);
+    }
 }
 
 typedef struct
@@ -729,6 +746,9 @@ static void ui_reading_list_render(void)
     bool can_prev;
     bool can_next;
     char status_text[80];
+    char page_text[16];
+    uint16_t total_pages = s_reading_file_count == 0U ? 0U : (uint16_t)((s_reading_file_count + UI_READING_VISIBLE_COUNT - 1U) / UI_READING_VISIBLE_COUNT);
+    uint16_t current_page = total_pages == 0U ? 0U : (uint16_t)(s_reading_page_offset / UI_READING_VISIBLE_COUNT + 1U);
 
     if (s_reading_status_label == NULL)
     {
@@ -739,6 +759,11 @@ static void ui_reading_list_render(void)
     can_next = (uint16_t)(s_reading_page_offset + UI_READING_VISIBLE_COUNT) < s_reading_file_count;
     ui_reading_set_button_enabled(s_reading_prev_button, can_prev);
     ui_reading_set_button_enabled(s_reading_next_button, can_next);
+    if (s_reading_page_label != NULL)
+    {
+        rt_snprintf(page_text, sizeof(page_text), "%u / %u", (unsigned int)current_page, (unsigned int)total_pages);
+        lv_label_set_text(s_reading_page_label, page_text);
+    }
 
     if (s_reading_scan_state == UI_READING_SCAN_OK)
     {
@@ -920,6 +945,16 @@ void ui_Reading_List_screen_init(void)
         ui_reading_create_card(page.content, i, s_card_y_positions[i]);
     }
 
+    s_reading_page_label = ui_create_label(page.content,
+                                           "1 / 1",
+                                           24,
+                                           598,
+                                           120,
+                                           24,
+                                           18,
+                                           LV_TEXT_ALIGN_LEFT,
+                                           false,
+                                           false);
     s_reading_prev_button = ui_create_button(page.content, 304, 585, 96, 46, ui_i18n_pick("上翻", "Prev"), 20, UI_SCREEN_NONE, false);
     s_reading_next_button = ui_create_button(page.content, 408, 585, 96, 46, ui_i18n_pick("下翻", "Next"), 20, UI_SCREEN_NONE, false);
     lv_obj_add_event_cb(s_reading_prev_button, ui_reading_prev_event_cb, LV_EVENT_CLICKED, NULL);
@@ -963,6 +998,7 @@ void ui_Reading_List_screen_destroy(void)
     s_reading_status_label = NULL;
     s_reading_prev_button = NULL;
     s_reading_next_button = NULL;
+    s_reading_page_label = NULL;
     s_reading_open_detail_pending = false;
 }
 

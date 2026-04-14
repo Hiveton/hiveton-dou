@@ -29,6 +29,7 @@
 #include "audio_mem.h"
 #include "mbedtls/platform.h"
 #include "gui_app_pm.h"
+#include "network/net_manager.h"
 #include "../board/board_hardware.h"
 static const char *ota_version =
     "{\r\n "
@@ -86,6 +87,12 @@ char client_id_string[40];
 ALIGN(4) uint8_t g_sha256_result[32] = {0};
 static char s_xiaozhi_last_error[160];
 static rt_bool_t s_xiaozhi_tls_allocator_ready = RT_FALSE;
+static int s_last_internet_access_result = -1;
+static int s_last_internet_access_log_state = -1;
+static rt_tick_t s_last_internet_access_tick = 0;
+
+#define XZ_INTERNET_ACCESS_CACHE_OK_MS   30000U
+#define XZ_INTERNET_ACCESS_CACHE_FAIL_MS 5000U
 
 #if defined(__CC_ARM) || defined(__CLANG_ARM)
 L2_RET_BSS_SECT_BEGIN(xiaozhi_http_resp_buf)
@@ -260,25 +267,98 @@ static void svr_found_callback(const char *name, const ip_addr_t *ipaddr,
         rt_kprintf("DNS lookup succeeded, IP: %s\n", ipaddr_ntoa(ipaddr));
     }
 }
+
+static rt_bool_t xz_internet_access_cache_hit(int expected_result,
+                                              rt_tick_t now_tick)
+{
+    rt_tick_t ttl;
+
+    if (s_last_internet_access_result != expected_result)
+    {
+        return RT_FALSE;
+    }
+
+    if (s_last_internet_access_tick == 0U)
+    {
+        return RT_FALSE;
+    }
+
+    ttl = rt_tick_from_millisecond((expected_result == 1) ?
+                                   XZ_INTERNET_ACCESS_CACHE_OK_MS :
+                                   XZ_INTERNET_ACCESS_CACHE_FAIL_MS);
+    return (rt_tick_t)(now_tick - s_last_internet_access_tick) < ttl;
+}
+
+static void xz_report_internet_access_failure(int reason, const char *hostname)
+{
+    if (s_last_internet_access_log_state == reason)
+    {
+        return;
+    }
+
+    if (reason == 0)
+    {
+        rt_kprintf("network link inactive, skip dns check for %s\n",
+                   hostname);
+    }
+    else
+    {
+        rt_kprintf("Coud not find %s, please check PAN connection\n",
+                   hostname);
+    }
+
+    s_last_internet_access_log_state = reason;
+}
+
 int check_internet_access()
 {
     int r = 0;
     const char *hostname = XIAOZHI_HOST;
     ip_addr_t addr = {0};
+    rt_tick_t now_tick = rt_tick_get();
+
+    if (!net_manager_network_ready())
+    {
+        xz_report_internet_access_failure(0, hostname);
+        s_last_internet_access_result = 0;
+        s_last_internet_access_tick = now_tick;
+        return 0;
+    }
+
+    if (xz_internet_access_cache_hit(1, now_tick))
+    {
+        return 1;
+    }
+
+    if (xz_internet_access_cache_hit(0, now_tick))
+    {
+        return 0;
+    }
 
     {
         err_t err =
             dns_gethostbyname(hostname, &addr, svr_found_callback, NULL);
         if (err != ERR_OK && err != ERR_INPROGRESS)
         {
-            rt_kprintf("Coud not find %s, please check PAN connection\n",
-                       hostname);
+            xz_report_internet_access_failure(1, hostname);
+            s_last_internet_access_result = 0;
+            s_last_internet_access_tick = now_tick;
         }
         else
+        {
             r = 1;
+            s_last_internet_access_result = 1;
+            s_last_internet_access_tick = now_tick;
+            s_last_internet_access_log_state = -1;
+        }
     }
 
     return r;
+}
+
+int xiaozhi_network_service_ready(void)
+{
+    return check_internet_access() ? 1 : 0;
 }
 
 char *get_xiaozhi()
@@ -297,10 +377,10 @@ char *get_xiaozhi()
     s_xiaozhi_last_error[0] = '\0';
     xz_prepare_tls_allocator();
 
-    if (check_internet_access() == 0)
+    if (xiaozhi_network_service_ready() == 0)
     {
         rt_snprintf(s_xiaozhi_last_error, sizeof(s_xiaozhi_last_error),
-                    "网络未连接或 DNS 不可用");
+                    "网络未连接或服务未就绪");
         return RT_NULL;
     }
 

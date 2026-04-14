@@ -112,6 +112,7 @@ void hash_run(uint8_t algo, uint8_t *raw_data, uint32_t raw_data_len,uint8_t *re
 void hex_2_asc(uint8_t n, char *str);
 char *get_client_id();
 int check_internet_access();
+int xiaozhi_network_service_ready(void);
 void xz_prepare_tls_allocator(void);
 char *get_xiaozhi();
 const char *get_xiaozhi_last_error(void);

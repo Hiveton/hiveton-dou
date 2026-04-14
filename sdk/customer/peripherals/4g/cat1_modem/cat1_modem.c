@@ -7,8 +7,11 @@
 #include "at.h"
 #include "drv_gpio.h"
 #include "rtdevice.h"
+#include "network/net_manager.h"
 
 #define DBG_TAG "cat1"
+
+#define CAT1_MODEM_EVENT_ONLINE_REQ (1U << 0)
 #define DBG_LVL DBG_INFO
 #include <rtdbg.h>
 
@@ -40,6 +43,8 @@
 #define CAT1_MODEM_APN "CMNET"
 #endif
 
+#define CAT1_MODEM_AT_PAUSED 1
+
 #define CAT1_MODEM_THREAD_STACK_SIZE 4096
 #define CAT1_MODEM_THREAD_PRIORITY   16
 #define CAT1_MODEM_THREAD_TICK       10
@@ -52,6 +57,7 @@
 
 static struct rt_thread s_cat1_thread;
 static rt_uint8_t s_cat1_stack[CAT1_MODEM_THREAD_STACK_SIZE];
+static rt_event_t s_cat1_event = RT_NULL;
 static volatile rt_uint8_t s_cat1_ready = 0U;
 static volatile rt_uint8_t s_online_requested = 0U;
 static volatile rt_uint8_t s_client_ready = 0U;
@@ -66,6 +72,7 @@ static void cat1_modem_dump_response(at_response_t resp);
 static void cat1_modem_mark_ready(bool ready);
 static void cat1_modem_repower_module(void);
 static rt_bool_t cat1_modem_handle_at_failures(const char *reason);
+static rt_bool_t cat1_modem_offline_requested(void);
 
 static void cat1_modem_set_status_text(const char *text)
 {
@@ -75,6 +82,11 @@ static void cat1_modem_set_status_text(const char *text)
     }
 
     rt_snprintf(s_cat1_status_text, sizeof(s_cat1_status_text), "%s", text);
+}
+
+static rt_bool_t cat1_modem_offline_requested(void)
+{
+    return s_online_requested == 0U ? RT_TRUE : RT_FALSE;
 }
 
 static rt_size_t cat1_modem_raw_exchange(rt_device_t uart_device,
@@ -571,6 +583,13 @@ static int cat1_modem_wait_registered(void)
         int ber = -1;
         const char *line = RT_NULL;
 
+        if (cat1_modem_offline_requested())
+        {
+            at_delete_resp(resp);
+            cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
+            return -RT_EBUSY;
+        }
+
         cat1_modem_set_status_text("4G: 检查SIM卡");
         if (cat1_modem_exec_cmd(client, resp, "AT+CPIN?") < 0)
         {
@@ -722,6 +741,13 @@ static int cat1_modem_activate_pdp(void)
         return -RT_ENOMEM;
     }
 
+    if (cat1_modem_offline_requested())
+    {
+        at_delete_resp(resp);
+        cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
+        return -RT_EBUSY;
+    }
+
     cat1_modem_set_status_text("4G: 配置APN");
     (void)cat1_modem_exec_cmd(client, resp, "AT+QICSGP=1,1,\"%s\",\"\",\"\",1", CAT1_MODEM_APN);
     at_resp_set_info(resp, 256, 0, 5000);
@@ -775,6 +801,13 @@ static int cat1_modem_check_ip_ready(void)
         return -RT_ENOMEM;
     }
 
+    if (cat1_modem_offline_requested())
+    {
+        at_delete_resp(resp);
+        cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
+        return -RT_EBUSY;
+    }
+
     cat1_modem_set_status_text("4G: 获取IP地址");
     if (cat1_modem_exec_cmd(client, resp, "AT+QIACT?") == RT_EOK)
     {
@@ -805,7 +838,13 @@ static int cat1_modem_check_ip_ready(void)
 
 static void cat1_modem_mark_ready(bool ready)
 {
+    bool previous_ready = (s_cat1_ready != 0U);
+
     s_cat1_ready = ready ? 1U : 0U;
+    if (previous_ready != ready)
+    {
+        net_manager_notify_cat1_ready(ready);
+    }
     if (ready)
     {
         cat1_modem_set_status_text("4G: 已联网");
@@ -842,7 +881,19 @@ static void cat1_modem_thread_entry(void *parameter)
         {
             cat1_modem_mark_ready(false);
             cat1_modem_set_status_text("4G: 待首页启动");
-            rt_thread_mdelay(CAT1_MODEM_POLL_INTERVAL_MS);
+            if (s_cat1_event != RT_NULL)
+            {
+                rt_uint32_t events = 0U;
+                rt_event_recv(s_cat1_event,
+                              CAT1_MODEM_EVENT_ONLINE_REQ,
+                              RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
+                              RT_WAITING_FOREVER,
+                              &events);
+            }
+            else
+            {
+                rt_thread_mdelay(CAT1_MODEM_POLL_INTERVAL_MS);
+            }
             continue;
         }
 
@@ -953,12 +1004,28 @@ rt_err_t cat1_modem_init(void)
     rt_err_t result;
 
     cat1_modem_pin_init();
+    if (s_cat1_event == RT_NULL)
+    {
+        s_cat1_event = rt_event_create("cat1evt", RT_IPC_FLAG_FIFO);
+        if (s_cat1_event == RT_NULL)
+        {
+            return -RT_ENOMEM;
+        }
+    }
+#if CAT1_MODEM_AT_PAUSED
+    s_online_requested = 0U;
+    s_power_enabled = 0U;
+    s_boot_latched = 0U;
+    cat1_modem_mark_ready(false);
+    cat1_modem_set_status_text("4G: AT已暂停");
+#else
     LOG_I("CAT1 power rail enabled at boot");
     rt_kprintf("cat1: power rail enabled at boot\n");
     LOG_I("CAT1 startup power-on sequence");
     rt_kprintf("cat1: startup power-on sequence\n");
     cat1_modem_power_on_sequence();
     s_boot_latched = 1U;
+#endif
 
     result = rt_thread_init(&s_cat1_thread,
                             "cat1",
@@ -979,6 +1046,12 @@ rt_err_t cat1_modem_init(void)
 
 rt_err_t cat1_modem_request_online(void)
 {
+#if CAT1_MODEM_AT_PAUSED
+    s_online_requested = 0U;
+    cat1_modem_mark_ready(false);
+    cat1_modem_set_status_text("4G: AT已暂停");
+    return RT_EOK;
+#else
     if (!s_online_requested)
     {
         LOG_I("CAT1 online requested");
@@ -986,7 +1059,12 @@ rt_err_t cat1_modem_request_online(void)
     }
     s_online_requested = 1U;
     cat1_modem_set_status_text("4G: 启动入网流程");
+    if (s_cat1_event != RT_NULL)
+    {
+        rt_event_send(s_cat1_event, CAT1_MODEM_EVENT_ONLINE_REQ);
+    }
     return RT_EOK;
+#endif
 }
 
 rt_err_t cat1_modem_request_offline(void)
@@ -997,7 +1075,13 @@ rt_err_t cat1_modem_request_offline(void)
     }
     s_online_requested = 0U;
     cat1_modem_mark_ready(false);
-    cat1_modem_set_status_text("4G: 已停止入网");
+    s_at_failures = 0U;
+    s_boot_latched = 0U;
+    if (s_power_enabled)
+    {
+        cat1_modem_power_enable(RT_FALSE);
+    }
+    cat1_modem_set_status_text("4G: 已关闭");
     return RT_EOK;
 }
 

@@ -3,17 +3,23 @@ from building import *
 
 cwd = GetCurrentDir()
 src = [
+    os.path.join(cwd, 'app_buttons.c'),
     os.path.join(cwd, 'app_audio_mem.c'),
     os.path.join(cwd, 'main.c'),
     os.path.join(cwd, 'aw32001_debug.c'),
     os.path.join(cwd, 'bq27220_monitor.c'),
     os.path.join(cwd, 'audio_manager.c'),
+    os.path.join(cwd, 'music_service.c'),
+    os.path.join(cwd, 'sleep_manager.c'),
+    os.path.join(cwd, 'petgame_reducer.c'),
+    os.path.join(cwd, 'petgame_storage.c'),
     os.path.join(cwd, 'network', 'net_manager.c'),
     os.path.join(cwd, 'ui', 'home_screen.c'),
     os.path.join(cwd, 'ui', 'ui.c'),
     os.path.join(cwd, 'ui', 'ui_i18n.c'),
     os.path.join(cwd, 'ui', 'ui_dispatch.c'),
     os.path.join(cwd, 'ui', 'ui_helpers.c'),
+    os.path.join(cwd, 'ui', 'ui_status_bar.c'),
     os.path.join(cwd, 'ui', 'ui_runtime_adapter.c'),
     os.path.join(cwd, 'reading', 'reading_epub.c'),
 ]
@@ -31,6 +37,7 @@ cpppath = [
     os.path.join(cwd, 'xiaozhi', 'kws'),
     os.path.join(cwd, '..', '..', 'sdk', 'customer', 'peripherals', '4g', 'cat1_modem'),
     os.path.join(cwd, '..', '..', 'sdk', 'rtos', 'rtthread', 'components', 'net', 'at', 'include'),
+    os.path.join(cwd, '..', '..', 'sdk', 'middleware', 'include'),
     os.path.join(cwd, '..', '..', 'sdk', 'middleware', 'audio', 'include'),
     os.path.join(cwd, '..', '..', 'sdk', 'middleware', 'audio', 'audio_port'),
 ]

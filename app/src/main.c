@@ -19,7 +19,9 @@
 #include "ble_connection_manager.h"
 #include "bt_connection_manager.h"
 #include "audio_manager.h"
+#include "app_buttons.h"
 #include "bf0_pm.h"
+#include "gui_app_pm.h"
 #include "ui/ui.h"
 #include "ui/ui_dispatch.h"
 #include "ui/ui_runtime_adapter.h"
@@ -30,6 +32,7 @@
 #include "mem_section.h"
 #include "aw32001_debug.h"
 #include "bq27220_monitor.h"
+#include "petgame.h"
 
 #define LCD_DEVICE_NAME "lcd"
 #define UI_BRIGHTNESS 100U
@@ -43,8 +46,6 @@
 #define XZ_UI_THREAD_PRIORITY 20
 #define XZ_UI_THREAD_TICK 10
 
-#define BACKLIGHT_THREAD_STACK_SIZE 2048
-#define BACKLIGHT_THREAD_PRIORITY 19
 #define BACKLIGHT_STEP_DELAY_MS 20
 #define BACKLIGHT_LEVEL_MIN 50U
 #define BACKLIGHT_LEVEL_MAX 100U
@@ -53,8 +54,11 @@
 #define TF_MOUNT_RETRY_COUNT 120
 #define TF_MOUNT_RETRY_DELAY_MS 100U
 
+#ifndef APP_KEEP_EPD_CONTENT_ON_SLEEP
+#define APP_KEEP_EPD_CONTENT_ON_SLEEP 1
+#endif
+
 static struct rt_thread s_ui_thread;
-static struct rt_thread s_backlight_thread;
 static struct rt_thread s_tf_mount_thread;
 
 /* xz_ui 线程栈放入 PSRAM section - 使用 L2_RET_BSS section */
@@ -67,18 +71,11 @@ static rt_uint8_t s_ui_thread_stack[XZ_UI_THREAD_STACK_SIZE] L2_RET_BSS_SECT(xz_
 #endif
 
 #if defined(__CC_ARM) || defined(__CLANG_ARM)
-L2_RET_BSS_SECT_BEGIN(backlight_thread_stack)
-ALIGN(RT_ALIGN_SIZE)
-static rt_uint8_t s_backlight_thread_stack[BACKLIGHT_THREAD_STACK_SIZE];
-L2_RET_BSS_SECT_END
 L2_RET_BSS_SECT_BEGIN(tf_mount_thread_stack)
 ALIGN(RT_ALIGN_SIZE)
 static rt_uint8_t s_tf_mount_thread_stack[TF_MOUNT_THREAD_STACK_SIZE];
 L2_RET_BSS_SECT_END
 #else
-ALIGN(RT_ALIGN_SIZE)
-static rt_uint8_t s_backlight_thread_stack[BACKLIGHT_THREAD_STACK_SIZE]
-    L2_RET_BSS_SECT(backlight_thread_stack);
 ALIGN(RT_ALIGN_SIZE)
 static rt_uint8_t s_tf_mount_thread_stack[TF_MOUNT_THREAD_STACK_SIZE]
     L2_RET_BSS_SECT(tf_mount_thread_stack);
@@ -87,10 +84,32 @@ static rt_uint8_t s_tf_mount_thread_stack[TF_MOUNT_THREAD_STACK_SIZE]
 static volatile rt_uint8_t s_ui_debug_open_reading = 0U;
 static volatile rt_uint8_t s_xiaozhi_registered = 0U;
 static rt_uint8_t s_backlight_target_brightness = 0U;
+static rt_tick_t s_petgame_reading_last_tick = 0;
+static ui_screen_id_t s_petgame_last_screen = UI_SCREEN_NONE;
 bt_app_t g_bt_app_env = {0};
 rt_mailbox_t g_bt_app_mb = RT_NULL;
 BOOL g_pan_connected = FALSE;
 extern BOOL first_pan_connected;
+
+#ifdef BSP_USING_PM
+extern bool lv_refreshing_done(void);
+
+static void pm_event_handler(gui_pm_event_type_t event)
+{
+    switch (event)
+    {
+    case GUI_PM_EVT_SUSPEND:
+        lv_timer_enable(false);
+        break;
+    case GUI_PM_EVT_RESUME:
+        lv_timer_enable(true);
+        break;
+    case GUI_PM_EVT_SHUTDOWN:
+    default:
+        break;
+    }
+}
+#endif
 
 #ifdef BLUETOOTH_NAME
 static const char *s_local_bt_name = BLUETOOTH_NAME;
@@ -126,10 +145,16 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
         switch (event_id)
         {
         case BT_NOTIFY_COMMON_BT_STACK_READY:
+            net_manager_notify_bt_stack_ready(true);
             if (g_bt_app_mb != RT_NULL)
             {
                 rt_mb_send(g_bt_app_mb, BT_APP_READY);
             }
+            break;
+        case BT_NOTIFY_COMMON_CLOSE_COMPLETE:
+            net_manager_notify_bt_stack_ready(false);
+            net_manager_notify_bt_acl(false);
+            net_manager_notify_pan_ready(false);
             break;
         case BT_NOTIFY_COMMON_ENCRYPTION:
         {
@@ -139,6 +164,7 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
             {
                 g_bt_app_env.bd_addr = *mac;
                 pan_connect_pending = 1;
+                net_manager_request_bt_mode();
                 net_manager_notify_bt_acl(true);
             }
             break;
@@ -152,6 +178,7 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
             {
                 g_bt_app_env.bd_addr = info->mac;
                 pan_connect_pending = 1;
+                net_manager_request_bt_mode();
                 net_manager_notify_bt_acl(true);
             }
             break;
@@ -204,6 +231,7 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
             }
             g_pan_connected = TRUE;
             first_pan_connected = TRUE;
+            net_manager_request_bt_mode();
             net_manager_notify_pan_ready(true);
             if (g_bt_app_mb != RT_NULL)
             {
@@ -264,18 +292,6 @@ void app_set_panel_brightness(rt_uint8_t brightness)
 rt_uint8_t app_get_panel_brightness(void)
 {
     return s_backlight_target_brightness;
-}
-
-static void backlight_thread_entry(void *parameter)
-{
-    (void)parameter;
-
-    board_backlight_set_level(0U);
-
-    while (1)
-    {
-        rt_thread_mdelay(1000);
-    }
 }
 
 static const char *tf_find_device_name(void)
@@ -364,6 +380,12 @@ static void ui_thread_entry(void *parameter)
 {
     rt_err_t result;
     rt_uint32_t delay_ms;
+    rt_tick_t now;
+    ui_screen_id_t active;
+    rt_tick_t reading_delta;
+#ifdef BSP_USING_PM
+    rt_device_t lcd_device = RT_NULL;
+#endif
 
     (void)parameter;
 
@@ -383,6 +405,12 @@ static void ui_thread_entry(void *parameter)
         rt_kprintf("ui: ui_dispatch_init failed=%d\n", result);
         return;
     }
+#ifdef BSP_USING_PM
+    lcd_device = rt_device_find(LCD_DEVICE_NAME);
+    gui_ctx_init();
+    gui_pm_init(lcd_device, pm_event_handler);
+#endif
+
     set_panel_brightness(s_backlight_target_brightness);
     rt_kprintf("ui: before ui_init\n");
     ui_init();
@@ -390,10 +418,51 @@ static void ui_thread_entry(void *parameter)
     rt_kprintf("ui: before switch home\n");
     ui_runtime_switch_to(UI_SCREEN_HOME);
     rt_kprintf("ui: after switch home\n");
+    bq27220_monitor_start();
+    result = net_manager_init();
+    if (result != RT_EOK)
+    {
+        rt_kprintf("net: manager init failed=%d\n", result);
+    }
     rt_kprintf("ui: xz_ui thread ready, ai_dou loaded\n");
+    petgame_init();
+    petgame_set_reading_active(false);
 
     while (1)
     {
+        const rt_tick_t reading_interval = rt_tick_from_millisecond(1000U);
+
+        now = rt_tick_get();
+        active = ui_runtime_get_active_screen_id();
+        if (active == UI_SCREEN_READING_LIST || active == UI_SCREEN_READING_DETAIL)
+        {
+            petgame_set_reading_active(true);
+            if (s_petgame_last_screen != active)
+            {
+                s_petgame_last_screen = active;
+                if (s_petgame_reading_last_tick == 0U)
+                {
+                    s_petgame_reading_last_tick = now;
+                }
+            }
+
+            reading_delta = now - s_petgame_reading_last_tick;
+            if (reading_delta >= reading_interval)
+            {
+                uint32_t add_seconds = reading_delta / reading_interval;
+                petgame_add_reading_seconds(add_seconds);
+                s_petgame_reading_last_tick += add_seconds * reading_interval;
+            }
+        }
+        else
+        {
+            petgame_set_reading_active(false);
+            s_petgame_last_screen = UI_SCREEN_NONE;
+            s_petgame_reading_last_tick = 0U;
+        }
+
+        petgame_process();
+
         if (s_ui_debug_open_reading != 0U)
         {
             s_ui_debug_open_reading = 0U;
@@ -407,6 +476,26 @@ static void ui_thread_entry(void *parameter)
         {
             delay_ms = 5U;
         }
+
+#ifdef BSP_USING_PM
+        if (gui_is_force_close())
+        {
+            if (lv_refreshing_done())
+            {
+                gui_suspend();
+#if !APP_KEEP_EPD_CONTENT_ON_SLEEP && !defined(BSP_LCDC_USING_EPD_8BIT)
+                lv_obj_invalidate(lv_screen_active());
+                lv_display_trigger_activity(NULL);
+#endif
+            }
+            else
+            {
+                rt_thread_mdelay(delay_ms);
+            }
+            continue;
+        }
+#endif
+
         rt_thread_mdelay(delay_ms);
     }
 }
@@ -430,28 +519,6 @@ static rt_err_t start_ui_thread(void)
     }
 
     rt_thread_startup(&s_ui_thread);
-    return RT_EOK;
-}
-
-static rt_err_t start_backlight_thread(void)
-{
-    rt_err_t result;
-
-    result = rt_thread_init(&s_backlight_thread,
-                            "backlight",
-                            backlight_thread_entry,
-                            RT_NULL,
-                            s_backlight_thread_stack,
-                            sizeof(s_backlight_thread_stack),
-                            BACKLIGHT_THREAD_PRIORITY,
-                            XZ_UI_THREAD_TICK);
-    if (result != RT_EOK)
-    {
-        rt_kprintf("backlight: thread init failed=%d\n", result);
-        return result;
-    }
-
-    rt_thread_startup(&s_backlight_thread);
     return RT_EOK;
 }
 
@@ -504,15 +571,10 @@ int main(void)
     check_poweron_reason();
     set_pinmux();
     xiaozhi_time_use_china_timezone();
+    app_buttons_init();
     board_backlight_set(0U);
     aw32001_debug_ensure_charge_enabled();
     rt_kprintf("ui: boot\n");
-
-    result = start_backlight_thread();
-    if (result != RT_EOK)
-    {
-        return 0;
-    }
 
     result = start_tf_mount_thread();
     if (result != RT_EOK)
@@ -541,20 +603,6 @@ int main(void)
     if (result != RT_EOK)
     {
         return 0;
-    }
-
-    bq27220_monitor_start();
-
-    result = xiaozhi_weather_service_start();
-    if (result != RT_EOK)
-    {
-        rt_kprintf("weather: service start failed=%d\n", result);
-    }
-
-    result = net_manager_init();
-    if (result != RT_EOK)
-    {
-        rt_kprintf("net: manager init failed=%d\n", result);
     }
 
     while (1)

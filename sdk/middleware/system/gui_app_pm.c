@@ -13,6 +13,10 @@
 #define LOG_TAG       "APP.FWK.PM"
 #include "log.h"
 
+#ifndef GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
+#define GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP 1
+#endif
+
 
 #define GUI_APP_PIN_WAKEUP (HPSYS_AON_WSR_PIN0 | HPSYS_AON_WSR_PIN1 | HPSYS_AON_WSR_PIN2 \
                             | HPSYS_AON_WSR_PIN3)
@@ -78,6 +82,7 @@ typedef struct
 
 static gui_ctx_t s_gui_ctx;
 static sys_poweron_mng_t s_sys_poweron_mng;
+static bool s_gui_pm_ready = false;
 
 #ifdef GUI_PM_METRICS_ENABLED
     mc_collector_t gui_pm_metrics_collector;
@@ -133,6 +138,15 @@ void close_display(void)
     gui_pm_enter_critical();
     if (s_gui_ctx.lcd && s_gui_ctx.lcd_opened)
     {
+#if defined(BSP_LCDC_USING_EPD_8BIT) || GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
+        /* EPD content is persistent after power loss. Do not issue LCD poweroff or
+         * reopen cycles during GUI sleep, otherwise the panel may blank or force a
+         * needless full refresh on wake. Let the PM flow sleep the system while the
+         * last frame remains visible on the panel.
+         */
+        gui_pm_exit_critical();
+        return;
+#else
         //touch_suspend();
         if (s_gui_ctx.idle_mode)
         {
@@ -157,6 +171,7 @@ void close_display(void)
 #ifdef GUI_PM_METRICS_ENABLED
         s_gui_ctx.stat.lcd_on_time += (float)(HAL_GTIMER_READ() - s_gui_ctx.stat.lcd_on_start_time) / HAL_LPTIM_GetFreq();
 #endif /* GUI_PM_METRICS_ENABLED */
+#endif /* BSP_LCDC_USING_EPD_8BIT || GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP */
     }
     gui_pm_exit_critical();
 
@@ -171,6 +186,13 @@ void open_display(void)
 #endif  /* RT_USING_PM */
     if (s_gui_ctx.lcd && !s_gui_ctx.lcd_opened)
     {
+#if defined(BSP_LCDC_USING_EPD_8BIT) || GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
+ #ifdef RT_USING_PM
+        rt_pm_release(PM_SLEEP_MODE_IDLE);
+ #endif  /* RT_USING_PM */
+        gui_pm_exit_critical();
+        return;
+#else
 
         if (s_gui_ctx.idle_mode)
         {
@@ -198,6 +220,7 @@ void open_display(void)
         s_gui_ctx.stat.lcd_brightness = 0;//Default value
         rt_device_control(s_gui_ctx.lcd, RTGRAPHIC_CTRL_GET_BRIGHTNESS_ASYNC, (void *)&s_gui_ctx.stat.lcd_brightness);
 #endif /* GUI_PM_METRICS_ENABLED */
+#endif /* BSP_LCDC_USING_EPD_8BIT || GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP */
     }
 #ifdef RT_USING_PM
     rt_pm_release(PM_SLEEP_MODE_IDLE);
@@ -309,6 +332,11 @@ bool gui_is_active(void)
     }
 }
 
+bool gui_pm_is_ready(void)
+{
+    return s_gui_pm_ready;
+}
+
 void gui_resume(void)
 {
     pm_scenario_start(PM_SCENARIO_UI);
@@ -342,6 +370,12 @@ void gui_suspend(void)
 void gui_pm_fsm(gui_pm_action_t action)
 {
     gui_pm_event_type_t event;
+
+    if (!s_gui_pm_ready)
+    {
+        LOG_W("fsm ignored before init: Action[%s]", gui_pm_action_to_name(action));
+        return;
+    }
 
     LOG_I("fsm:Cur[%s],Action[%s]", gui_state_to_name(s_gui_ctx.state),
           gui_pm_action_to_name(action));
@@ -406,6 +440,7 @@ void gui_ctx_init(void)
 {
     rt_sem_init(&s_gui_ctx.sema, "ui_pm", 0, RT_IPC_FLAG_FIFO);
     rt_mutex_init(&s_gui_ctx.lock, "ui_pm", RT_IPC_FLAG_FIFO);
+    s_gui_pm_ready = false;
 }
 
 void gui_pm_init(rt_device_t lcd, gui_pm_event_handler_t handler)
@@ -420,6 +455,7 @@ void gui_pm_init(rt_device_t lcd, gui_pm_event_handler_t handler)
     s_gui_ctx.lcd_opened = true;
     s_gui_ctx.idle_mode = false;
     s_gui_ctx.state = GUI_STATE_ACTIVE;
+    s_gui_pm_ready = true;
 
 }
 
@@ -665,4 +701,3 @@ INIT_APP_EXPORT(gui_pm_metrics_init);
 
 
 #endif /* BSP_USING_PM */
-

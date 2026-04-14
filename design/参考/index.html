@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>小智 H5 页面原型</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="drawer" id="drawer" aria-label="页面导航"></aside>
+
+      <main class="preview">
+        <div class="preview-inner">
+          <div class="device-frame">
+            <div class="device" id="device"></div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <button class="drawer-toggle" id="drawerToggle" type="button">页面</button>
+    <div class="overlay" id="overlay" hidden></div>
+  </body>
+</html>

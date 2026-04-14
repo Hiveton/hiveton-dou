@@ -30,10 +30,10 @@
 #define UI_READING_DETAIL_PROGRESS_TIMER_MS 200U
 #define UI_READING_DETAIL_IMAGE_WIDTH LCD_HOR_RES_MAX
 #define UI_READING_DETAIL_IMAGE_DECODE_HEIGHT 4095
-#define UI_READING_DETAIL_READING_BOX_HEIGHT 572
+#define UI_READING_DETAIL_READING_BOX_HEIGHT 736
 #define UI_READING_DETAIL_IMAGE_TEXT_GAP 8
 #define UI_READING_DETAIL_TEXT_WIDTH 460
-#define UI_READING_DETAIL_TEXT_HEIGHT 558
+#define UI_READING_DETAIL_TEXT_HEIGHT 720
 #define UI_READING_DETAIL_TEXT_FONT 22
 #define UI_READING_DETAIL_TEXT_LINE_SPACE 2
 #define UI_READING_DETAIL_TEXT_FONT_MIN 18
@@ -59,6 +59,7 @@ typedef struct
     lv_obj_t *content_label;
     lv_obj_t *content_image;
     lv_obj_t *page_label;
+    lv_obj_t *file_name_label;
     lv_obj_t *prev_button;
     lv_obj_t *next_button;
     lv_obj_t *settings_overlay;
@@ -201,6 +202,17 @@ static void ui_reading_detail_set_label_text(lv_obj_t *label, const char *text)
     }
 
     lv_label_set_text(label, text != NULL ? text : "");
+}
+
+static void ui_reading_detail_refresh_file_name_label(void)
+{
+    if (s_reading_detail_refs.file_name_label == NULL)
+    {
+        return;
+    }
+
+    ui_reading_detail_set_label_text(s_reading_detail_refs.file_name_label,
+                                     ui_reading_list_get_selected_name());
 }
 
 extern const unsigned char xiaozhi_font[];
@@ -2200,33 +2212,34 @@ static bool ui_reading_detail_render_page(void)
         else
         {
             lv_coord_t visible_image_height = (lv_coord_t)page->image_height;
-            uint32_t image_zoom;
+            lv_coord_t target_image_height;
 
             if (visible_image_height <= 0)
             {
                 visible_image_height = s_reading_detail_current_image_dsc.header.h;
             }
 
-            image_zoom = ui_reading_detail_compute_image_zoom(
-                (uint16_t)s_reading_detail_current_image_dsc.header.w);
+            target_image_height = (page->type == UI_READING_DETAIL_PAGE_IMAGE)
+                                      ? ui_px_h(UI_READING_DETAIL_READING_BOX_HEIGHT)
+                                      : visible_image_height;
             lv_image_set_src(s_reading_detail_refs.content_image, &s_reading_detail_current_image_dsc);
             lv_image_set_pivot(s_reading_detail_refs.content_image, 0, 0);
-            lv_image_set_scale(s_reading_detail_refs.content_image, image_zoom);
+            lv_image_set_scale_x(s_reading_detail_refs.content_image, LV_SCALE_NONE);
+            lv_image_set_scale_y(s_reading_detail_refs.content_image, LV_SCALE_NONE);
             lv_image_set_antialias(s_reading_detail_refs.content_image, false);
             lv_image_set_offset_x(s_reading_detail_refs.content_image, 0);
             lv_image_set_offset_y(s_reading_detail_refs.content_image, 0);
-            lv_image_set_inner_align(s_reading_detail_refs.content_image, LV_IMAGE_ALIGN_TOP_LEFT);
+            lv_image_set_inner_align(s_reading_detail_refs.content_image, LV_IMAGE_ALIGN_STRETCH);
             lv_obj_set_size(s_reading_detail_refs.content_image,
                             image_max_width,
-                            visible_image_height);
+                            target_image_height);
             lv_obj_set_pos(s_reading_detail_refs.content_image,
                            0,
                            0);
-            rt_kprintf("reading_detail: image render decoded=%dx%d zoom=%lu visible_h=%d target_w=%d page_type=%d\n",
+            rt_kprintf("reading_detail: image render decoded=%dx%d stretch_h=%d target_w=%d page_type=%d\n",
                        (int)s_reading_detail_current_image_dsc.header.w,
                        (int)s_reading_detail_current_image_dsc.header.h,
-                       (unsigned long)image_zoom,
-                       (int)visible_image_height,
+                       (int)target_image_height,
                        (int)image_max_width,
                        (int)page->type);
             lv_obj_clear_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
@@ -2418,6 +2431,16 @@ static void ui_reading_detail_next_page(void)
     }
 }
 
+void ui_reading_detail_hardware_prev_page(void)
+{
+    ui_reading_detail_prev_page();
+}
+
+void ui_reading_detail_hardware_next_page(void)
+{
+    ui_reading_detail_next_page();
+}
+
 static void ui_reading_detail_prev_event_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) == LV_EVENT_CLICKED)
@@ -2606,11 +2629,10 @@ static void ui_reading_detail_adjust_line_space_event_cb(lv_event_t *e)
 
 void ui_Reading_Detail_screen_init(void)
 {
-    ui_screen_scaffold_t page;
     lv_obj_t *reading_box;
+    lv_obj_t *divider;
     lv_obj_t *row;
     lv_obj_t *button;
-    const char *title = ui_i18n_pick("在线阅读", "Reading");
 
     if (ui_Reading_Detail != NULL)
     {
@@ -2626,12 +2648,11 @@ void ui_Reading_Detail_screen_init(void)
     s_reading_detail_last_reported_has_last_page = false;
 
     ui_Reading_Detail = ui_create_screen_base();
-    rt_kprintf("reading_detail: init title=%s\n", title != NULL ? title : "<null>");
-    ui_build_standard_screen(&page, ui_Reading_Detail, title, UI_SCREEN_READING_LIST);
+    rt_kprintf("reading_detail: init fullscreen detail\n");
 
-    reading_box = ui_create_card(page.content,
+    reading_box = ui_create_card(ui_Reading_Detail,
                                  0,
-                                 12,
+                                 8,
                                  UI_READING_DETAIL_IMAGE_WIDTH,
                                  UI_READING_DETAIL_READING_BOX_HEIGHT,
                                  UI_SCREEN_NONE,
@@ -2686,16 +2707,38 @@ void ui_Reading_Detail_screen_init(void)
                         NULL);
     lv_obj_add_flag(reading_box, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(reading_box, ui_reading_detail_content_event_cb, LV_EVENT_CLICKED, NULL);
-    s_reading_detail_refs.page_label = ui_create_label(page.content,
+
+    divider = lv_obj_create(ui_Reading_Detail);
+    lv_obj_set_pos(divider, ui_px_x(16), ui_px_y(744));
+    lv_obj_set_size(divider, ui_px_w(496), 1);
+    lv_obj_set_style_radius(divider, 0, 0);
+    lv_obj_set_style_bg_color(divider, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(divider, LV_OPA_30, 0);
+    lv_obj_set_style_border_width(divider, 0, 0);
+    lv_obj_set_style_shadow_width(divider, 0, 0);
+
+    s_reading_detail_refs.page_label = ui_create_label(ui_Reading_Detail,
                                                        "1 / 1",
+                                                       16,
+                                                       754,
+                                                       160,
                                                        24,
-                                                       611,
-                                                       120,
-                                                       17,
                                                        17,
                                                        LV_TEXT_ALIGN_LEFT,
                                                        false,
                                                        false);
+    s_reading_detail_refs.file_name_label = ui_create_label(ui_Reading_Detail,
+                                                            "",
+                                                            196,
+                                                            754,
+                                                            316,
+                                                            24,
+                                                            17,
+                                                            LV_TEXT_ALIGN_RIGHT,
+                                                            false,
+                                                            false);
+    lv_label_set_long_mode(s_reading_detail_refs.file_name_label, LV_LABEL_LONG_DOT);
+    ui_reading_detail_refresh_file_name_label();
     s_reading_detail_refs.prev_button = NULL;
     s_reading_detail_refs.next_button = NULL;
 

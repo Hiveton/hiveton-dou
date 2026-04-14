@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include "drv_lcd.h"
 #include "ui.h"
 #include "ui_i18n.h"
 #include "ui_helpers.h"
@@ -43,7 +44,7 @@ typedef struct
 
 static const ui_home_tile_t s_home_tiles[] = {
     {&home_reading, "阅读", "Reading", UI_SCREEN_READING_LIST},
-    {&home_pet, "宠物管理", "Pet", UI_SCREEN_PET},
+    {&home_pet, "陪伴成长", "Companion Growth", UI_SCREEN_PET},
     {&home_ai, "AI小豆", "AI Dou", UI_SCREEN_AI_DOU},
     {&home_clock, "时间管理", "Time", UI_SCREEN_TIME_MANAGE},
     {&home_weather, "天气", "Weather", UI_SCREEN_WEATHER},
@@ -113,6 +114,8 @@ void ui_Home_screen_init(void)
     lv_obj_t *section;
     size_t i;
     size_t visible_index = 0U;
+    static const int home_tile_x_positions[3] = {18, 186, 354};
+    static const int home_tile_y_positions[3] = {46, 262, 478};
 
     if (ui_Home != NULL)
     {
@@ -123,7 +126,13 @@ void ui_Home_screen_init(void)
     ui_Home = ui_create_screen_base();
     s_home_refs.screen = ui_Home;
     ui_build_status_bar(ui_Home, &s_home_refs);
-    net_manager_request_4g_mode();
+    if (net_manager_get_desired_mode() != NET_MANAGER_MODE_BT &&
+        net_manager_get_desired_mode() != NET_MANAGER_MODE_SLEEP)
+    {
+        net_manager_request_4g_mode();
+    }
+    xiaozhi_weather_request_force_refresh();
+    ui_force_refresh_global_status_bar();
     section = lv_obj_create(ui_Home);
     lv_obj_remove_flag(section, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(section, LV_OPA_TRANSP, 0);
@@ -145,21 +154,21 @@ void ui_Home_screen_init(void)
             continue;
         }
 
-        x = 18 + (int)(visible_index % 3U) * 168;
-        y = 20 + (int)(visible_index / 3U) * 198;
+        x = home_tile_x_positions[visible_index % 3U];
+        y = home_tile_y_positions[visible_index / 3U];
         zone = create_home_hotspot(section,
                                              x,
                                              y,
                                              156,
                                              198,
                                              tile->target);
-        icon = ui_create_image_slot(zone, 38, 28, 80, 80);
+        icon = ui_create_image_slot(zone, 38, 24, 80, 80);
 
         lv_img_set_src(icon, tile->icon);
         ui_create_label(zone,
                         ui_i18n_pick(tile->label_zh, tile->label_en),
                         0,
-                        122,
+                        126,
                         156,
                         30,
                         26,

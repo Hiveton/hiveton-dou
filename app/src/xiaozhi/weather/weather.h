@@ -49,6 +49,7 @@ int xiaozhi_weather_get(weather_info_t *weather_info);
 int xiaozhi_weather_peek(weather_info_t *weather_info);
 int xiaozhi_weather_service_start(void);
 void xiaozhi_weather_request_refresh(void);
+void xiaozhi_weather_request_force_refresh(void);
 bool xiaozhi_weather_is_home_entry_enabled(void);
 void xiaozhi_weather_set_home_entry_enabled(bool enabled);
 const lv_image_dsc_t *xiaozhi_weather_get_icon(const char *code);

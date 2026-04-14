@@ -22,6 +22,7 @@ SET(SOURCES screens/ui_home_screen.c
     ui.c
     ui_i18n.c
     ui_helpers.c
+    ui_status_bar.c
     ui_runtime_adapter.c
 )
 

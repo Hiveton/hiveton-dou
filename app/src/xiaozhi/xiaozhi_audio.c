@@ -38,6 +38,7 @@
 #include "gui_app_pm.h"
 #include "lv_display.h"
 #include "ui/ui_dispatch.h"
+#include "../sleep_manager.h"
 #include "xiaozhi_ui.h"
 #include "xiaozhi_websocket.h"
 #include "xiaozhi_audio.h"
@@ -512,7 +513,7 @@ void xz_speaker(int on)
 static void xz_button_event_handler(int32_t pin, button_action_t action)
 {
     ui_dispatch_request_activity();
-    gui_pm_fsm(GUI_PM_ACTION_WAKEUP); // 唤醒设备
+    sleep_manager_request_wakeup();
     rt_kprintf("in mqtt button handle2\n");
     // 如果当前处于KWS模式，则退出KWS模式
     if (g_kws_running) 
@@ -558,21 +559,8 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
 
 void xz_mqtt_button_init(void)
 {
-    static int initialized = 0;
-
-    if (initialized == 0)
-    {
-        button_cfg_t cfg;
-        cfg.pin = BSP_KEY1_PIN;
-
-        cfg.active_state = BSP_KEY1_ACTIVE_HIGH;
-        cfg.mode = PIN_MODE_INPUT;
-        cfg.button_handler = xz_button_event_handler;
-        int32_t id = button_init(&cfg);
-        RT_ASSERT(id >= 0);
-        RT_ASSERT(SF_EOK == button_enable(id));
-        initialized = 1;
-    }
+    extern void app_buttons_init(void);
+    app_buttons_init();
 }
 
 void xz_audio_init()

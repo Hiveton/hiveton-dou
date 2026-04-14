@@ -82,11 +82,11 @@ static int s_calendar_view_month = 1;
 static void ui_calendar_build_layout(lv_obj_t *content, ui_calendar_layout_t *layout)
 {
     int content_w;
-    int width_padding = 12;
-    int nav_width = 52;
-    int nav_gap = 4;
-    int grid_gap = 4;
-    int header_gap = 6;
+    int width_padding = 16;
+    int nav_width = 44;
+    int nav_gap = 8;
+    int grid_gap = 6;
+    int header_gap = 20;
 
     if (content == NULL || layout == NULL)
     {
@@ -102,23 +102,23 @@ static void ui_calendar_build_layout(lv_obj_t *content, ui_calendar_layout_t *la
     }
 
     layout->prev_x = width_padding;
-    layout->nav_y = 12;
+    layout->nav_y = 10;
     layout->nav_w = nav_width;
     layout->nav_h = 40;
     layout->next_x = content_w - width_padding - nav_width;
     layout->today_w = 90;
     layout->today_h = 36;
-    layout->today_x = layout->next_x - nav_gap - layout->today_w;
-    layout->today_y = 14;
+    layout->today_x = layout->next_x - nav_gap - layout->today_w - 2;
+    layout->today_y = 12;
     layout->title_x = layout->prev_x + nav_width + nav_gap;
-    layout->title_y = 10;
+    layout->title_y = 8;
     layout->title_w = layout->today_x - nav_gap - layout->title_x;
     layout->meta_x = layout->title_x;
-    layout->meta_y = 38;
+    layout->meta_y = 40;
     layout->meta_w = layout->title_w;
 
     layout->week_x = width_padding;
-    layout->week_y = 74;
+    layout->week_y = 82;
     layout->week_gap = grid_gap;
     layout->week_w = (content_w - width_padding * 2 - grid_gap * ((int)UI_CALENDAR_GRID_COLS - 1)) /
                      (int)UI_CALENDAR_GRID_COLS;
@@ -126,21 +126,21 @@ static void ui_calendar_build_layout(lv_obj_t *content, ui_calendar_layout_t *la
     {
         layout->week_w = 60;
     }
-    layout->week_h = 20;
+    layout->week_h = 24;
 
     layout->grid_x = width_padding;
     layout->grid_y = layout->week_y + layout->week_h + header_gap;
     layout->cell_gap_x = grid_gap;
-    layout->cell_gap_y = 6;
+    layout->cell_gap_y = 8;
     layout->cell_w = layout->week_w;
-    layout->cell_h = 58;
+    layout->cell_h = 60;
 
     layout->summary_x = width_padding;
     layout->summary_w = content_w - width_padding * 2;
-    layout->summary_h = 86;
+    layout->summary_h = 92;
     layout->summary_y = layout->grid_y +
                         (layout->cell_h + layout->cell_gap_y) * (int)UI_CALENDAR_GRID_ROWS +
-                        12;
+                        18;
 }
 
 static bool ui_calendar_dates_equal(const ui_calendar_date_t *lhs, const ui_calendar_date_t *rhs)
@@ -360,10 +360,10 @@ static void ui_calendar_render(void)
         if (is_selected)
         {
             lv_obj_set_style_bg_opa(cell->card, LV_OPA_COVER, 0);
-            lv_obj_set_style_bg_color(cell->card, lv_color_hex(0xFFFFFF), 0);
+            lv_obj_set_style_bg_color(cell->card, lv_color_hex(0x000000), 0);
             lv_obj_set_style_border_width(cell->card, 2, 0);
             lv_obj_set_style_border_color(cell->card, lv_color_hex(0x000000), 0);
-            lv_obj_set_style_text_color(cell->day_label, lv_color_hex(0x000000), 0);
+            lv_obj_set_style_text_color(cell->day_label, lv_color_hex(0xFFFFFF), 0);
         }
         else
         {
@@ -371,7 +371,9 @@ static void ui_calendar_render(void)
             lv_obj_set_style_bg_color(cell->card, lv_color_hex(0xFFFFFF), 0);
             lv_obj_set_style_border_width(cell->card, is_today ? 2 : 1, 0);
             lv_obj_set_style_border_color(cell->card, lv_color_hex(0x000000), 0);
-            lv_obj_set_style_text_color(cell->day_label, lv_color_hex(0x000000), 0);
+            lv_obj_set_style_text_color(cell->day_label,
+                                        in_current_month ? lv_color_hex(0x000000) : lv_color_hex(0x7A7A7A),
+                                        0);
         }
     }
 
@@ -393,6 +395,16 @@ static void ui_calendar_change_month(int delta)
     s_calendar_view_month += delta;
     ui_calendar_normalize_year_month(&s_calendar_view_year, &s_calendar_view_month);
     ui_calendar_render();
+}
+
+void ui_calendar_hardware_prev_month(void)
+{
+    ui_calendar_change_month(-1);
+}
+
+void ui_calendar_hardware_next_month(void)
+{
+    ui_calendar_change_month(1);
 }
 
 static void ui_calendar_prev_event_cb(lv_event_t *e)
@@ -509,8 +521,8 @@ void ui_Calendar_screen_init(void)
                                                   layout.title_x,
                                                   layout.title_y,
                                                   layout.title_w,
+                                                  30,
                                                   28,
-                                                  26,
                                                   LV_TEXT_ALIGN_CENTER,
                                                   false,
                                                   false);
@@ -519,7 +531,7 @@ void ui_Calendar_screen_init(void)
                                                  layout.meta_x,
                                                  layout.meta_y,
                                                  layout.meta_w,
-                                                 18,
+                                                 20,
                                                  17,
                                                  LV_TEXT_ALIGN_CENTER,
                                                  false,
@@ -563,10 +575,22 @@ void ui_Calendar_screen_init(void)
                         layout.week_y,
                         layout.week_w,
                         layout.week_h,
-                        24,
+                        22,
                         LV_TEXT_ALIGN_CENTER,
                         false,
                         false);
+    }
+
+    {
+        lv_obj_t *weekday_line = lv_obj_create(page.content);
+        lv_obj_set_pos(weekday_line, layout.week_x, layout.week_y + layout.week_h + 8);
+        lv_obj_set_size(weekday_line, layout.summary_w, 1);
+        lv_obj_set_style_radius(weekday_line, 0, 0);
+        lv_obj_set_style_bg_color(weekday_line, lv_color_hex(0x000000), 0);
+        lv_obj_set_style_bg_opa(weekday_line, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(weekday_line, 0, 0);
+        lv_obj_set_style_shadow_width(weekday_line, 0, 0);
+        lv_obj_clear_flag(weekday_line, LV_OBJ_FLAG_CLICKABLE);
     }
 
     for (row = 0; row < UI_CALENDAR_GRID_ROWS; ++row)
@@ -617,17 +641,17 @@ void ui_Calendar_screen_init(void)
                                                     18,
                                                     14,
                                                     layout.summary_w - 36,
+                                                    26,
                                                     24,
-                                                    22,
                                                     LV_TEXT_ALIGN_LEFT,
                                                     false,
                                                     false);
     s_calendar_refs.detail_label = ui_create_label(summary_card,
                                                    "",
                                                    18,
-                                                   44,
+                                                   48,
                                                    layout.summary_w - 36,
-                                                   22,
+                                                   24,
                                                    17,
                                                    LV_TEXT_ALIGN_LEFT,
                                                    false,

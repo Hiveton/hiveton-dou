@@ -6,6 +6,7 @@
 
 #include "rtthread.h"
 #include "bts2_type.h"
+#include "gui_app_pm.h"
 #include "ui/ui_dispatch.h"
 #include "xiaozhi_service.h"
 
@@ -80,7 +81,44 @@ void ui_swith_to_standby_screen(void)
 {
     ui_dispatch_request_screen_switch(UI_SCREEN_STANDBY);
 }
-void gui_pm_fsm(void) {}
+
+RT_WEAK void gui_ctx_init(void)
+{
+}
+
+RT_WEAK void gui_pm_init(rt_device_t lcd, gui_pm_event_handler_t handler)
+{
+    (void)lcd;
+    (void)handler;
+}
+
+RT_WEAK void gui_pm_fsm(gui_pm_action_t action)
+{
+    (void)action;
+}
+
+RT_WEAK void gui_set_idle_mode(bool idle_mode)
+{
+    (void)idle_mode;
+}
+
+RT_WEAK void gui_suspend(void)
+{
+}
+
+RT_WEAK bool gui_is_force_close(void)
+{
+    return false;
+}
+
+RT_WEAK bool gui_is_active(void)
+{
+    return true;
+}
+
+RT_WEAK void gui_resume(void)
+{
+}
 
 /* 屏幕对象占位符 */
 void* standby_screen = NULL;

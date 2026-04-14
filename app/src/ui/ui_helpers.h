@@ -98,6 +98,7 @@ const xiaozhi_home_screen_refs_t *ui_screen_refs_get(lv_obj_t *screen);
 void ui_screen_refs_unregister(lv_obj_t *screen);
 bool ui_status_panel_is_visible(void);
 void ui_refresh_global_status_bar(void);
+void ui_force_refresh_global_status_bar(void);
 
 #ifdef __cplusplus
 }

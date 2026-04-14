@@ -123,6 +123,13 @@ bool gui_is_force_close(void);
  */
 bool gui_is_active(void);
 
+/** Check whether GUI PM runtime is fully initialized
+ *
+ * @retval true: gui_pm_init has completed and FSM can be called safely
+ *         false: GUI PM is not ready yet
+ */
+bool gui_pm_is_ready(void);
+
 
 /** Get Power On Reasons
  *

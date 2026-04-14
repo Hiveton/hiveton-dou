@@ -70,7 +70,8 @@ static char s_wallpaper_image_src[264];
 static char s_wallpaper_last_error[192];
 static char s_wallpaper_status_text[384];
 static lv_image_dsc_t s_wallpaper_image_dsc;
-static lv_draw_buf_t *s_wallpaper_draw_buf;
+static lv_draw_buf_t s_wallpaper_draw_buf;
+static uint8_t *s_wallpaper_image_data;
 
 static void ui_wallpaper_render(void);
 
@@ -199,14 +200,68 @@ static void ui_wallpaper_set_status_overview(const char *pic_dir,
     ui_wallpaper_set_status_text(s_wallpaper_status_text);
 }
 
-static void ui_wallpaper_release_decoded_image(void)
+static uint32_t ui_wallpaper_i4_palette_bytes(void)
 {
-    if (s_wallpaper_draw_buf != NULL)
+    return (uint32_t)(LV_COLOR_INDEXED_PALETTE_SIZE(LV_COLOR_FORMAT_I4) * sizeof(lv_color32_t));
+}
+
+static uint8_t *ui_wallpaper_alloc_i4_image(unsigned width,
+                                            unsigned height,
+                                            uint32_t *stride_out,
+                                            uint8_t **pixel_data_out,
+                                            size_t *total_size_out)
+{
+    uint32_t stride;
+    uint32_t palette_bytes;
+    size_t pixel_bytes;
+    size_t total_bytes;
+    uint8_t *image_data;
+
+    if (width == 0U || height == 0U)
     {
-        lv_draw_buf_destroy(s_wallpaper_draw_buf);
-        s_wallpaper_draw_buf = NULL;
+        return NULL;
     }
 
+    stride = lv_draw_buf_width_to_stride(width, LV_COLOR_FORMAT_I4);
+    palette_bytes = ui_wallpaper_i4_palette_bytes();
+    pixel_bytes = (size_t)stride * (size_t)height;
+    total_bytes = (size_t)palette_bytes + pixel_bytes;
+
+    image_data = (uint8_t *)rt_malloc(total_bytes);
+    if (image_data == NULL)
+    {
+        ui_wallpaper_set_decode_errorf("申请内存失败 需要约%lu字节",
+                                       (unsigned long)total_bytes);
+        return NULL;
+    }
+
+    memset(image_data, 0, total_bytes);
+
+    if (stride_out != NULL)
+    {
+        *stride_out = stride;
+    }
+    if (pixel_data_out != NULL)
+    {
+        *pixel_data_out = image_data + palette_bytes;
+    }
+    if (total_size_out != NULL)
+    {
+        *total_size_out = total_bytes;
+    }
+
+    return image_data;
+}
+
+static void ui_wallpaper_release_decoded_image(void)
+{
+    if (s_wallpaper_image_data != NULL)
+    {
+        rt_free(s_wallpaper_image_data);
+        s_wallpaper_image_data = NULL;
+    }
+
+    memset(&s_wallpaper_draw_buf, 0, sizeof(s_wallpaper_draw_buf));
     memset(&s_wallpaper_image_dsc, 0, sizeof(s_wallpaper_image_dsc));
 }
 
@@ -282,37 +337,38 @@ static uint8_t ui_wallpaper_dither_to_gray4_index(unsigned x,
                                                   uint8_t b)
 {
     uint16_t gray = (uint16_t)(r * 30U + g * 59U + b * 11U) / 100U;
-    uint16_t value = (uint16_t)gray * 16U + (uint16_t)(ui_wallpaper_bayer8_value(x, y) >> 2);
-    uint8_t level = (uint8_t)(value >> 8);
+    uint8_t threshold = (uint8_t)(ui_wallpaper_bayer8_value(x, y) << 2);
 
-    if (level > 15U)
-    {
-        level = 15U;
-    }
-
-    return level;
+    return (gray >= threshold) ? 0U : 15U;
 }
 
 static bool ui_wallpaper_set_image_descriptor(unsigned width,
                                               unsigned height,
-                                              uint8_t *pixels,
+                                              uint8_t *image_data,
                                               lv_image_dsc_t *out_image)
 {
-    lv_draw_buf_t *draw_buf;
     uint32_t stride;
-    uint8_t *dst;
+    size_t total_bytes;
 
-    if (width == 0U || height == 0U || pixels == NULL || out_image == NULL)
+    if (width == 0U || height == 0U || image_data == NULL || out_image == NULL)
     {
         return false;
     }
 
-    draw_buf = lv_draw_buf_create(width, height, LV_COLOR_FORMAT_I4, LV_STRIDE_AUTO);
-    if (draw_buf == NULL)
+    stride = lv_draw_buf_width_to_stride(width, LV_COLOR_FORMAT_I4);
+    total_bytes = (size_t)ui_wallpaper_i4_palette_bytes() + ((size_t)stride * (size_t)height);
+
+    if (lv_draw_buf_init(&s_wallpaper_draw_buf,
+                         width,
+                         height,
+                         LV_COLOR_FORMAT_I4,
+                         stride,
+                         image_data,
+                         total_bytes) != LV_RESULT_OK)
     {
         ui_wallpaper_set_decode_errorf("申请内存失败 需要约%lu字节",
-                                       (unsigned long)(lv_draw_buf_width_to_stride(width, LV_COLOR_FORMAT_I4) * height));
-        rt_free(pixels);
+                                       (unsigned long)total_bytes);
+        rt_free(image_data);
         return false;
     }
 
@@ -321,17 +377,12 @@ static bool ui_wallpaper_set_image_descriptor(unsigned width,
         for (i = 0; i < 16U; ++i)
         {
             uint8_t gray = (uint8_t)(255U - (i * 255U / 15U));
-            lv_draw_buf_set_palette(draw_buf, i, lv_color32_make(gray, gray, gray, 255));
+            lv_draw_buf_set_palette(&s_wallpaper_draw_buf, i, lv_color32_make(gray, gray, gray, 255));
         }
     }
 
-    stride = draw_buf->header.stride;
-    dst = (uint8_t *)lv_draw_buf_goto_xy(draw_buf, 0, 0);
-    memcpy(dst, pixels, stride * height);
-    rt_free(pixels);
-
-    s_wallpaper_draw_buf = draw_buf;
-    lv_draw_buf_to_image(draw_buf, out_image);
+    s_wallpaper_image_data = image_data;
+    lv_draw_buf_to_image(&s_wallpaper_draw_buf, out_image);
     return true;
 }
 
@@ -416,6 +467,7 @@ static bool ui_wallpaper_decode_png(const uint8_t *image_data,
     unsigned target_width = 0U;
     unsigned target_height = 0U;
     unsigned error;
+    uint8_t *draw_image_data;
     uint8_t *pixels;
     uint32_t stride;
 
@@ -431,16 +483,16 @@ static bool ui_wallpaper_decode_png(const uint8_t *image_data,
 
     ui_wallpaper_compute_target_size(src_width, src_height, max_width, max_height,
                                      &target_width, &target_height);
-    stride = lv_draw_buf_width_to_stride(target_width, LV_COLOR_FORMAT_I4);
-    pixels = (uint8_t *)rt_malloc((size_t)stride * (size_t)target_height);
-    if (pixels == NULL)
+    draw_image_data = ui_wallpaper_alloc_i4_image(target_width,
+                                                  target_height,
+                                                  &stride,
+                                                  &pixels,
+                                                  NULL);
+    if (draw_image_data == NULL)
     {
-        ui_wallpaper_set_decode_errorf("申请内存失败 需要约%lu字节",
-                                       (unsigned long)((size_t)stride * (size_t)target_height));
         lv_free(rgb);
         return false;
     }
-    memset(pixels, 0, (size_t)stride * (size_t)target_height);
 
     for (unsigned y = 0; y < target_height; ++y)
     {
@@ -469,7 +521,7 @@ static bool ui_wallpaper_decode_png(const uint8_t *image_data,
     }
 
     lv_free(rgb);
-    return ui_wallpaper_set_image_descriptor(target_width, target_height, pixels, out_image);
+    return ui_wallpaper_set_image_descriptor(target_width, target_height, draw_image_data, out_image);
 }
 
 static size_t ui_wallpaper_jpeg_input(JDEC *jd, uint8_t *buffer, size_t size)
@@ -630,6 +682,7 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
     JDEC jd;
     JRESULT result;
     uint8_t *workbuf = NULL;
+    uint8_t *image_data = NULL;
     uint8_t *pixels = NULL;
     unsigned decode_scale = 0U;
     unsigned target_width = 0U;
@@ -706,17 +759,17 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
         return false;
     }
 
-    stride = lv_draw_buf_width_to_stride(target_width, LV_COLOR_FORMAT_I4);
-    pixels = (uint8_t *)rt_malloc((size_t)stride * (size_t)target_height);
-    if (pixels == NULL)
+    image_data = ui_wallpaper_alloc_i4_image(target_width,
+                                             target_height,
+                                             &stride,
+                                             &pixels,
+                                             NULL);
+    if (image_data == NULL)
     {
-        ui_wallpaper_set_decode_errorf("申请内存失败 需要约%lu字节",
-                                       (unsigned long)((size_t)stride * (size_t)target_height));
         rt_free(workbuf);
         close(context.source.fd);
         return false;
     }
-    memset(pixels, 0, (size_t)stride * (size_t)target_height);
     context.target.width = target_width;
     context.target.height = target_height;
     context.target.stride = stride;
@@ -726,7 +779,7 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
     {
         ui_wallpaper_set_decode_errorf("回到文件头失败 errno=%d", rt_get_errno());
         rt_free(workbuf);
-        rt_free(pixels);
+        rt_free(image_data);
         close(context.source.fd);
         return false;
     }
@@ -736,7 +789,7 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
     {
         ui_wallpaper_set_decode_errorf("JPG失败 prepare2=%d", (int)result);
         rt_free(workbuf);
-        rt_free(pixels);
+        rt_free(image_data);
         close(context.source.fd);
         return false;
     }
@@ -747,11 +800,11 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
     if (result != JDR_OK)
     {
         ui_wallpaper_set_decode_errorf("JPG失败 decomp=%d", (int)result);
-        rt_free(pixels);
+        rt_free(image_data);
         return false;
     }
 
-    return ui_wallpaper_set_image_descriptor(target_width, target_height, pixels, out_image);
+    return ui_wallpaper_set_image_descriptor(target_width, target_height, image_data, out_image);
 }
 
 static bool ui_wallpaper_decode_jpeg(const uint8_t *image_data,
@@ -766,6 +819,7 @@ static bool ui_wallpaper_decode_jpeg(const uint8_t *image_data,
     unsigned target_width = 0U;
     unsigned target_height = 0U;
     stbi_uc *rgb = NULL;
+    uint8_t *draw_image_data = NULL;
     uint8_t *pixels = NULL;
     uint32_t stride;
 
@@ -806,16 +860,16 @@ static bool ui_wallpaper_decode_jpeg(const uint8_t *image_data,
 
     ui_wallpaper_compute_target_size((unsigned)src_width, (unsigned)src_height, max_width, max_height,
                                      &target_width, &target_height);
-    stride = lv_draw_buf_width_to_stride(target_width, LV_COLOR_FORMAT_I4);
-    pixels = (uint8_t *)rt_malloc((size_t)stride * (size_t)target_height);
-    if (pixels == NULL)
+    draw_image_data = ui_wallpaper_alloc_i4_image(target_width,
+                                                  target_height,
+                                                  &stride,
+                                                  &pixels,
+                                                  NULL);
+    if (draw_image_data == NULL)
     {
-        ui_wallpaper_set_decode_errorf("申请内存失败 需要约%lu字节",
-                                       (unsigned long)((size_t)stride * (size_t)target_height));
         stbi_image_free(rgb);
         return false;
     }
-    memset(pixels, 0, (size_t)stride * (size_t)target_height);
 
     for (unsigned y = 0; y < target_height; ++y)
     {
@@ -851,12 +905,7 @@ static bool ui_wallpaper_decode_jpeg(const uint8_t *image_data,
     }
 
     stbi_image_free(rgb);
-    if (!ui_wallpaper_set_image_descriptor(target_width, target_height, pixels, out_image))
-    {
-        rt_free(pixels);
-        return false;
-    }
-    return true;
+    return ui_wallpaper_set_image_descriptor(target_width, target_height, draw_image_data, out_image);
 }
 
 static bool ui_wallpaper_decode_file_to_image(const char *path, lv_image_dsc_t *out_image)
