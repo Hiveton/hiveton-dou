@@ -3,7 +3,7 @@ import os
 font_objs = []  
 
 cwd = GetCurrentDir()
-font_file = os.path.join(cwd, 'MiSans-Demibold-subset.ttf')
+font_file = os.path.join(cwd, 'MiSans-Demibold-gb2312-subset.ttf')
 
 if not os.path.exists(font_file):
     print(f"Whether memory allocation is dynamic: Warning: Font file does not exist: {font_file}")

@@ -388,7 +388,7 @@ char *get_xiaozhi()
 
     ota_capacity = strlen(ota_version) + strlen(get_mac_address()) * 2U +
                    strlen(get_client_id()) + 32U;
-    ota_formatted = (char *)rt_malloc(ota_capacity);
+    ota_formatted = (char *)audio_mem_malloc((uint32_t)ota_capacity);
     if (ota_formatted == RT_NULL)
     {
         rt_snprintf(s_xiaozhi_last_error, sizeof(s_xiaozhi_last_error),
@@ -482,7 +482,7 @@ __exit:
 
     if (ota_formatted != RT_NULL)
     {
-        rt_free(ota_formatted);
+        audio_mem_free(ota_formatted);
     }
 
     if (content_pos <= 0)

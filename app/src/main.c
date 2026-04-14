@@ -53,6 +53,8 @@
 #define TF_MOUNT_THREAD_PRIORITY 18
 #define TF_MOUNT_RETRY_COUNT 120
 #define TF_MOUNT_RETRY_DELAY_MS 100U
+#define TF_DET_PIN 33
+#define TF_DET_DEBOUNCE_MS 80U
 
 #ifndef APP_KEEP_EPD_CONTENT_ON_SLEEP
 #define APP_KEEP_EPD_CONTENT_ON_SLEEP 1
@@ -60,6 +62,7 @@
 
 static struct rt_thread s_ui_thread;
 static struct rt_thread s_tf_mount_thread;
+static struct rt_semaphore s_tf_mount_sem;
 
 /* xz_ui 线程栈放入 PSRAM section - 使用 L2_RET_BSS section */
 #if defined(__CC_ARM) || defined(__CLANG_ARM)
@@ -83,6 +86,7 @@ static rt_uint8_t s_tf_mount_thread_stack[TF_MOUNT_THREAD_STACK_SIZE]
 
 static volatile rt_uint8_t s_ui_debug_open_reading = 0U;
 static volatile rt_uint8_t s_xiaozhi_registered = 0U;
+static volatile rt_uint8_t s_tf_card_present = 0U;
 static rt_uint8_t s_backlight_target_brightness = 0U;
 static rt_tick_t s_petgame_reading_last_tick = 0;
 static ui_screen_id_t s_petgame_last_screen = UI_SCREEN_NONE;
@@ -310,6 +314,76 @@ static const char *tf_find_device_name(void)
     return RT_NULL;
 }
 
+static rt_uint8_t tf_detect_card_present(void)
+{
+    return (rt_pin_read(TF_DET_PIN) == PIN_HIGH) ? 1U : 0U;
+}
+
+static void tf_notify_state_changed(void)
+{
+    ui_dispatch_request_status_refresh();
+    ui_dispatch_request_time_refresh();
+}
+
+static void tf_ensure_media_dirs(const char *mount_path)
+{
+    static const char *const dir_names[] = {"record", "books", "mp3", "pic"};
+    char path[64];
+    rt_size_t i;
+
+    if (mount_path == RT_NULL)
+    {
+        return;
+    }
+
+    for (i = 0; i < sizeof(dir_names) / sizeof(dir_names[0]); ++i)
+    {
+        if (strcmp(mount_path, "/") == 0)
+        {
+            rt_snprintf(path, sizeof(path), "/%s", dir_names[i]);
+        }
+        else
+        {
+            rt_snprintf(path, sizeof(path), "%s/%s", mount_path, dir_names[i]);
+        }
+
+        mkdir(path, 0);
+    }
+}
+
+static rt_err_t tf_try_unmount(const char *device_name)
+{
+    rt_device_t device;
+    const char *mounted;
+
+    if (device_name == RT_NULL)
+    {
+        return -RT_ERROR;
+    }
+
+    device = rt_device_find(device_name);
+    if (device == RT_NULL)
+    {
+        return -RT_ENOSYS;
+    }
+
+    mounted = dfs_filesystem_get_mounted_path(device);
+    if (mounted == RT_NULL || mounted[0] == '\0')
+    {
+        return RT_EOK;
+    }
+
+    if (dfs_unmount(mounted) == RT_EOK)
+    {
+        rt_kprintf("tf: unmounted %s from %s\n", device_name, mounted);
+        return RT_EOK;
+    }
+
+    rt_kprintf("tf: unmount %s from %s failed errno=%d\n",
+               device_name, mounted, rt_get_errno());
+    return -RT_ERROR;
+}
+
 static rt_err_t tf_try_mount(const char *device_name, const char *mount_path)
 {
     rt_device_t device;
@@ -341,6 +415,7 @@ static rt_err_t tf_try_mount(const char *device_name, const char *mount_path)
     if (dfs_mount(device_name, mount_path, "elm", 0, 0) == RT_EOK)
     {
         rt_kprintf("tf: mounted %s at %s\n", device_name, mount_path);
+        tf_ensure_media_dirs(mount_path);
         return RT_EOK;
     }
 
@@ -348,32 +423,96 @@ static rt_err_t tf_try_mount(const char *device_name, const char *mount_path)
     return -RT_ERROR;
 }
 
+static void tf_det_irq_handler(void *args)
+{
+    rt_base_t level = (rt_base_t)args;
+
+    rt_kprintf("tf: det irq pin=%d level=%d\n", TF_DET_PIN, (int)level);
+    rt_sem_release(&s_tf_mount_sem);
+}
+
+static rt_err_t tf_det_init(void)
+{
+    rt_err_t result;
+
+    rt_pin_mode(TF_DET_PIN, PIN_MODE_INPUT);
+    result = rt_pin_attach_irq(TF_DET_PIN,
+                               PIN_IRQ_MODE_RISING_FALLING,
+                               tf_det_irq_handler,
+                               (void *)(rt_base_t)TF_DET_PIN);
+    if (result != RT_EOK)
+    {
+        rt_kprintf("tf: attach det irq failed=%d\n", result);
+        return result;
+    }
+
+    result = rt_pin_irq_enable(TF_DET_PIN, PIN_IRQ_ENABLE);
+    if (result != RT_EOK)
+    {
+        rt_kprintf("tf: enable det irq failed=%d\n", result);
+        return result;
+    }
+
+    s_tf_card_present = tf_detect_card_present();
+    rt_kprintf("tf: det init pin=%d present=%u level=%d\n",
+               TF_DET_PIN,
+               (unsigned int)s_tf_card_present,
+               rt_pin_read(TF_DET_PIN));
+    return RT_EOK;
+}
+
 static void tf_mount_thread_entry(void *parameter)
 {
-    const char *device_name = RT_NULL;
+    const char *device_name;
     rt_uint32_t retry;
+    rt_uint8_t present;
 
     (void)parameter;
 
-    for (retry = 0; retry < TF_MOUNT_RETRY_COUNT; ++retry)
+    while (1)
     {
-        device_name = tf_find_device_name();
-        if (device_name != RT_NULL)
+        rt_sem_take(&s_tf_mount_sem, RT_WAITING_FOREVER);
+        rt_thread_mdelay(TF_DET_DEBOUNCE_MS);
+
+        present = tf_detect_card_present();
+        if (present != s_tf_card_present)
         {
-            break;
+            s_tf_card_present = present;
+            tf_notify_state_changed();
         }
-        rt_thread_mdelay(TF_MOUNT_RETRY_DELAY_MS);
-    }
 
-    if (device_name == RT_NULL)
-    {
-        rt_kprintf("tf: no sd device found after %u ms\n",
-                   (unsigned int)(TF_MOUNT_RETRY_COUNT * TF_MOUNT_RETRY_DELAY_MS));
-        return;
-    }
+        if (!present)
+        {
+            device_name = tf_find_device_name();
+            if (device_name != RT_NULL)
+            {
+                (void)tf_try_unmount(device_name);
+            }
+            rt_kprintf("tf: card removed\n");
+            continue;
+        }
 
-    rt_kprintf("tf: found storage device %s\n", device_name);
-    (void)tf_try_mount(device_name, "/");
+        device_name = RT_NULL;
+        for (retry = 0; retry < TF_MOUNT_RETRY_COUNT; ++retry)
+        {
+            device_name = tf_find_device_name();
+            if (device_name != RT_NULL)
+            {
+                rt_kprintf("tf: found storage device %s\n", device_name);
+                if (tf_try_mount(device_name, "/") == RT_EOK)
+                {
+                    break;
+                }
+            }
+            rt_thread_mdelay(TF_MOUNT_RETRY_DELAY_MS);
+        }
+
+        if (device_name == RT_NULL)
+        {
+            rt_kprintf("tf: no sd device found after %u ms\n",
+                       (unsigned int)(TF_MOUNT_RETRY_COUNT * TF_MOUNT_RETRY_DELAY_MS));
+        }
+    }
 }
 
 static void ui_thread_entry(void *parameter)
@@ -526,6 +665,19 @@ static rt_err_t start_tf_mount_thread(void)
 {
     rt_err_t result;
 
+    result = rt_sem_init(&s_tf_mount_sem, "tf_det", 0, RT_IPC_FLAG_FIFO);
+    if (result != RT_EOK)
+    {
+        rt_kprintf("tf: semaphore init failed=%d\n", result);
+        return result;
+    }
+
+    result = tf_det_init();
+    if (result != RT_EOK)
+    {
+        return result;
+    }
+
     result = rt_thread_init(&s_tf_mount_thread,
                             "tf_mount",
                             tf_mount_thread_entry,
@@ -541,6 +693,7 @@ static rt_err_t start_tf_mount_thread(void)
     }
 
     rt_thread_startup(&s_tf_mount_thread);
+    rt_sem_release(&s_tf_mount_sem);
     return RT_EOK;
 }
 

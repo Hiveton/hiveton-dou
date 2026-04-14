@@ -4,6 +4,7 @@ from building import *
 cwd = GetCurrentDir()
 src = [
     os.path.join(cwd, 'app_buttons.c'),
+    os.path.join(cwd, 'app_watchdog.c'),
     os.path.join(cwd, 'app_audio_mem.c'),
     os.path.join(cwd, 'main.c'),
     os.path.join(cwd, 'aw32001_debug.c'),

@@ -5,6 +5,7 @@
 #include <stdbool.h>
 
 #include "bf0_hal.h"
+#include "app_watchdog.h"
 #include "sleep_manager.h"
 #include "ui/ui_dispatch.h"
 
@@ -68,10 +69,10 @@ static bool app_buttons_wakeup_only(void)
     ui_screen_id_t active = ui_dispatch_get_active_screen();
 
     ui_dispatch_request_activity();
-    sleep_manager_request_wakeup();
 
     if (sleeping || active == UI_SCREEN_STANDBY)
     {
+        sleep_manager_request_wakeup();
         ui_dispatch_request_exit_standby();
         return true;
     }
@@ -81,6 +82,8 @@ static bool app_buttons_wakeup_only(void)
 
 static void app_buttons_dispatch_short(app_key_id_t key_id)
 {
+    app_watchdog_input_hint();
+
     switch (key_id)
     {
     case APP_KEY_PWR:
@@ -107,6 +110,8 @@ static void app_buttons_dispatch_short(app_key_id_t key_id)
 
 static void app_buttons_dispatch_long(app_key_id_t key_id)
 {
+    app_watchdog_input_hint();
+
     if (key_id == APP_KEY_PWR)
     {
         if (!app_buttons_wakeup_only())
@@ -226,10 +231,11 @@ static void app_buttons_thread_entry(void *parameter)
 
         if ((pending & APP_BUTTON_EVT_PWR_PRESS) != 0U)
         {
+            app_watchdog_input_hint();
             ui_dispatch_request_activity();
-            sleep_manager_request_wakeup();
             if (sleep_manager_is_sleeping() || (ui_dispatch_get_active_screen() == UI_SCREEN_STANDBY))
             {
+                sleep_manager_request_wakeup();
                 ui_dispatch_request_exit_standby();
             }
         }

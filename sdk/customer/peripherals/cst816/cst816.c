@@ -63,6 +63,7 @@
 
 static struct rt_i2c_bus_device *ft_bus = NULL;
 static struct touch_drivers cst816_driver;
+extern void app_watchdog_touch_hint(void);
 
 static rt_bool_t cst816_use_dma(void)
 {
@@ -283,6 +284,7 @@ static rt_err_t read_point(touch_msg_t p_msg)
 
     //LOG_D("cst816 read_point");
     rt_touch_irq_pin_enable(1);
+    app_watchdog_touch_hint();
 
     {
 #ifndef CST816_USE_DMA_RW

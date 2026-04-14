@@ -38,6 +38,7 @@
 #include "xiaozhi_client_public.h"
 #include "xiaozhi_ui.h"
 #include "xiaozhi_audio.h"
+#include "audio_mem.h"
 #include "network/net_manager.h"
 #include "../sleep_manager.h"
 #include "ui/ui_dispatch.h"
@@ -1165,12 +1166,12 @@ static int parse_ota_response(const char *response,
     active->is_activated = false;
     if (websocket->url)
     {
-        rt_free(websocket->url);
+        audio_mem_free(websocket->url);
         websocket->url = NULL;
     }
     if (websocket->token)
     {
-        rt_free(websocket->token);
+        audio_mem_free(websocket->token);
         websocket->token = NULL;
     }
 
@@ -1190,7 +1191,7 @@ static int parse_ota_response(const char *response,
         if (url_item && cJSON_IsString(url_item))
         {
             size_t url_len = strlen(url_item->valuestring) + 1;
-            websocket->url = (char *)rt_malloc(url_len);
+            websocket->url = (char *)audio_mem_malloc((uint32_t)url_len);
             if (websocket->url)
             {
                 strncpy(websocket->url, url_item->valuestring, url_len);
@@ -1203,7 +1204,7 @@ static int parse_ota_response(const char *response,
         if (token_item && cJSON_IsString(token_item))
         {
             size_t token_len = strlen(token_item->valuestring) + 1;
-            websocket->token = (char *)rt_malloc(token_len);
+            websocket->token = (char *)audio_mem_malloc((uint32_t)token_len);
             if (websocket->token)
             {
                 strncpy(websocket->token, token_item->valuestring, token_len);

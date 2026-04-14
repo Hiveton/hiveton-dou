@@ -212,6 +212,16 @@ void xz_audio_heap_free(void *ptr)
     rt_free(ptr);
 }
 
+void *opus_heap_malloc(uint32_t size)
+{
+    return xz_audio_heap_malloc((rt_size_t)size);
+}
+
+void opus_heap_free(void *ptr)
+{
+    xz_audio_heap_free(ptr);
+}
+
 static void xz_audio_safe_close(audio_client_t *client, const char *tag)
 {
     audio_client_t handle;

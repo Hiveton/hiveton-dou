@@ -25,6 +25,7 @@
 
 #include <webclient.h>
 #include <cJSON.h>
+#include "audio_mem.h"
 #include "bt_env.h"
 #include "./iot/iot_c_api.h"
 #include "./mcp/mcp_api.h"
@@ -122,7 +123,7 @@ void my_mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len)
     }
 
     /* allocate buffer for incoming payload */
-    buf->buf = rt_malloc(tot_len);
+    buf->buf = audio_mem_malloc(tot_len);
     RT_ASSERT(buf->buf);
     buf->total_len = tot_len;
     buf->used_len = 0;
@@ -159,7 +160,7 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
     rt_kputs("\r\n");
     root = cJSON_Parse(buf->buf); /*json_data 为MQTT的原始数据*/
     rt_kprintf("buf range: %p~%p\n", buf->buf, buf->buf + buf->total_len);
-    rt_free(buf->buf);
+    audio_mem_free(buf->buf);
     buf->buf = NULL;
     topic_buf_pool->rd_idx = (topic_buf_pool->rd_idx + 1) & 1;
     if (!root)

@@ -2322,21 +2322,6 @@ void ui_helpers_init(void)
         lv_timer_set_repeat_count(s_status_panel.toast_timer, 1);
         lv_timer_pause(s_status_panel.toast_timer);
     }
-    if (!s_status_bar_refresh_thread_started)
-    {
-        if (rt_thread_init(&s_status_bar_refresh_thread,
-                           "ui_status",
-                           ui_status_bar_refresh_thread_entry,
-                           RT_NULL,
-                           s_status_bar_refresh_thread_stack,
-                           sizeof(s_status_bar_refresh_thread_stack),
-                           UI_STATUS_BAR_REFRESH_THREAD_PRIORITY,
-                           UI_STATUS_BAR_REFRESH_THREAD_TICK) == RT_EOK)
-        {
-            rt_thread_startup(&s_status_bar_refresh_thread);
-            s_status_bar_refresh_thread_started = true;
-        }
-    }
     ui_status_bar_refresh_datetime();
     s_ui_helpers_initialized = true;
 }
