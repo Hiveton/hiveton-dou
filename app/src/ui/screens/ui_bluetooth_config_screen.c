@@ -16,9 +16,9 @@ typedef struct
     lv_obj_t *bt_connected_value;
     lv_obj_t *link_value;
     lv_obj_t *fourg_value;
+    lv_obj_t *mode_value;
     lv_obj_t *device_name_value;
-    lv_obj_t *toggle_bt_button;
-    lv_obj_t *switch_4g_button;
+    lv_obj_t *mode_button;
     lv_obj_t *preset_buttons[3];
 } ui_bluetooth_config_refs_t;
 
@@ -82,6 +82,22 @@ static const char *ui_bt_cfg_get_4g_text(bool enabled)
     return ui_bt_cfg_pick("关闭", "Disabled");
 }
 
+static const char *ui_bt_cfg_get_mode_text(void)
+{
+    switch (net_manager_get_desired_mode())
+    {
+    case NET_MANAGER_MODE_BT:
+        return ui_bt_cfg_pick("蓝牙模式", "Bluetooth mode");
+    case NET_MANAGER_MODE_4G:
+        return ui_bt_cfg_pick("4G模式", "4G mode");
+    case NET_MANAGER_MODE_SLEEP:
+        return ui_bt_cfg_pick("休眠中", "Sleeping");
+    case NET_MANAGER_MODE_NONE:
+    default:
+        return ui_bt_cfg_pick("未启用", "Disabled");
+    }
+}
+
 static const char *ui_bt_cfg_get_selected_name(void)
 {
     if (s_selected_name_index < 0 || s_selected_name_index >= (int)(sizeof(s_name_presets) / sizeof(s_name_presets[0])))
@@ -131,14 +147,18 @@ static void ui_bt_cfg_refresh(void)
         lv_label_set_text(s_refs.fourg_value, ui_bt_cfg_get_4g_text(net_manager_4g_enabled()));
     }
 
+    if (s_refs.mode_value != NULL)
+    {
+        lv_label_set_text(s_refs.mode_value, ui_bt_cfg_get_mode_text());
+    }
+
     if (s_refs.device_name_value != NULL)
     {
         rt_snprintf(text, sizeof(text), "%s%s", ui_bt_cfg_pick("当前：", "Current: "), selected_name);
         lv_label_set_text(s_refs.device_name_value, text);
     }
 
-    ui_bt_cfg_set_button_selected(s_refs.toggle_bt_button, net_manager_bt_enabled());
-    ui_bt_cfg_set_button_selected(s_refs.switch_4g_button, net_manager_4g_enabled());
+    ui_bt_cfg_set_button_selected(s_refs.mode_button, false);
     for (int i = 0; i < 3; ++i)
     {
         ui_bt_cfg_set_button_selected(s_refs.preset_buttons[i], i == s_selected_name_index);
@@ -157,29 +177,6 @@ static void ui_bt_cfg_apply_preset(int index)
     s_selected_name_index = index;
     name = s_name_presets[index];
     bt_interface_set_local_name((int)strlen(name), (void *)name);
-    ui_bt_cfg_refresh();
-}
-
-static void ui_bt_cfg_action_event_cb(lv_event_t *e)
-{
-    intptr_t action = (intptr_t)lv_event_get_user_data(e);
-
-    if (action == 0)
-    {
-        if (net_manager_bt_enabled())
-        {
-            net_manager_request_4g_mode();
-        }
-        else
-        {
-            net_manager_request_bt_mode();
-        }
-    }
-    else if (action == 1)
-    {
-        net_manager_request_4g_mode();
-    }
-
     ui_bt_cfg_refresh();
 }
 
@@ -275,7 +272,7 @@ void ui_Bluetooth_Config_screen_init(void)
 
     action_card = ui_create_card(scaffold.content, 24, 188, 480, 136, UI_SCREEN_NONE, false, 0);
     ui_create_label(action_card,
-                    ui_bt_cfg_pick("互斥切换", "Mutual switch"),
+                    ui_bt_cfg_pick("网络模式", "Network Mode"),
                     20,
                     16,
                     260,
@@ -284,30 +281,23 @@ void ui_Bluetooth_Config_screen_init(void)
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     false);
-    s_refs.toggle_bt_button = ui_create_button(action_card,
-                                               20,
-                                               54,
-                                               210,
-                                               46,
-                                               ui_bt_cfg_pick("切换蓝牙", "Toggle Bluetooth"),
-                                               21,
-                                               UI_SCREEN_NONE,
-                                               true);
-    lv_obj_add_event_cb(s_refs.toggle_bt_button, ui_bt_cfg_action_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)0);
-    s_refs.switch_4g_button = ui_create_button(action_card,
-                                               250,
-                                               54,
-                                               210,
-                                               46,
-                                               ui_bt_cfg_pick("切到4G", "Switch to 4G"),
-                                               21,
-                                               UI_SCREEN_NONE,
-                                               false);
-    lv_obj_add_event_cb(s_refs.switch_4g_button, ui_bt_cfg_action_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)1);
+    ui_bt_cfg_add_row(action_card,
+                      54,
+                      ui_bt_cfg_pick("当前模式", "Mode"),
+                      &s_refs.mode_value);
+    s_refs.mode_button = ui_create_button(action_card,
+                                          20,
+                                          86,
+                                          440,
+                                          34,
+                                          ui_bt_cfg_pick("前往网络模式", "Open Network Mode"),
+                                          18,
+                                          UI_SCREEN_NETWORK_MODE,
+                                          false);
     ui_create_label(action_card,
-                    ui_bt_cfg_pick("开启蓝牙会关闭4G，切到4G会关闭蓝牙。", "Turning on Bluetooth disables 4G; switching to 4G disables Bluetooth."),
+                    ui_bt_cfg_pick("蓝牙与4G互斥切换统一在网络模式页面处理。", "Bluetooth and 4G switching is handled in Network Mode."),
                     20,
-                    106,
+                    124,
                     440,
                     24,
                     17,

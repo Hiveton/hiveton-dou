@@ -24,6 +24,7 @@
 #include "gui_app_pm.h"
 #include "ui/ui.h"
 #include "ui/ui_dispatch.h"
+#include "ui/ui_font_manager.h"
 #include "ui/ui_runtime_adapter.h"
 #include "network/net_manager.h"
 #include "xiaozhi/weather/weather.h"
@@ -131,10 +132,26 @@ static void bt_app_connect_pan_timeout_handle(void *parameter)
 {
     (void)parameter;
 
-    if ((g_bt_app_mb != RT_NULL) && g_bt_app_env.bt_connected)
+    if (g_bt_app_mb != RT_NULL)
     {
         rt_mb_send(g_bt_app_mb, BT_APP_CONNECT_PAN);
     }
+}
+
+static rt_bool_t bt_app_has_paired_addr(void)
+{
+    rt_size_t i;
+
+    for (i = 0; i < sizeof(g_bt_app_env.bd_addr.addr); ++i)
+    {
+        if (g_bt_app_env.bd_addr.addr[i] != 0x00U &&
+            g_bt_app_env.bd_addr.addr[i] != 0xFFU)
+        {
+            return RT_TRUE;
+        }
+    }
+
+    return RT_FALSE;
 }
 
 static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
@@ -156,9 +173,15 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
             }
             break;
         case BT_NOTIFY_COMMON_CLOSE_COMPLETE:
+            g_bt_app_env.bt_connected = FALSE;
+            g_pan_connected = FALSE;
             net_manager_notify_bt_stack_ready(false);
             net_manager_notify_bt_acl(false);
             net_manager_notify_pan_ready(false);
+            if (g_bt_app_env.pan_connect_timer != RT_NULL)
+            {
+                rt_timer_stop(g_bt_app_env.pan_connect_timer);
+            }
             break;
         case BT_NOTIFY_COMMON_ENCRYPTION:
         {
@@ -327,7 +350,7 @@ static void tf_notify_state_changed(void)
 
 static void tf_ensure_media_dirs(const char *mount_path)
 {
-    static const char *const dir_names[] = {"record", "books", "mp3", "pic"};
+    static const char *const dir_names[] = {"record", "books", "mp3", "pic", "font", "config"};
     char path[64];
     rt_size_t i;
 
@@ -488,6 +511,7 @@ static void tf_mount_thread_entry(void *parameter)
             {
                 (void)tf_try_unmount(device_name);
             }
+            ui_font_manager_notify_storage_removed();
             rt_kprintf("tf: card removed\n");
             continue;
         }
@@ -501,6 +525,7 @@ static void tf_mount_thread_entry(void *parameter)
                 rt_kprintf("tf: found storage device %s\n", device_name);
                 if (tf_try_mount(device_name, "/") == RT_EOK)
                 {
+                    ui_font_manager_notify_storage_ready();
                     break;
                 }
             }
@@ -557,6 +582,7 @@ static void ui_thread_entry(void *parameter)
     rt_kprintf("ui: before switch home\n");
     ui_runtime_switch_to(UI_SCREEN_HOME);
     rt_kprintf("ui: after switch home\n");
+    ui_font_manager_notify_storage_ready();
     bq27220_monitor_start();
     result = net_manager_init();
     if (result != RT_EOK)
@@ -770,10 +796,15 @@ int main(void)
             bt_interface_set_local_name(strlen(s_local_bt_name),
                                         (void *)s_local_bt_name);
             rt_kprintf("bt: stack ready, name=%s\n", s_local_bt_name);
+            if (net_manager_get_desired_mode() == NET_MANAGER_MODE_BT &&
+                bt_app_has_paired_addr())
+            {
+                rt_mb_send(g_bt_app_mb, BT_APP_CONNECT_PAN);
+            }
         }
         else if (bt_event == BT_APP_CONNECT_PAN)
         {
-            if (g_bt_app_env.bt_connected)
+            if (bt_app_has_paired_addr())
             {
                 rt_kprintf("bt: connect PAN\n");
                 bt_interface_conn_ext((char *)&g_bt_app_env.bd_addr,

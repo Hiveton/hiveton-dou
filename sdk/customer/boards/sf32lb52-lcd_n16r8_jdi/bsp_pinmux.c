@@ -196,7 +196,8 @@ static void BSP_PIN_Common(void)
     HAL_PIN_Set(PAD_PA26, GPIO_A26, PIN_NOPULL, 1);
     HAL_PIN_Set(PAD_PA32, GPIO_A32, PIN_PULLDOWN, 1);   // RGB LED
     HAL_PIN_Set(PAD_PA38, GPIO_A38, PIN_PULLDOWN, 1);
-    HAL_PIN_Set(PAD_PA44, GPIO_A44, PIN_PULLDOWN, 1);   // VBUS_DET
+    // Reserved for app hardkey T on custom board
+    // HAL_PIN_Set(PAD_PA44, GPIO_A44, PIN_PULLDOWN, 1);   // VBUS_DET
 #endif
 
 }
@@ -225,7 +226,8 @@ void BSP_PIN_LCD(void)
     HAL_PIN_Set(PAD_PA40, LCDC1_JDI_XRST, PIN_NOPULL, 1);
     HAL_PIN_Set(PAD_PA41, LCDC1_JDI_HCK, PIN_NOPULL, 1);
     HAL_PIN_Set(PAD_PA42, LCDC1_JDI_R2, PIN_NOPULL, 1);
-    HAL_PIN_Set(PAD_PA43, LCDC1_JDI_G2, PIN_NOPULL, 1);
+    // Reserved for app hardkey B on custom board
+    // HAL_PIN_Set(PAD_PA43, LCDC1_JDI_G2, PIN_NOPULL, 1);
 
     HAL_PIN_Set(PAD_PA24, PBR_LPTIM2_OUT, PIN_NOPULL, 1);  //FRP
     HAL_PIN_Set(PAD_PA25, PBR_LPTIM2_INV_OUT, PIN_NOPULL, 1);  //XFRP
@@ -244,4 +246,3 @@ void BSP_PIN_Init(void)
     BSP_PIN_LCD();
 
 }
-

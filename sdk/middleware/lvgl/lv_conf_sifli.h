@@ -11,6 +11,22 @@
 
 #include "rtconfig.h"
 
+#ifndef CONFIG_LV_USE_TINY_TTF
+#define CONFIG_LV_USE_TINY_TTF 1
+#endif
+
+#ifndef CONFIG_LV_USE_FS_POSIX
+#define CONFIG_LV_USE_FS_POSIX 1
+#endif
+
+#ifndef CONFIG_LV_FS_POSIX_LETTER
+#define CONFIG_LV_FS_POSIX_LETTER 65
+#endif
+
+#ifndef CONFIG_LV_TINY_TTF_FILE_SUPPORT
+#define CONFIG_LV_TINY_TTF_FILE_SUPPORT 1
+#endif
+
 #include "lv_conf_kconfig_remap_v9.h"
 #include "lv_conf_kconfig_remap_v8.h"
 

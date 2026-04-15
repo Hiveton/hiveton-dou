@@ -2,13 +2,14 @@
 #include "ui_i18n.h"
 #include "ui_helpers.h"
 #include "ui_runtime_adapter.h"
+#include "network/net_manager.h"
 #include "rtthread.h"
 
 #include <stdint.h>
 
 lv_obj_t *ui_Settings = NULL;
 
-#define UI_SETTINGS_VISIBLE_COUNT 4U
+#define UI_SETTINGS_VISIBLE_COUNT 5U
 
 typedef struct
 {
@@ -67,6 +68,30 @@ static const char *ui_settings_language_card_title(void)
     case UI_SETTINGS_LANGUAGE_ZH_CN:
     default:
         return "语言";
+    }
+}
+
+static const char *ui_settings_font_card_title(void)
+{
+    switch (s_language)
+    {
+    case UI_SETTINGS_LANGUAGE_EN_US:
+        return "Font";
+    case UI_SETTINGS_LANGUAGE_ZH_CN:
+    default:
+        return "字体设置";
+    }
+}
+
+static const char *ui_settings_font_card_summary(void)
+{
+    switch (s_language)
+    {
+    case UI_SETTINGS_LANGUAGE_EN_US:
+        return "Choose system font or TF card TTF fonts";
+    case UI_SETTINGS_LANGUAGE_ZH_CN:
+    default:
+        return "选择系统字体或 TF 卡 TTF 字体";
     }
 }
 
@@ -169,14 +194,33 @@ static const char *ui_settings_language_card_summary(void)
     return ui_settings_get_language_label();
 }
 
+static const char *ui_settings_network_mode_card_title(void)
+{
+    return ui_i18n_pick("网络模式", "Network Mode");
+}
+
+static const char *ui_settings_network_mode_card_summary(void)
+{
+    switch (net_manager_get_desired_mode())
+    {
+    case NET_MANAGER_MODE_BT:
+        return ui_i18n_pick("当前：蓝牙模式", "Current: Bluetooth");
+    case NET_MANAGER_MODE_4G:
+    default:
+        return ui_i18n_pick("当前：4G模式", "Current: 4G");
+    }
+}
+
 static const ui_settings_item_t s_settings_items[] = {
     {ui_settings_brightness_card_title, ui_settings_brightness_card_summary, UI_SCREEN_BRIGHTNESS},
     {ui_settings_language_card_title, ui_settings_language_card_summary, UI_SCREEN_LANGUAGE},
+    {ui_settings_network_mode_card_title, ui_settings_network_mode_card_summary, UI_SCREEN_NETWORK_MODE},
+    {ui_settings_font_card_title, ui_settings_font_card_summary, UI_SCREEN_FONT_SETTINGS},
     {ui_settings_wallpaper_card_title, ui_settings_wallpaper_card_summary, UI_SCREEN_WALLPAPER},
     {ui_settings_bluetooth_config_card_title, ui_settings_bluetooth_config_card_summary, UI_SCREEN_BLUETOOTH_CONFIG},
 };
 
-static const int s_settings_card_y_positions[UI_SETTINGS_VISIBLE_COUNT] = {0, 108, 216, 324};
+static const int s_settings_card_y_positions[UI_SETTINGS_VISIBLE_COUNT] = {0, 108, 216, 324, 432};
 
 static void ui_settings_set_button_enabled(lv_obj_t *button, bool enabled)
 {

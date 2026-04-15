@@ -21,6 +21,7 @@ void ui_dispatch_request_back(void);
 void ui_dispatch_request_hardkey_up(void);
 void ui_dispatch_request_hardkey_down(void);
 void ui_dispatch_request_poweroff_confirm(void);
+void ui_dispatch_request_font_refresh(void);
 void ui_dispatch_request_screen_switch(ui_screen_id_t screen_id);
 
 void ui_dispatch_set_active_screen(ui_screen_id_t screen_id);

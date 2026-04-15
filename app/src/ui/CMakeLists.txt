@@ -16,7 +16,9 @@ SET(SOURCES screens/ui_home_screen.c
     screens/ui_settings_screen.c
     screens/ui_brightness_screen.c
     screens/ui_language_screen.c
+    screens/ui_font_settings_screen.c
     screens/ui_bluetooth_config_screen.c
+    screens/ui_network_mode_screen.c
     screens/ui_wallpaper_screen.c
     home_screen.c
     ui.c

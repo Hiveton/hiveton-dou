@@ -3,12 +3,16 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "audio_server.h"
+#include "audio_mem.h"
 #include "lv_tiny_ttf.h"
 #include "rtdevice.h"
 #include "rtthread.h"
 #include "sleep_manager.h"
+#include "ui_font_manager.h"
 #include "ui_i18n.h"
 #include "ui_status_bar.h"
 #include "ui_dispatch.h"
@@ -71,6 +75,9 @@ typedef struct
 {
     uint16_t size;
     lv_font_t *font;
+    void *font_data;
+    size_t font_data_size;
+    bool is_freetype;
 } ui_font_cache_entry_t;
 
 typedef struct
@@ -153,12 +160,15 @@ typedef struct
     char network_detail[16];
 } ui_status_bar_snapshot_t;
 
-static ui_font_cache_entry_t s_font_cache[20];
+static ui_font_cache_entry_t s_builtin_font_cache[20];
+static ui_font_cache_entry_t s_file_font_cache[20];
+static char s_file_font_cache_path[UI_FONT_MANAGER_PATH_MAX];
 static ui_screen_refs_entry_t s_screen_refs[UI_SCREEN_COUNT];
 static bool s_ui_helpers_initialized = false;
 static lv_coord_t s_screen_width = UI_FIGMA_WIDTH;
 static lv_coord_t s_screen_height = UI_FIGMA_HEIGHT;
 static const size_t UI_TINY_TTF_GLYPH_CACHE_COUNT = 32U;
+static const size_t UI_TINY_TTF_FILE_GLYPH_CACHE_COUNT = 16U;
 static ui_status_panel_state_t s_status_panel = {0};
 static struct rt_thread s_status_bar_refresh_thread;
 static rt_uint8_t s_status_bar_refresh_thread_stack[UI_STATUS_BAR_REFRESH_THREAD_STACK_SIZE];
@@ -210,6 +220,7 @@ static void ui_status_capture_snapshot(ui_status_bar_snapshot_t *snapshot);
 static bool ui_status_snapshot_equal(const ui_status_bar_snapshot_t *lhs,
                                      const ui_status_bar_snapshot_t *rhs);
 static void ui_status_panel_toggle_event_cb(lv_event_t *e);
+static bool ui_font_cache_make_lvgl_fs_path(const char *font_path, char *buffer, size_t buffer_size);
 
 static void ui_status_panel_toggle_event_bridge(lv_event_t *e)
 {
@@ -473,6 +484,7 @@ static lv_font_t *ui_font_cache_get(ui_font_cache_entry_t *cache,
                                                        LV_FONT_KERNING_NORMAL,
                                                        UI_TINY_TTF_GLYPH_CACHE_COUNT);
             cache[i].size = actual_size;
+            cache[i].is_freetype = false;
             if (cache[i].font != NULL)
             {
                 return cache[i].font;
@@ -506,6 +518,218 @@ static lv_font_t *ui_font_cache_get(ui_font_cache_entry_t *cache,
     }
 
     return NULL;
+}
+
+static void ui_font_cache_destroy_entry(ui_font_cache_entry_t *entry)
+{
+    if (entry == NULL)
+    {
+        return;
+    }
+
+    if (entry->font != NULL)
+    {
+        if (entry->is_freetype)
+        {
+            lv_tiny_ttf_destroy(entry->font);
+        }
+        else
+        {
+            lv_tiny_ttf_destroy(entry->font);
+        }
+        entry->font = NULL;
+    }
+
+    if (entry->font_data != NULL)
+    {
+        audio_mem_free(entry->font_data);
+        entry->font_data = NULL;
+    }
+
+    entry->font_data_size = 0U;
+    entry->size = 0U;
+    entry->is_freetype = false;
+}
+
+static bool ui_font_cache_load_file(const char *path, void **buffer, size_t *size)
+{
+    int fd;
+    off_t file_size;
+    ssize_t read_size;
+    void *data;
+
+    if (buffer == NULL || size == NULL)
+    {
+        return false;
+    }
+
+    *buffer = NULL;
+    *size = 0U;
+
+    if (path == NULL || path[0] == '\0')
+    {
+        return false;
+    }
+
+    fd = open(path, O_RDONLY, 0);
+    if (fd < 0)
+    {
+        return false;
+    }
+
+    file_size = lseek(fd, 0, SEEK_END);
+    if (file_size <= 0)
+    {
+        close(fd);
+        return false;
+    }
+
+    if (lseek(fd, 0, SEEK_SET) < 0)
+    {
+        close(fd);
+        return false;
+    }
+
+    data = audio_mem_malloc((uint32_t)file_size);
+    if (data == NULL)
+    {
+        close(fd);
+        rt_kprintf("font_mgr: file font alloc failed %s size=%ld\n",
+                   path,
+                   (long)file_size);
+        return false;
+    }
+
+    read_size = read(fd, data, (size_t)file_size);
+    close(fd);
+    if (read_size != file_size)
+    {
+        audio_mem_free(data);
+        rt_kprintf("font_mgr: file font read failed %s read=%ld size=%ld\n",
+                   path,
+                   (long)read_size,
+                   (long)file_size);
+        return false;
+    }
+
+    *buffer = data;
+    *size = (size_t)file_size;
+    return true;
+}
+
+static lv_font_t *ui_font_cache_get_file(ui_font_cache_entry_t *cache,
+                                         size_t cache_count,
+                                         const char *font_path,
+                                         uint16_t actual_size)
+{
+    void *font_data = NULL;
+    size_t font_data_size = 0U;
+    char lvgl_font_path[UI_FONT_MANAGER_PATH_MAX + 8];
+    size_t i;
+
+    if (font_path == NULL || font_path[0] == '\0')
+    {
+        return NULL;
+    }
+
+    if (strcmp(s_file_font_cache_path, font_path) != 0)
+    {
+        for (i = 0; i < sizeof(s_file_font_cache) / sizeof(s_file_font_cache[0]); ++i)
+        {
+            ui_font_cache_destroy_entry(&s_file_font_cache[i]);
+        }
+        rt_strncpy(s_file_font_cache_path, font_path, sizeof(s_file_font_cache_path) - 1U);
+        s_file_font_cache_path[sizeof(s_file_font_cache_path) - 1U] = '\0';
+    }
+
+    for (i = 0; i < cache_count; ++i)
+    {
+        if (cache[i].font != NULL && cache[i].size == actual_size)
+        {
+            return cache[i].font;
+        }
+    }
+
+    for (i = 0; i < cache_count; ++i)
+    {
+        if (cache[i].font == NULL)
+        {
+            if (ui_font_cache_make_lvgl_fs_path(font_path, lvgl_font_path, sizeof(lvgl_font_path)))
+            {
+                cache[i].font = lv_tiny_ttf_create_file_ex(lvgl_font_path,
+                                                           actual_size,
+                                                           LV_FONT_KERNING_NORMAL,
+                                                           UI_TINY_TTF_FILE_GLYPH_CACHE_COUNT);
+                cache[i].size = actual_size;
+                cache[i].is_freetype = false;
+
+                if (cache[i].font != NULL)
+                {
+                    cache[i].font_data = NULL;
+                    cache[i].font_data_size = 0U;
+                    rt_kprintf("font_mgr: file font active %s size=%u backend=file\n",
+                               font_path,
+                               actual_size);
+                    return cache[i].font;
+                }
+            }
+
+            if (!ui_font_cache_load_file(font_path, &font_data, &font_data_size))
+            {
+                rt_kprintf("font_mgr: file font load failed %s size=%u\n",
+                           font_path,
+                           actual_size);
+                break;
+            }
+
+            cache[i].font = lv_tiny_ttf_create_data_ex(font_data,
+                                                       font_data_size,
+                                                       actual_size,
+                                                       LV_FONT_KERNING_NORMAL,
+                                                       UI_TINY_TTF_FILE_GLYPH_CACHE_COUNT);
+            cache[i].size = actual_size;
+            cache[i].is_freetype = false;
+
+            if (cache[i].font != NULL)
+            {
+                cache[i].font_data = font_data;
+                cache[i].font_data_size = font_data_size;
+                rt_kprintf("font_mgr: file font active %s size=%u backend=data\n",
+                           font_path,
+                           actual_size);
+                return cache[i].font;
+            }
+            rt_kprintf("font_mgr: file font create failed %s size=%u\n",
+                       font_path,
+                       actual_size);
+            if (font_data != NULL)
+            {
+                audio_mem_free(font_data);
+            }
+            break;
+        }
+    }
+
+    return NULL;
+}
+
+static bool ui_font_cache_make_lvgl_fs_path(const char *font_path, char *buffer, size_t buffer_size)
+{
+    if (font_path == NULL || font_path[0] == '\0' || buffer == NULL || buffer_size < 5U)
+    {
+        return false;
+    }
+
+    if (font_path[0] == '/')
+    {
+        rt_snprintf(buffer, buffer_size, "A:%s", font_path);
+    }
+    else
+    {
+        rt_snprintf(buffer, buffer_size, "A:/%s", font_path);
+    }
+
+    return true;
 }
 
 static void ui_register_screen_refs(lv_obj_t *screen,
@@ -2301,7 +2525,9 @@ void ui_helpers_init(void)
         return;
     }
 
-    memset(s_font_cache, 0, sizeof(s_font_cache));
+    memset(s_builtin_font_cache, 0, sizeof(s_builtin_font_cache));
+    memset(s_file_font_cache, 0, sizeof(s_file_font_cache));
+    s_file_font_cache_path[0] = '\0';
     memset(s_screen_refs, 0, sizeof(s_screen_refs));
     memset(&s_status_panel, 0, sizeof(s_status_panel));
     s_ui_nav_last_tick = 0;
@@ -2322,6 +2548,7 @@ void ui_helpers_init(void)
         lv_timer_set_repeat_count(s_status_panel.toast_timer, 1);
         lv_timer_pause(s_status_panel.toast_timer);
     }
+    ui_font_manager_init();
     ui_status_bar_refresh_datetime();
     s_ui_helpers_initialized = true;
 }
@@ -2359,6 +2586,7 @@ void ui_helpers_deinit(void)
     s_status_pending_battery_percent = -1;
     s_status_applied_battery_percent = -1;
     memset(&s_status_bar_snapshot, 0, sizeof(s_status_bar_snapshot));
+    ui_font_manager_deinit();
     s_ui_helpers_initialized = false;
 }
 
@@ -2366,15 +2594,17 @@ void ui_helpers_reset_font_cache(void)
 {
     size_t i;
 
-    for (i = 0; i < sizeof(s_font_cache) / sizeof(s_font_cache[0]); ++i)
+    for (i = 0; i < sizeof(s_builtin_font_cache) / sizeof(s_builtin_font_cache[0]); ++i)
     {
-        if (s_font_cache[i].font != NULL)
-        {
-            lv_tiny_ttf_destroy(s_font_cache[i].font);
-            s_font_cache[i].font = NULL;
-            s_font_cache[i].size = 0;
-        }
+        ui_font_cache_destroy_entry(&s_builtin_font_cache[i]);
     }
+
+    for (i = 0; i < sizeof(s_file_font_cache) / sizeof(s_file_font_cache[0]); ++i)
+    {
+        ui_font_cache_destroy_entry(&s_file_font_cache[i]);
+    }
+
+    s_file_font_cache_path[0] = '\0';
 }
 
 lv_coord_t ui_px_x(int32_t value)
@@ -2405,10 +2635,23 @@ uint16_t ui_scaled_font_size(uint16_t figma_size)
 lv_font_t *ui_font_get_actual(uint16_t actual_size)
 {
     lv_font_t *font;
+    char font_path[UI_FONT_MANAGER_PATH_MAX];
 
     ui_helpers_init();
-    font = ui_font_cache_get(s_font_cache,
-                             sizeof(s_font_cache) / sizeof(s_font_cache[0]),
+    if (ui_font_manager_get_active_font_path(font_path, sizeof(font_path)))
+    {
+        font = ui_font_cache_get_file(s_file_font_cache,
+                                      sizeof(s_file_font_cache) / sizeof(s_file_font_cache[0]),
+                                      font_path,
+                                      actual_size);
+        if (font != NULL)
+        {
+            return font;
+        }
+    }
+
+    font = ui_font_cache_get(s_builtin_font_cache,
+                             sizeof(s_builtin_font_cache) / sizeof(s_builtin_font_cache[0]),
                              xiaozhi_font,
                              (size_t)xiaozhi_font_size,
                              actual_size);
@@ -2821,6 +3064,11 @@ void ui_refresh_global_status_bar(void)
 void ui_force_refresh_global_status_bar(void)
 {
     ui_status_bar_component_force_refresh();
+}
+
+void ui_rebuild_fonts_for_current_theme(void)
+{
+    ui_helpers_reset_font_cache();
 }
 
 void xiaozhi_ui_update_brightness(int brightness)

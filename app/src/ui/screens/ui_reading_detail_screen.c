@@ -13,6 +13,7 @@
 #include "reading_epub.h"
 #include "ui.h"
 #include "ui_i18n.h"
+#include "ui_font_manager.h"
 #include "ui_helpers.h"
 #include "ui_runtime_adapter.h"
 #define STBTT_malloc(x, u) ((void)(u), lv_malloc(x))
@@ -176,6 +177,8 @@ static int s_reading_detail_stb_ascent = 0;
 static int s_reading_detail_stb_descent = 0;
 static int s_reading_detail_stb_line_gap = 0;
 static uint8_t s_reading_detail_glyph_scratch[UI_READING_DETAIL_BITMAP_GLYPH_SCRATCH_BYTES];
+static uint8_t *s_reading_detail_external_font_data = NULL;
+static size_t s_reading_detail_external_font_size = 0U;
 static ui_reading_detail_text_source_type_t s_reading_detail_text_source = UI_READING_DETAIL_TEXT_SOURCE_NONE;
 static int s_reading_detail_text_fd = -1;
 static uint32_t s_reading_detail_text_length = 0U;
@@ -221,6 +224,94 @@ static void ui_reading_detail_refresh_file_name_label(void)
 
 extern const unsigned char xiaozhi_font[];
 extern const int xiaozhi_font_size;
+
+static const uint8_t *ui_reading_detail_get_font_blob(size_t *font_size)
+{
+    char font_path[UI_FONT_MANAGER_PATH_MAX];
+    int fd;
+    off_t file_size;
+    ssize_t read_len;
+
+    if (font_size != NULL)
+    {
+        *font_size = 0U;
+    }
+
+    if (!ui_font_manager_get_active_font_path(font_path, sizeof(font_path)))
+    {
+        if (font_size != NULL)
+        {
+            *font_size = (size_t)xiaozhi_font_size;
+        }
+        return xiaozhi_font;
+    }
+
+    if (s_reading_detail_external_font_data != NULL)
+    {
+        if (font_size != NULL)
+        {
+            *font_size = s_reading_detail_external_font_size;
+        }
+        return s_reading_detail_external_font_data;
+    }
+
+    fd = open(font_path, O_RDONLY, 0);
+    if (fd < 0)
+    {
+        rt_kprintf("reading_detail: open font failed %s\n", font_path);
+        if (font_size != NULL)
+        {
+            *font_size = (size_t)xiaozhi_font_size;
+        }
+        return xiaozhi_font;
+    }
+
+    file_size = lseek(fd, 0, SEEK_END);
+    if (file_size <= 0)
+    {
+        close(fd);
+        if (font_size != NULL)
+        {
+            *font_size = (size_t)xiaozhi_font_size;
+        }
+        return xiaozhi_font;
+    }
+
+    (void)lseek(fd, 0, SEEK_SET);
+    s_reading_detail_external_font_data = (uint8_t *)audio_mem_malloc((uint32_t)file_size);
+    if (s_reading_detail_external_font_data == NULL)
+    {
+        close(fd);
+        rt_kprintf("reading_detail: alloc font failed size=%ld\n", (long)file_size);
+        if (font_size != NULL)
+        {
+            *font_size = (size_t)xiaozhi_font_size;
+        }
+        return xiaozhi_font;
+    }
+
+    read_len = read(fd, s_reading_detail_external_font_data, (size_t)file_size);
+    close(fd);
+    if (read_len != file_size)
+    {
+        audio_mem_free(s_reading_detail_external_font_data);
+        s_reading_detail_external_font_data = NULL;
+        s_reading_detail_external_font_size = 0U;
+        rt_kprintf("reading_detail: read font failed %s\n", font_path);
+        if (font_size != NULL)
+        {
+            *font_size = (size_t)xiaozhi_font_size;
+        }
+        return xiaozhi_font;
+    }
+
+    s_reading_detail_external_font_size = (size_t)file_size;
+    if (font_size != NULL)
+    {
+        *font_size = s_reading_detail_external_font_size;
+    }
+    return s_reading_detail_external_font_data;
+}
 
 static uint32_t ui_reading_detail_now_ms(void)
 {
@@ -473,15 +564,24 @@ static uint16_t ui_reading_detail_get_max_lines_for_height(lv_coord_t text_heigh
 static bool ui_reading_detail_init_stb_font(void)
 {
     int font_px;
+    const uint8_t *font_blob;
+    size_t font_size;
 
     if (s_reading_detail_stb_ready)
     {
         return true;
     }
 
+    font_blob = ui_reading_detail_get_font_blob(&font_size);
+    if (font_blob == NULL || font_size == 0U)
+    {
+        rt_kprintf("reading_detail: no font blob\n");
+        return false;
+    }
+
     if (!stbtt_InitFont(&s_reading_detail_stb_info,
-                        xiaozhi_font,
-                        stbtt_GetFontOffsetForIndex(xiaozhi_font, 0)))
+                        font_blob,
+                        stbtt_GetFontOffsetForIndex(font_blob, 0)))
     {
         rt_kprintf("reading_detail: stb init failed\n");
         return false;
@@ -2949,6 +3049,12 @@ void ui_Reading_Detail_screen_destroy(void)
     {
         audio_mem_free(s_reading_detail_bitmap_buffer);
         s_reading_detail_bitmap_buffer = NULL;
+    }
+    if (s_reading_detail_external_font_data != NULL)
+    {
+        audio_mem_free(s_reading_detail_external_font_data);
+        s_reading_detail_external_font_data = NULL;
+        s_reading_detail_external_font_size = 0U;
     }
     ui_reading_detail_release_current_image();
     memset(&s_reading_detail_bitmap_dsc, 0, sizeof(s_reading_detail_bitmap_dsc));

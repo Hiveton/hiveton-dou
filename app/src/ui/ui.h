@@ -34,7 +34,9 @@ extern lv_obj_t *ui_Music_Player;
 extern lv_obj_t *ui_Settings;
 extern lv_obj_t *ui_Brightness;
 extern lv_obj_t *ui_Language;
+extern lv_obj_t *ui_Font_Settings;
 extern lv_obj_t *ui_Bluetooth_Config;
+extern lv_obj_t *ui_Network_Mode;
 extern lv_obj_t *ui_Wallpaper;
 
 typedef enum
@@ -109,8 +111,16 @@ void ui_Brightness_screen_init(void);
 void ui_Brightness_screen_destroy(void);
 void ui_Language_screen_init(void);
 void ui_Language_screen_destroy(void);
+void ui_Font_Settings_screen_init(void);
+void ui_Font_Settings_screen_destroy(void);
+void ui_font_settings_hardware_prev_page(void);
+void ui_font_settings_hardware_next_page(void);
 void ui_Bluetooth_Config_screen_init(void);
 void ui_Bluetooth_Config_screen_destroy(void);
+void ui_Network_Mode_screen_init(void);
+void ui_Network_Mode_screen_destroy(void);
+void ui_network_mode_hardware_prev_option(void);
+void ui_network_mode_hardware_next_option(void);
 void ui_Wallpaper_screen_init(void);
 void ui_Wallpaper_screen_destroy(void);
 

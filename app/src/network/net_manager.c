@@ -1,5 +1,8 @@
 #include "network/net_manager.h"
 
+#include <dfs_posix.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <string.h>
 
 #include "ui/ui_dispatch.h"
@@ -14,6 +17,8 @@
 #define NET_MANAGER_THREAD_TICK       10
 
 #define NET_MANAGER_EVENT_REFRESH     (1U << 0)
+#define NET_MANAGER_CONFIG_DIR_NAME   "config"
+#define NET_MANAGER_CONFIG_FILE_NAME  "network_mode.cfg"
 
 static struct rt_thread s_net_manager_thread;
 static rt_uint8_t s_net_manager_stack[NET_MANAGER_THREAD_STACK_SIZE];
@@ -36,6 +41,142 @@ static volatile rt_uint8_t s_radios_suspended = 0U;
 static rt_uint8_t s_network_ready = 0U;
 static rt_uint8_t s_dns_ready = 0U;
 static rt_uint8_t s_internet_ready = 0U;
+
+static void net_manager_apply_desired_mode_locked(void);
+
+static const char *const s_net_manager_config_dir_candidates[] = {
+    "/config",
+    "/tf/config",
+    "/sd/config",
+    "/sd0/config",
+    "config",
+};
+
+static bool net_manager_dir_exists(const char *path)
+{
+    struct stat info;
+
+    if (path == RT_NULL)
+    {
+        return false;
+    }
+
+    if (stat(path, &info) != 0)
+    {
+        return false;
+    }
+
+    return (info.st_mode & S_IFDIR) != 0;
+}
+
+static bool net_manager_build_config_path(char *buffer, size_t buffer_size, bool ensure_dir)
+{
+    rt_size_t i;
+    const char *config_dir = RT_NULL;
+
+    if (buffer == RT_NULL || buffer_size == 0U)
+    {
+        return false;
+    }
+
+    for (i = 0; i < sizeof(s_net_manager_config_dir_candidates) / sizeof(s_net_manager_config_dir_candidates[0]); ++i)
+    {
+        if (net_manager_dir_exists(s_net_manager_config_dir_candidates[i]))
+        {
+            config_dir = s_net_manager_config_dir_candidates[i];
+            break;
+        }
+    }
+
+    if (config_dir == RT_NULL)
+    {
+        if (!ensure_dir)
+        {
+            buffer[0] = '\0';
+            return false;
+        }
+
+        mkdir("/" NET_MANAGER_CONFIG_DIR_NAME, 0);
+        config_dir = "/" NET_MANAGER_CONFIG_DIR_NAME;
+    }
+
+    rt_snprintf(buffer, buffer_size, "%s/%s", config_dir, NET_MANAGER_CONFIG_FILE_NAME);
+    return true;
+}
+
+static void net_manager_save_mode_config(net_manager_mode_t mode)
+{
+    int fd;
+    char config_path[64];
+    const char *value = NULL;
+
+    if (mode == NET_MANAGER_MODE_BT)
+    {
+        value = "bt\n";
+    }
+    else if (mode == NET_MANAGER_MODE_4G)
+    {
+        value = "4g\n";
+    }
+    else
+    {
+        return;
+    }
+
+    if (!net_manager_build_config_path(config_path, sizeof(config_path), true))
+    {
+        return;
+    }
+
+    fd = open(config_path, O_WRONLY | O_CREAT | O_TRUNC, 0);
+    if (fd < 0)
+    {
+        return;
+    }
+
+    (void)write(fd, value, rt_strlen(value));
+    close(fd);
+}
+
+static void net_manager_load_mode_config(void)
+{
+    int fd;
+    int length;
+    char buffer[16];
+    char config_path[64];
+
+    if (!net_manager_build_config_path(config_path, sizeof(config_path), false))
+    {
+        return;
+    }
+
+    fd = open(config_path, O_RDONLY, 0);
+    if (fd < 0)
+    {
+        return;
+    }
+
+    length = read(fd, buffer, sizeof(buffer) - 1);
+    close(fd);
+    if (length <= 0)
+    {
+        return;
+    }
+
+    buffer[length] = '\0';
+    if (rt_strncmp(buffer, "bt", 2) == 0)
+    {
+        s_desired_mode = NET_MANAGER_MODE_BT;
+        s_saved_mode_before_sleep = NET_MANAGER_MODE_BT;
+    }
+    else if (rt_strncmp(buffer, "4g", 2) == 0)
+    {
+        s_desired_mode = NET_MANAGER_MODE_4G;
+        s_saved_mode_before_sleep = NET_MANAGER_MODE_4G;
+    }
+
+    net_manager_apply_desired_mode_locked();
+}
 
 static void net_manager_request_status_refresh_if_needed(net_manager_mode_t previous_desired_mode,
                                                          rt_uint8_t previous_bt_stack_ready,
@@ -279,6 +420,8 @@ rt_err_t net_manager_init(void)
         return RT_EOK;
     }
 
+    net_manager_load_mode_config();
+
     if (s_net_manager_event == RT_NULL)
     {
         s_net_manager_event = rt_event_create("netmgr", RT_IPC_FLAG_FIFO);
@@ -320,6 +463,7 @@ void net_manager_request_bt_mode(void)
     rt_uint8_t previous_4g_enabled = s_4g_enabled;
 
     s_desired_mode = NET_MANAGER_MODE_BT;
+    net_manager_save_mode_config(s_desired_mode);
     if (!s_radios_suspended)
     {
         net_manager_apply_desired_mode_locked();
@@ -343,6 +487,7 @@ void net_manager_request_4g_mode(void)
     rt_uint8_t previous_4g_enabled = s_4g_enabled;
 
     s_desired_mode = NET_MANAGER_MODE_4G;
+    net_manager_save_mode_config(s_desired_mode);
     if (!s_radios_suspended)
     {
         net_manager_apply_desired_mode_locked();

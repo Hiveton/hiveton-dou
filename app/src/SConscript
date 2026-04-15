@@ -19,6 +19,7 @@ src = [
     os.path.join(cwd, 'ui', 'ui.c'),
     os.path.join(cwd, 'ui', 'ui_i18n.c'),
     os.path.join(cwd, 'ui', 'ui_dispatch.c'),
+    os.path.join(cwd, 'ui', 'ui_font_manager.c'),
     os.path.join(cwd, 'ui', 'ui_helpers.c'),
     os.path.join(cwd, 'ui', 'ui_status_bar.c'),
     os.path.join(cwd, 'ui', 'ui_runtime_adapter.c'),

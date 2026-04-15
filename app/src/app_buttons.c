@@ -8,6 +8,7 @@
 #include "app_watchdog.h"
 #include "sleep_manager.h"
 #include "ui/ui_dispatch.h"
+#include "ui/ui_runtime_adapter.h"
 
 #define APP_BUTTON_PWR_PIN            34
 #define APP_BUTTON_B_PIN              43
@@ -16,6 +17,7 @@
 #define APP_BUTTON_LONG_PRESS_MS      1500U
 #define APP_BUTTON_THREAD_STACK_SIZE  2048U
 #define APP_BUTTON_THREAD_PRIORITY    3
+#define APP_BUTTON_HEAL_INTERVAL_MS   100U
 
 typedef enum
 {
@@ -63,6 +65,22 @@ static void app_buttons_config_pinmux(void)
     HAL_PIN_Set(PAD_PA44, GPIO_A44, PIN_PULLDOWN, 1);
 }
 
+static void app_buttons_refresh_runtime_pinmux(void)
+{
+    HAL_PIN_SetMode(PAD_PA34, 1, PIN_DIGITAL_IO_NORMAL);
+    HAL_PIN_SetMode(PAD_PA43, 1, PIN_DIGITAL_IO_NORMAL);
+    HAL_PIN_SetMode(PAD_PA44, 1, PIN_DIGITAL_IO_NORMAL);
+    HAL_PIN_Set(PAD_PA34, GPIO_A34, PIN_PULLDOWN, 1);
+    HAL_PIN_Set(PAD_PA43, GPIO_A43, PIN_PULLDOWN, 1);
+    HAL_PIN_Set(PAD_PA44, GPIO_A44, PIN_PULLDOWN, 1);
+    rt_pin_mode(APP_BUTTON_PWR_PIN, PIN_MODE_INPUT_PULLDOWN);
+    rt_pin_mode(APP_BUTTON_B_PIN, PIN_MODE_INPUT_PULLDOWN);
+    rt_pin_mode(APP_BUTTON_T_PIN, PIN_MODE_INPUT_PULLDOWN);
+    rt_pin_irq_enable(APP_BUTTON_PWR_PIN, PIN_IRQ_ENABLE);
+    rt_pin_irq_enable(APP_BUTTON_B_PIN, PIN_IRQ_ENABLE);
+    rt_pin_irq_enable(APP_BUTTON_T_PIN, PIN_IRQ_ENABLE);
+}
+
 static bool app_buttons_wakeup_only(void)
 {
     bool sleeping = sleep_manager_is_sleeping();
@@ -87,10 +105,21 @@ static void app_buttons_dispatch_short(app_key_id_t key_id)
     switch (key_id)
     {
     case APP_KEY_PWR:
-        if (!app_buttons_wakeup_only())
         {
-            rt_kprintf("app_buttons: pwr short\n");
-            ui_dispatch_request_back();
+            bool sleeping = sleep_manager_is_sleeping();
+            ui_screen_id_t active = ui_dispatch_get_active_screen();
+
+            if (sleeping || active == UI_SCREEN_STANDBY)
+            {
+                ui_dispatch_request_activity();
+                sleep_manager_request_wakeup();
+                ui_dispatch_request_exit_standby();
+            }
+            else
+            {
+                rt_kprintf("app_buttons: pwr short active=%d\n", (int)active);
+                ui_dispatch_request_back();
+            }
         }
         break;
     case APP_KEY_B:
@@ -222,7 +251,11 @@ static void app_buttons_thread_entry(void *parameter)
 
     while (1)
     {
-        rt_sem_take(&s_button_irq_sem, RT_WAITING_FOREVER);
+        if (rt_sem_take(&s_button_irq_sem, rt_tick_from_millisecond(APP_BUTTON_HEAL_INTERVAL_MS)) != RT_EOK)
+        {
+            app_buttons_refresh_runtime_pinmux();
+            continue;
+        }
 
         rt_enter_critical();
         pending = s_button_pending_mask;
@@ -232,9 +265,9 @@ static void app_buttons_thread_entry(void *parameter)
         if ((pending & APP_BUTTON_EVT_PWR_PRESS) != 0U)
         {
             app_watchdog_input_hint();
-            ui_dispatch_request_activity();
             if (sleep_manager_is_sleeping() || (ui_dispatch_get_active_screen() == UI_SCREEN_STANDBY))
             {
+                ui_dispatch_request_activity();
                 sleep_manager_request_wakeup();
                 ui_dispatch_request_exit_standby();
             }

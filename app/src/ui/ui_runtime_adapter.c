@@ -41,7 +41,9 @@ static const ui_runtime_screen_entry_t s_ui_runtime_screens[] = {
     {UI_SCREEN_SETTINGS, &ui_Settings, ui_Settings_screen_destroy, ui_Settings_screen_init},
     {UI_SCREEN_BRIGHTNESS, &ui_Brightness, ui_Brightness_screen_destroy, ui_Brightness_screen_init},
     {UI_SCREEN_LANGUAGE, &ui_Language, ui_Language_screen_destroy, ui_Language_screen_init},
+    {UI_SCREEN_FONT_SETTINGS, &ui_Font_Settings, ui_Font_Settings_screen_destroy, ui_Font_Settings_screen_init},
     {UI_SCREEN_BLUETOOTH_CONFIG, &ui_Bluetooth_Config, ui_Bluetooth_Config_screen_destroy, ui_Bluetooth_Config_screen_init},
+    {UI_SCREEN_NETWORK_MODE, &ui_Network_Mode, ui_Network_Mode_screen_destroy, ui_Network_Mode_screen_init},
     {UI_SCREEN_WALLPAPER, &ui_Wallpaper, ui_Wallpaper_screen_destroy, ui_Wallpaper_screen_init},
 };
 static bool s_ui_runtime_first_present_done = false;
@@ -68,6 +70,10 @@ extern void ui_time_manage_hardware_prev_page(void);
 extern void ui_time_manage_hardware_next_page(void);
 extern void ui_settings_hardware_prev_page(void);
 extern void ui_settings_hardware_next_page(void);
+extern void ui_font_settings_hardware_prev_page(void);
+extern void ui_font_settings_hardware_next_page(void);
+extern void ui_network_mode_hardware_prev_option(void);
+extern void ui_network_mode_hardware_next_option(void);
 extern void ui_calendar_hardware_prev_month(void);
 extern void ui_calendar_hardware_next_month(void);
 extern void ui_datetime_hardware_adjust(int direction);
@@ -518,14 +524,27 @@ void ui_runtime_reload(ui_screen_id_t target)
 
 void ui_runtime_go_back(void)
 {
-    ui_screen_id_t target = ui_runtime_back_pop();
+    ui_screen_id_t active = ui_runtime_get_active_screen_id();
+    ui_screen_id_t target;
 
-    if (ui_runtime_get_active_screen_id() == UI_SCREEN_STANDBY)
+    if (active == UI_SCREEN_STANDBY)
     {
         ui_runtime_exit_standby();
         return;
     }
 
+    target = ui_runtime_back_pop();
+    while (target == active && target != UI_SCREEN_HOME)
+    {
+        target = ui_runtime_back_pop();
+    }
+
+    if (target == active)
+    {
+        target = UI_SCREEN_HOME;
+    }
+
+    rt_kprintf("ui_back: active=%d target=%d\n", (int)active, (int)target);
     s_ui_runtime_back_suppress = true;
     ui_runtime_switch_to(target);
 }
@@ -537,7 +556,12 @@ void ui_runtime_request_back(void)
 
 void ui_runtime_handle_hardkey_nav(int direction)
 {
-    ui_screen_id_t active = ui_runtime_get_active_screen_id();
+    ui_screen_id_t active = ui_dispatch_get_active_screen();
+
+    if (active == UI_SCREEN_NONE)
+    {
+        active = ui_runtime_get_active_screen_id();
+    }
 
     if (direction == 0)
     {
@@ -630,6 +654,32 @@ void ui_runtime_handle_hardkey_nav(int direction)
         return;
     }
 
+    if (active == UI_SCREEN_FONT_SETTINGS)
+    {
+        if (direction < 0)
+        {
+            ui_font_settings_hardware_prev_page();
+        }
+        else
+        {
+            ui_font_settings_hardware_next_page();
+        }
+        return;
+    }
+
+    if (active == UI_SCREEN_NETWORK_MODE)
+    {
+        if (direction < 0)
+        {
+            ui_network_mode_hardware_prev_option();
+        }
+        else
+        {
+            ui_network_mode_hardware_next_option();
+        }
+        return;
+    }
+
     if (active == UI_SCREEN_CALENDAR)
     {
         if (direction < 0)
@@ -680,7 +730,11 @@ void ui_runtime_request_hardkey_nav(int direction)
         return;
     }
 
-    active = ui_runtime_get_active_screen_id();
+    active = ui_dispatch_get_active_screen();
+    if (active == UI_SCREEN_NONE)
+    {
+        active = ui_runtime_get_active_screen_id();
+    }
     if (active == UI_SCREEN_HOME ||
         active == UI_SCREEN_AI_DOU ||
         active == UI_SCREEN_MUSIC_PLAYER)

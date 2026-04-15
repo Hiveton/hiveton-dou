@@ -4,6 +4,7 @@
 #include "bf0_hal.h"
 #include "lvgl.h"
 #include "ui.h"
+#include "ui_font_manager.h"
 #include "ui/ui_helpers.h"
 #include "ui_runtime_adapter.h"
 #include "../sleep_manager.h"
@@ -22,6 +23,7 @@
 #define UI_DISPATCH_EVT_HARDKEY_UP      (1UL << 10)
 #define UI_DISPATCH_EVT_HARDKEY_DOWN    (1UL << 11)
 #define UI_DISPATCH_EVT_POWEROFF_POPUP  (1UL << 12)
+#define UI_DISPATCH_EVT_FONT_REFRESH    (1UL << 13)
 
 static rt_event_t s_ui_dispatch_event = RT_NULL;
 static volatile ui_screen_id_t s_ui_active_screen = UI_SCREEN_NONE;
@@ -166,6 +168,7 @@ void ui_dispatch_process_pending(void)
                          UI_DISPATCH_EVT_HARDKEY_UP |
                          UI_DISPATCH_EVT_HARDKEY_DOWN |
                          UI_DISPATCH_EVT_POWEROFF_POPUP |
+                         UI_DISPATCH_EVT_FONT_REFRESH |
                          UI_DISPATCH_EVT_SWITCH_HOME |
                          UI_DISPATCH_EVT_SWITCH_AI_DOU |
                          UI_DISPATCH_EVT_SWITCH_STANDBY,
@@ -179,9 +182,14 @@ void ui_dispatch_process_pending(void)
             lv_display_trigger_activity(NULL);
         }
 
-        if ((events & UI_DISPATCH_EVT_STATUS_REFRESH) != 0U)
+        if ((events & UI_DISPATCH_EVT_BACK) != 0U)
         {
-            ui_refresh_global_status_bar();
+            ui_runtime_go_back();
+        }
+
+        if ((events & UI_DISPATCH_EVT_EXIT_STANDBY) != 0U)
+        {
+            ui_runtime_exit_standby();
         }
 
         if ((events & UI_DISPATCH_EVT_SWITCH_HOME) != 0U)
@@ -199,14 +207,9 @@ void ui_dispatch_process_pending(void)
             ui_runtime_switch_to(UI_SCREEN_STANDBY);
         }
 
-        if ((events & UI_DISPATCH_EVT_EXIT_STANDBY) != 0U)
+        if ((events & UI_DISPATCH_EVT_STATUS_REFRESH) != 0U)
         {
-            ui_runtime_exit_standby();
-        }
-
-        if ((events & UI_DISPATCH_EVT_BACK) != 0U)
-        {
-            ui_runtime_go_back();
+            ui_refresh_global_status_bar();
         }
 
         if ((events & UI_DISPATCH_EVT_HARDKEY_UP) != 0U)
@@ -237,6 +240,11 @@ void ui_dispatch_process_pending(void)
         if ((events & UI_DISPATCH_EVT_POWEROFF_POPUP) != 0U)
         {
             ui_dispatch_show_poweroff_popup();
+        }
+
+        if ((events & UI_DISPATCH_EVT_FONT_REFRESH) != 0U)
+        {
+            ui_font_manager_rebuild_ui();
         }
     }
 }
@@ -290,6 +298,11 @@ void ui_dispatch_request_hardkey_down(void)
 void ui_dispatch_request_poweroff_confirm(void)
 {
     ui_dispatch_send(UI_DISPATCH_EVT_POWEROFF_POPUP);
+}
+
+void ui_dispatch_request_font_refresh(void)
+{
+    ui_dispatch_send(UI_DISPATCH_EVT_FONT_REFRESH);
 }
 
 void ui_dispatch_request_screen_switch(ui_screen_id_t screen_id)
