@@ -6,6 +6,7 @@
 #include "ui_helpers.h"
 #include "ui_runtime_adapter.h"
 #include "ui_dispatch.h"
+#include "drv_lcd.h"
 #include "../../xiaozhi/weather/weather.h"
 
 lv_obj_t *ui_Weather = NULL;
@@ -140,7 +141,10 @@ static void ui_weather_refresh_content(void)
         if (s_weather_feels_like_label) lv_label_set_text(s_weather_feels_like_label, ui_i18n_pick("体感 --", "Feels Like --"));
         if (s_weather_tip_label) lv_label_set_text(s_weather_tip_label, ui_i18n_pick("可以点击底部按钮手动刷新一次。", "Tap the button below to refresh once."));
         if (s_weather_last_update_label) lv_label_set_text(s_weather_last_update_label, ui_i18n_pick("上次更新: --:--", "Last Update: --:--"));
-        if (s_weather_icon) lv_img_set_src(s_weather_icon, xiaozhi_weather_get_icon("99"));
+        if (s_weather_icon)
+        {
+                ui_img_set_src(s_weather_icon, xiaozhi_weather_get_icon("99"));
+        }
         return;
     }
 
@@ -229,7 +233,7 @@ static void ui_weather_refresh_content(void)
 
     if (s_weather_icon)
     {
-        lv_img_set_src(s_weather_icon, xiaozhi_weather_get_icon(weather.code));
+        ui_img_set_src(s_weather_icon, xiaozhi_weather_get_icon(weather.code));
     }
 }
 
@@ -279,7 +283,7 @@ void ui_Weather_screen_init(void)
                                                false);
 
     s_weather_icon = ui_create_image_slot(page.content, 196, 85, 136, 136);
-    lv_img_set_src(s_weather_icon, xiaozhi_weather_get_icon("99"));
+    ui_img_set_src(s_weather_icon, xiaozhi_weather_get_icon("99"));
 
     s_weather_temp_label = ui_create_label(page.content,
                                            "--",

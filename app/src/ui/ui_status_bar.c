@@ -554,7 +554,7 @@ static void ui_status_bar_refresh_connection_icons(bool force)
 
         if (refs->bluetooth_icon != NULL)
         {
-            lv_img_set_src(refs->bluetooth_icon, &ble_icon_img);
+            ui_img_set_src(refs->bluetooth_icon, &ble_icon_img);
             ui_status_bar_set_object_hidden(refs->bluetooth_icon, false);
             lv_obj_set_style_opa(refs->bluetooth_icon,
                                  bt_enabled ? LV_OPA_COVER : LV_OPA_50,
@@ -563,7 +563,7 @@ static void ui_status_bar_refresh_connection_icons(bool force)
 
         if (refs->network_icon != NULL)
         {
-            lv_img_set_src(refs->network_icon, &network_icon_img);
+            ui_img_set_src(refs->network_icon, &network_icon_img);
             ui_status_bar_set_object_hidden(refs->network_icon, false);
             lv_obj_set_style_opa(refs->network_icon,
                                  (active_link == NET_MANAGER_LINK_BT_PAN || net_4g_enabled) ? LV_OPA_COVER : LV_OPA_50,
@@ -853,11 +853,11 @@ void ui_status_bar_component_build(lv_obj_t *parent,
     lv_obj_set_size(right_box, ui_px_w(128), ui_px_h(42));
 
     bluetooth_img = ui_create_image_slot(right_box, 0, 6, 24, 24);
-    lv_img_set_src(bluetooth_img, &ble_icon_img);
+    ui_img_set_src(bluetooth_img, &ble_icon_img);
     lv_obj_add_flag(bluetooth_img, LV_OBJ_FLAG_HIDDEN);
 
     network_img = ui_create_image_slot(right_box, 30, 6, 24, 24);
-    lv_img_set_src(network_img, &network_icon_img);
+    ui_img_set_src(network_img, &network_icon_img);
     lv_obj_add_flag(network_img, LV_OBJ_FLAG_HIDDEN);
 
     battery_body = lv_obj_create(right_box);

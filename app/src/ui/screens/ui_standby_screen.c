@@ -2,6 +2,7 @@
 #include "ui_helpers.h"
 #include "ui_i18n.h"
 #include "ui_runtime_adapter.h"
+#include "drv_lcd.h"
 #include "../../sleep_manager.h"
 #include "../../xiaozhi/weather/weather.h"
 
@@ -245,10 +246,10 @@ static void ui_standby_apply_time_images(const char *time_text)
         return;
     }
 
-    if (s_refs.hour_tens_img != NULL) lv_img_set_src(s_refs.hour_tens_img, s_time_digits[hour_tens]);
-    if (s_refs.hour_units_img != NULL) lv_img_set_src(s_refs.hour_units_img, s_time_digits[hour_units]);
-    if (s_refs.minute_tens_img != NULL) lv_img_set_src(s_refs.minute_tens_img, s_time_digits[minute_tens]);
-    if (s_refs.minute_units_img != NULL) lv_img_set_src(s_refs.minute_units_img, s_time_digits[minute_units]);
+    if (s_refs.hour_tens_img != NULL) ui_img_set_src(s_refs.hour_tens_img, s_time_digits[hour_tens]);
+    if (s_refs.hour_units_img != NULL) ui_img_set_src(s_refs.hour_units_img, s_time_digits[hour_units]);
+    if (s_refs.minute_tens_img != NULL) ui_img_set_src(s_refs.minute_tens_img, s_time_digits[minute_tens]);
+    if (s_refs.minute_units_img != NULL) ui_img_set_src(s_refs.minute_units_img, s_time_digits[minute_units]);
 }
 
 static bool ui_standby_refresh_content(void)
@@ -366,7 +367,7 @@ void ui_Standby_screen_init(void)
     s_refs.colon_img = ui_create_image_slot(ui_Standby, 232, 248, 64, 96);
     s_refs.minute_tens_img = ui_create_image_slot(ui_Standby, 294, 224, 90, 132);
     s_refs.minute_units_img = ui_create_image_slot(ui_Standby, 384, 224, 90, 132);
-    lv_img_set_src(s_refs.colon_img, &second);
+    ui_img_set_src(s_refs.colon_img, &second);
 
     overlay = lv_obj_create(ui_Standby);
     lv_obj_remove_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);

@@ -32,7 +32,16 @@ Rename this file to lodepng.cpp to use it for C++, or to lodepng.c to use it for
 #if LV_USE_LODEPNG
 #include "../../core/lv_global.h"
 
+#include <stdint.h>
+
 #define image_cache_draw_buf_handlers &(LV_GLOBAL_DEFAULT()->image_cache_draw_buf_handlers)
+
+void *audio_mem_malloc(uint32_t size) __attribute__((weak));
+void *audio_mem_realloc(void *mem_address, unsigned int newsize) __attribute__((weak));
+void audio_mem_free(void *ptr) __attribute__((weak));
+void *reading_epub_png_alloc(size_t size) __attribute__((weak));
+void *reading_epub_png_realloc(void *ptr, size_t new_size) __attribute__((weak));
+void reading_epub_png_free(void *ptr) __attribute__((weak));
 
 #ifdef LODEPNG_COMPILE_DISK
     #include <limits.h> /* LONG_MAX */
@@ -80,6 +89,12 @@ static void * lodepng_malloc(size_t size)
 #ifdef LODEPNG_MAX_ALLOC
     if(size > LODEPNG_MAX_ALLOC) return 0;
 #endif
+    if(reading_epub_png_alloc) {
+        return reading_epub_png_alloc(size);
+    }
+    if(audio_mem_malloc) {
+        return audio_mem_malloc((uint32_t)size);
+    }
     return lv_malloc(size);
 }
 
@@ -89,11 +104,25 @@ static void * lodepng_realloc(void * ptr, size_t new_size)
 #ifdef LODEPNG_MAX_ALLOC
     if(new_size > LODEPNG_MAX_ALLOC) return 0;
 #endif
+    if(reading_epub_png_realloc) {
+        return reading_epub_png_realloc(ptr, new_size);
+    }
+    if(audio_mem_realloc) {
+        return audio_mem_realloc(ptr, (unsigned int)new_size);
+    }
     return lv_realloc(ptr, new_size);
 }
 
 static void lodepng_free(void * ptr)
 {
+    if(reading_epub_png_free) {
+        reading_epub_png_free(ptr);
+        return;
+    }
+    if(audio_mem_free) {
+        audio_mem_free(ptr);
+        return;
+    }
     lv_free(ptr);
 }
 #else /*LODEPNG_COMPILE_ALLOCATORS*/

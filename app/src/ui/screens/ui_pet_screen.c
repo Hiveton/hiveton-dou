@@ -127,7 +127,7 @@ static void ui_pet_set_face(const lv_image_dsc_t *src)
         return;
     }
 
-    lv_img_set_src(s_face_img, src);
+    ui_img_set_src(s_face_img, src);
     lv_obj_center(s_face_img);
 }
 

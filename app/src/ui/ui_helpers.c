@@ -8,6 +8,7 @@
 
 #include "audio_server.h"
 #include "audio_mem.h"
+#include "drv_lcd.h"
 #include "lv_tiny_ttf.h"
 #include "rtdevice.h"
 #include "rtthread.h"
@@ -1244,7 +1245,7 @@ static void ui_status_refresh_connection_icons(bool force)
 
         if (refs->bluetooth_icon != NULL)
         {
-            lv_img_set_src(refs->bluetooth_icon, &ble_icon_img);
+            ui_img_set_src(refs->bluetooth_icon, &ble_icon_img);
             ui_status_set_object_hidden(refs->bluetooth_icon, false);
             lv_obj_set_style_opa(refs->bluetooth_icon,
                                  bt_enabled ? LV_OPA_COVER : LV_OPA_50,
@@ -1253,7 +1254,7 @@ static void ui_status_refresh_connection_icons(bool force)
 
         if (refs->network_icon != NULL)
         {
-            lv_img_set_src(refs->network_icon, &network_icon_img);
+            ui_img_set_src(refs->network_icon, &network_icon_img);
             ui_status_set_object_hidden(refs->network_icon, false);
             lv_obj_set_style_opa(refs->network_icon,
                                  (active_link == NET_MANAGER_LINK_BT_PAN || net_4g_enabled) ? LV_OPA_COVER : LV_OPA_50,
@@ -2835,6 +2836,26 @@ lv_obj_t *ui_create_hidden_label(lv_obj_t *parent)
     lv_label_set_text(label, "");
     lv_obj_add_flag(label, LV_OBJ_FLAG_HIDDEN);
     return label;
+}
+
+void ui_img_set_src(lv_obj_t *img, const void *src)
+{
+    if (img == NULL)
+    {
+        return;
+    }
+
+    lv_img_set_src(img, src);
+}
+
+void ui_image_set_src(lv_obj_t *img, const void *src)
+{
+    if (img == NULL)
+    {
+        return;
+    }
+
+    lv_image_set_src(img, src);
 }
 
 void ui_attach_nav_event(lv_obj_t *obj, ui_screen_id_t target)

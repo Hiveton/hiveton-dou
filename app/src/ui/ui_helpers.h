@@ -78,6 +78,8 @@ lv_obj_t *ui_create_image_slot(lv_obj_t *parent,
                                int32_t w,
                                int32_t h);
 lv_obj_t *ui_create_hidden_label(lv_obj_t *parent);
+void ui_img_set_src(lv_obj_t *img, const void *src);
+void ui_image_set_src(lv_obj_t *img, const void *src);
 
 void ui_attach_nav_event(lv_obj_t *obj, ui_screen_id_t target);
 void ui_build_status_bar_ex(lv_obj_t *parent,

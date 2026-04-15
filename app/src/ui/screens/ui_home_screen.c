@@ -104,6 +104,48 @@ static lv_obj_t *create_home_hotspot(lv_obj_t *parent,
     return zone;
 }
 
+static void ui_home_create_gray4_test_bar(lv_obj_t *parent)
+{
+    static const uint8_t s_gray_levels[4] = {0x00, 0x55, 0xAA, 0xFF};
+    static const char *s_gray_labels[4] = {"00", "01", "10", "11"};
+    const int bar_x = 12;
+    const int bar_y = 682;
+    const int bar_w = 504;
+    const int bar_h = 30;
+    const int block_w = bar_w / 4;
+    size_t i;
+
+    for (i = 0; i < 4; ++i)
+    {
+        lv_obj_t *block = lv_obj_create(parent);
+        lv_obj_t *label;
+        uint8_t gray = s_gray_levels[i];
+        bool dark_bg = gray < 0x80;
+
+        lv_obj_remove_flag(block, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_pos(block, ui_px_x(bar_x + ((int)i * block_w)), ui_px_y(bar_y));
+        lv_obj_set_size(block,
+                        ui_px_w((i == 3) ? (bar_w - block_w * 3) : block_w),
+                        ui_px_h(bar_h));
+        lv_obj_set_style_radius(block, 0, 0);
+        lv_obj_set_style_border_width(block, 1, 0);
+        lv_obj_set_style_border_color(block, lv_color_black(), 0);
+        lv_obj_set_style_pad_all(block, 0, 0);
+        lv_obj_set_style_shadow_width(block, 0, 0);
+        lv_obj_set_style_outline_width(block, 0, 0);
+        lv_obj_set_style_bg_opa(block, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(block, lv_color_make(gray, gray, gray), 0);
+
+        label = lv_label_create(block);
+        lv_label_set_text(label, s_gray_labels[i]);
+        lv_obj_set_style_text_font(label, home_screen_font_get(18), 0);
+        lv_obj_set_style_text_color(label,
+                                    dark_bg ? lv_color_white() : lv_color_black(),
+                                    0);
+        lv_obj_center(label);
+    }
+}
+
 const xiaozhi_home_screen_refs_t *ui_home_screen_refs_get(void)
 {
     return &s_home_refs;
@@ -164,7 +206,7 @@ void ui_Home_screen_init(void)
                                              tile->target);
         icon = ui_create_image_slot(zone, 38, 24, 80, 80);
 
-        lv_img_set_src(icon, tile->icon);
+        ui_img_set_src(icon, tile->icon);
         ui_create_label(zone,
                         ui_i18n_pick(tile->label_zh, tile->label_en),
                         0,
@@ -177,6 +219,8 @@ void ui_Home_screen_init(void)
                         false);
         ++visible_index;
     }
+
+    ui_home_create_gray4_test_bar(section);
 }
 
 void ui_Home_screen_destroy(void)

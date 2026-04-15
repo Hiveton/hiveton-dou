@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "ui_helpers.h"
 #include "ui_i18n.h"
+#include "../ui_image_policy.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -12,22 +13,24 @@
 #include "dfs_posix.h"
 #include "rtdevice.h"
 #include "rtthread.h"
+#include "audio_mem.h"
+#include "drv_lcd.h"
 #include "../../../../sdk/external/lvgl_v9/src/draw/lv_draw_buf.h"
 #include "../../../../sdk/external/lvgl_v9/src/libs/lodepng/lodepng.h"
 #include "../../../../sdk/external/lvgl_v9/src/libs/tjpgd/tjpgd.h"
 #define STBI_NO_STDIO
 #define STBI_ONLY_JPEG
 #define STBI_ASSERT(x) ((void)0)
-#define STBI_MALLOC(sz) rt_malloc((rt_size_t)(sz))
-#define STBI_REALLOC(p,sz) rt_realloc((p), (rt_size_t)(sz))
-#define STBI_FREE(p) rt_free(p)
+#define STBI_MALLOC(sz) audio_mem_malloc((uint32_t)(sz))
+#define STBI_REALLOC(p,sz) audio_mem_realloc((p), (uint32_t)(sz))
+#define STBI_FREE(p) audio_mem_free(p)
 #define STB_IMAGE_IMPLEMENTATION
 #include "../../../../sdk/external/rlottie/src/vector/stb/stb_image.h"
 
 lv_obj_t *ui_Wallpaper = NULL;
 
-#define UI_WALLPAPER_MAX_WIDTH  492U
-#define UI_WALLPAPER_MAX_HEIGHT 560U
+#define UI_WALLPAPER_MAX_WIDTH  528U
+#define UI_WALLPAPER_MAX_HEIGHT 792U
 
 typedef struct
 {
@@ -52,6 +55,12 @@ typedef struct
 
 typedef struct
 {
+    unsigned src_width;
+    unsigned src_height;
+    unsigned src_crop_x;
+    unsigned src_crop_y;
+    unsigned src_crop_width;
+    unsigned src_crop_height;
     unsigned width;
     unsigned height;
     uint32_t stride;
@@ -72,6 +81,34 @@ static char s_wallpaper_status_text[384];
 static lv_image_dsc_t s_wallpaper_image_dsc;
 static lv_draw_buf_t s_wallpaper_draw_buf;
 static uint8_t *s_wallpaper_image_data;
+static bool s_wallpaper_force_full_refresh_pending = false;
+
+static void ui_wallpaper_queue_full_refresh_on_input(const char *source)
+{
+    if (s_wallpaper_image_dsc.data == NULL)
+    {
+        return;
+    }
+
+    if (!s_wallpaper_force_full_refresh_pending)
+    {
+        s_wallpaper_force_full_refresh_pending = true;
+        rt_kprintf("wallpaper: full refresh queued by input source=%s\n",
+                   source != NULL ? source : "?");
+    }
+}
+
+static void ui_wallpaper_input_event_cb(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+
+    if (code != LV_EVENT_PRESSED && code != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    ui_wallpaper_queue_full_refresh_on_input(code == LV_EVENT_PRESSED ? "pressed" : "clicked");
+}
 
 static void ui_wallpaper_render(void);
 
@@ -169,6 +206,8 @@ static void ui_wallpaper_set_decode_errorf(const char *fmt, ...)
 
 static void ui_wallpaper_set_status_text(const char *text)
 {
+    bool has_text;
+
     if (text == NULL)
     {
         s_wallpaper_status_text[0] = '\0';
@@ -178,9 +217,20 @@ static void ui_wallpaper_set_status_text(const char *text)
         rt_snprintf(s_wallpaper_status_text, sizeof(s_wallpaper_status_text), "%s", text);
     }
 
+    has_text = (s_wallpaper_status_text[0] != '\0');
+
     if (s_wallpaper_refs.status_label != NULL)
     {
         lv_label_set_text(s_wallpaper_refs.status_label, s_wallpaper_status_text);
+        if (has_text)
+        {
+            lv_obj_clear_flag(s_wallpaper_refs.status_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_move_foreground(s_wallpaper_refs.status_label);
+        }
+        else
+        {
+            lv_obj_add_flag(s_wallpaper_refs.status_label, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 }
 
@@ -227,7 +277,7 @@ static uint8_t *ui_wallpaper_alloc_i4_image(unsigned width,
     pixel_bytes = (size_t)stride * (size_t)height;
     total_bytes = (size_t)palette_bytes + pixel_bytes;
 
-    image_data = (uint8_t *)rt_malloc(total_bytes);
+    image_data = (uint8_t *)audio_mem_malloc((uint32_t)total_bytes);
     if (image_data == NULL)
     {
         ui_wallpaper_set_decode_errorf("申请内存失败 需要约%lu字节",
@@ -257,7 +307,7 @@ static void ui_wallpaper_release_decoded_image(void)
 {
     if (s_wallpaper_image_data != NULL)
     {
-        rt_free(s_wallpaper_image_data);
+        audio_mem_free(s_wallpaper_image_data);
         s_wallpaper_image_data = NULL;
     }
 
@@ -314,20 +364,57 @@ static void ui_wallpaper_compute_target_size(unsigned src_width,
     if (target_height != NULL) *target_height = height;
 }
 
-static uint8_t ui_wallpaper_bayer8_value(unsigned x, unsigned y)
+static void ui_wallpaper_compute_fill_crop(unsigned src_width,
+                                           unsigned src_height,
+                                           unsigned dst_width,
+                                           unsigned dst_height,
+                                           unsigned *crop_x,
+                                           unsigned *crop_y,
+                                           unsigned *crop_width,
+                                           unsigned *crop_height)
 {
-    static const uint8_t bayer8x8[8][8] = {
-        {0, 48, 12, 60, 3, 51, 15, 63},
-        {32, 16, 44, 28, 35, 19, 47, 31},
-        {8, 56, 4, 52, 11, 59, 7, 55},
-        {40, 24, 36, 20, 43, 27, 39, 23},
-        {2, 50, 14, 62, 1, 49, 13, 61},
-        {34, 18, 46, 30, 33, 17, 45, 29},
-        {10, 58, 6, 54, 9, 57, 5, 53},
-        {42, 26, 38, 22, 41, 25, 37, 21},
-    };
+    unsigned out_x = 0U;
+    unsigned out_y = 0U;
+    unsigned out_w = src_width;
+    unsigned out_h = src_height;
+    uint64_t lhs;
+    uint64_t rhs;
 
-    return bayer8x8[y & 7U][x & 7U];
+    if (src_width == 0U || src_height == 0U || dst_width == 0U || dst_height == 0U)
+    {
+        if (crop_x != NULL) *crop_x = 0U;
+        if (crop_y != NULL) *crop_y = 0U;
+        if (crop_width != NULL) *crop_width = src_width;
+        if (crop_height != NULL) *crop_height = src_height;
+        return;
+    }
+
+    lhs = (uint64_t)src_width * (uint64_t)dst_height;
+    rhs = (uint64_t)dst_width * (uint64_t)src_height;
+
+    if (lhs > rhs)
+    {
+        out_w = (unsigned)(((uint64_t)src_height * (uint64_t)dst_width) / (uint64_t)dst_height);
+        if (out_w == 0U || out_w > src_width)
+        {
+            out_w = src_width;
+        }
+        out_x = (src_width - out_w) / 2U;
+    }
+    else if (lhs < rhs)
+    {
+        out_h = (unsigned)(((uint64_t)src_width * (uint64_t)dst_height) / (uint64_t)dst_width);
+        if (out_h == 0U || out_h > src_height)
+        {
+            out_h = src_height;
+        }
+        out_y = (src_height - out_h) / 2U;
+    }
+
+    if (crop_x != NULL) *crop_x = out_x;
+    if (crop_y != NULL) *crop_y = out_y;
+    if (crop_width != NULL) *crop_width = out_w;
+    if (crop_height != NULL) *crop_height = out_h;
 }
 
 static uint8_t ui_wallpaper_dither_to_gray4_index(unsigned x,
@@ -336,10 +423,12 @@ static uint8_t ui_wallpaper_dither_to_gray4_index(unsigned x,
                                                   uint8_t g,
                                                   uint8_t b)
 {
-    uint16_t gray = (uint16_t)(r * 30U + g * 59U + b * 11U) / 100U;
-    uint8_t threshold = (uint8_t)(ui_wallpaper_bayer8_value(x, y) << 2);
+    uint8_t level;
 
-    return (gray >= threshold) ? 0U : 15U;
+    (void)x;
+    (void)y;
+    level = ui_image_gray4_level_from_rgb(r, g, b);
+    return ui_image_gray4_level_to_i4_palette(level);
 }
 
 static bool ui_wallpaper_set_image_descriptor(unsigned width,
@@ -368,7 +457,7 @@ static bool ui_wallpaper_set_image_descriptor(unsigned width,
     {
         ui_wallpaper_set_decode_errorf("申请内存失败 需要约%lu字节",
                                        (unsigned long)total_bytes);
-        rt_free(image_data);
+        audio_mem_free(image_data);
         return false;
     }
 
@@ -423,7 +512,7 @@ static bool ui_wallpaper_read_file(const char *path, uint8_t **data_out, size_t 
         return false;
     }
 
-    buffer = (uint8_t *)rt_malloc((size_t)file_size);
+    buffer = (uint8_t *)audio_mem_malloc((uint32_t)file_size);
     if (buffer == NULL)
     {
         ui_wallpaper_set_decode_errorf("申请内存失败 size=%ld", (long)file_size);
@@ -442,7 +531,7 @@ static bool ui_wallpaper_read_file(const char *path, uint8_t **data_out, size_t 
                                            (long)read_size,
                                            rt_get_errno());
             close(fd);
-            rt_free(buffer);
+            audio_mem_free(buffer);
             return false;
         }
         total_read += (size_t)read_size;
@@ -481,8 +570,8 @@ static bool ui_wallpaper_decode_png(const uint8_t *image_data,
         return false;
     }
 
-    ui_wallpaper_compute_target_size(src_width, src_height, max_width, max_height,
-                                     &target_width, &target_height);
+    target_width = max_width;
+    target_height = max_height;
     draw_image_data = ui_wallpaper_alloc_i4_image(target_width,
                                                   target_height,
                                                   &stride,
@@ -496,13 +585,21 @@ static bool ui_wallpaper_decode_png(const uint8_t *image_data,
 
     for (unsigned y = 0; y < target_height; ++y)
     {
-        unsigned src_y = ((uint64_t)y * src_height) / target_height;
+        unsigned crop_x = 0U;
+        unsigned crop_y = 0U;
+        unsigned crop_w = src_width;
+        unsigned crop_h = src_height;
+        unsigned src_y;
         uint8_t *row = pixels + (size_t)y * stride;
+        ui_wallpaper_compute_fill_crop(src_width, src_height,
+                                       target_width, target_height,
+                                       &crop_x, &crop_y, &crop_w, &crop_h);
+        src_y = crop_y + (unsigned)(((uint64_t)y * crop_h) / target_height);
         if (src_y >= src_height) src_y = src_height - 1U;
 
         for (unsigned x = 0; x < target_width; ++x)
         {
-            unsigned src_x = ((uint64_t)x * src_width) / target_width;
+            unsigned src_x = crop_x + (unsigned)(((uint64_t)x * crop_w) / target_width);
             const unsigned char *pixel;
             uint8_t gray4;
 
@@ -586,36 +683,77 @@ static int ui_wallpaper_jpeg_output(JDEC *jd, void *bitmap, JRECT *rect)
     for (unsigned sy = rect->top; sy <= rect->bottom; ++sy)
     {
         unsigned row = sy - rect->top;
-        uint8_t *dst_row;
+        unsigned dst_y0;
+        unsigned dst_y1;
 
-        if (sy >= target->height)
+        if (target->src_height == 0U ||
+            sy < target->src_crop_y ||
+            sy >= (target->src_crop_y + target->src_crop_height))
         {
             continue;
         }
 
-        dst_row = target->pixels + (size_t)sy * target->stride;
+        dst_y0 = ((uint64_t)(sy - target->src_crop_y) * target->height) / target->src_crop_height;
+        dst_y1 = ((uint64_t)(sy - target->src_crop_y + 1U) * target->height) / target->src_crop_height;
+        if (dst_y1 <= dst_y0)
+        {
+            dst_y1 = dst_y0 + 1U;
+        }
+        if (dst_y0 >= target->height)
+        {
+            continue;
+        }
+        if (dst_y1 > target->height)
+        {
+            dst_y1 = target->height;
+        }
 
         for (unsigned sx = rect->left; sx <= rect->right; ++sx)
         {
             unsigned col = sx - rect->left;
             const uint8_t *pixel;
             uint8_t gray4;
+            unsigned dst_x0;
+            unsigned dst_x1;
 
-            if (sx >= target->width)
+            if (target->src_width == 0U ||
+                sx < target->src_crop_x ||
+                sx >= (target->src_crop_x + target->src_crop_width))
             {
                 continue;
             }
 
             pixel = &src[(row * rect_width + col) * 3U];
             gray4 = ui_wallpaper_dither_to_gray4_index(sx, sy, pixel[2], pixel[1], pixel[0]);
-
-            if ((sx & 1U) == 0U)
+            dst_x0 = ((uint64_t)(sx - target->src_crop_x) * target->width) / target->src_crop_width;
+            dst_x1 = ((uint64_t)(sx - target->src_crop_x + 1U) * target->width) / target->src_crop_width;
+            if (dst_x1 <= dst_x0)
             {
-                dst_row[sx >> 1] = (uint8_t)(gray4 << 4);
+                dst_x1 = dst_x0 + 1U;
             }
-            else
+            if (dst_x0 >= target->width)
             {
-                dst_row[sx >> 1] |= gray4;
+                continue;
+            }
+            if (dst_x1 > target->width)
+            {
+                dst_x1 = target->width;
+            }
+
+            for (unsigned dy = dst_y0; dy < dst_y1; ++dy)
+            {
+                uint8_t *dst_row = target->pixels + (size_t)dy * target->stride;
+                for (unsigned dx = dst_x0; dx < dst_x1; ++dx)
+                {
+                    if ((dx & 1U) == 0U)
+                    {
+                        dst_row[dx >> 1] = (uint8_t)((dst_row[dx >> 1] & 0x0F) | (gray4 << 4));
+                    }
+                    else
+                    {
+                        dst_row[dx >> 1] = (uint8_t)((dst_row[dx >> 1] & 0xF0) | gray4);
+                    }
+                }
             }
         }
     }
@@ -721,7 +859,7 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
         return false;
     }
 
-    workbuf = (uint8_t *)rt_malloc(4096U);
+    workbuf = (uint8_t *)audio_mem_malloc(4096U);
     if (workbuf == NULL)
     {
         ui_wallpaper_set_decode_errorf("申请内存失败 需要约4096字节");
@@ -733,28 +871,28 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
     if (result != JDR_OK || jd.width == 0U || jd.height == 0U)
     {
         ui_wallpaper_set_decode_errorf("JPG失败 prepare=%d", (int)result);
-        rt_free(workbuf);
+        audio_mem_free(workbuf);
         close(context.source.fd);
         return false;
     }
 
-    for (decode_scale = 0U; decode_scale < 3U; ++decode_scale)
-    {
-        unsigned scaled_w = ((unsigned)jd.width + ((1U << decode_scale) - 1U)) >> decode_scale;
-        unsigned scaled_h = ((unsigned)jd.height + ((1U << decode_scale) - 1U)) >> decode_scale;
-
-        if (scaled_w <= max_width && scaled_h <= max_height)
-        {
-            break;
-        }
-    }
-
-    target_width = ((unsigned)jd.width + ((1U << decode_scale) - 1U)) >> decode_scale;
-    target_height = ((unsigned)jd.height + ((1U << decode_scale) - 1U)) >> decode_scale;
+    decode_scale = 0U;
+    context.target.src_width = (unsigned)jd.width;
+    context.target.src_height = (unsigned)jd.height;
+    ui_wallpaper_compute_fill_crop(context.target.src_width,
+                                   context.target.src_height,
+                                   max_width,
+                                   max_height,
+                                   &context.target.src_crop_x,
+                                   &context.target.src_crop_y,
+                                   &context.target.src_crop_width,
+                                   &context.target.src_crop_height);
+    target_width = max_width;
+    target_height = max_height;
     if (target_width == 0U || target_height == 0U)
     {
         ui_wallpaper_set_decode_errorf("JPG失败 尺寸无效");
-        rt_free(workbuf);
+        audio_mem_free(workbuf);
         close(context.source.fd);
         return false;
     }
@@ -766,7 +904,7 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
                                              NULL);
     if (image_data == NULL)
     {
-        rt_free(workbuf);
+        audio_mem_free(workbuf);
         close(context.source.fd);
         return false;
     }
@@ -774,12 +912,23 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
     context.target.height = target_height;
     context.target.stride = stride;
     context.target.pixels = pixels;
+    if (context.target.src_crop_width == 0U || context.target.src_crop_height == 0U)
+    {
+        ui_wallpaper_compute_fill_crop(context.target.src_width,
+                                       context.target.src_height,
+                                       target_width,
+                                       target_height,
+                                       &context.target.src_crop_x,
+                                       &context.target.src_crop_y,
+                                       &context.target.src_crop_width,
+                                       &context.target.src_crop_height);
+    }
 
     if (lseek(context.source.fd, 0, SEEK_SET) < 0)
     {
         ui_wallpaper_set_decode_errorf("回到文件头失败 errno=%d", rt_get_errno());
-        rt_free(workbuf);
-        rt_free(image_data);
+        audio_mem_free(workbuf);
+        audio_mem_free(image_data);
         close(context.source.fd);
         return false;
     }
@@ -788,19 +937,19 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
     if (result != JDR_OK)
     {
         ui_wallpaper_set_decode_errorf("JPG失败 prepare2=%d", (int)result);
-        rt_free(workbuf);
-        rt_free(image_data);
+        audio_mem_free(workbuf);
+        audio_mem_free(image_data);
         close(context.source.fd);
         return false;
     }
 
     result = jd_decomp(&jd, ui_wallpaper_jpeg_output, (uint8_t)decode_scale);
-    rt_free(workbuf);
+    audio_mem_free(workbuf);
     close(context.source.fd);
     if (result != JDR_OK)
     {
         ui_wallpaper_set_decode_errorf("JPG失败 decomp=%d", (int)result);
-        rt_free(image_data);
+        audio_mem_free(image_data);
         return false;
     }
 
@@ -858,8 +1007,8 @@ static bool ui_wallpaper_decode_jpeg(const uint8_t *image_data,
         return false;
     }
 
-    ui_wallpaper_compute_target_size((unsigned)src_width, (unsigned)src_height, max_width, max_height,
-                                     &target_width, &target_height);
+    target_width = max_width;
+    target_height = max_height;
     draw_image_data = ui_wallpaper_alloc_i4_image(target_width,
                                                   target_height,
                                                   &stride,
@@ -873,13 +1022,21 @@ static bool ui_wallpaper_decode_jpeg(const uint8_t *image_data,
 
     for (unsigned y = 0; y < target_height; ++y)
     {
-        unsigned src_y = ((uint64_t)y * (unsigned)src_height) / target_height;
+        unsigned crop_x = 0U;
+        unsigned crop_y = 0U;
+        unsigned crop_w = (unsigned)src_width;
+        unsigned crop_h = (unsigned)src_height;
+        unsigned src_y;
         uint8_t *row = pixels + (size_t)y * stride;
+        ui_wallpaper_compute_fill_crop((unsigned)src_width, (unsigned)src_height,
+                                       target_width, target_height,
+                                       &crop_x, &crop_y, &crop_w, &crop_h);
+        src_y = crop_y + (unsigned)(((uint64_t)y * crop_h) / target_height);
         if (src_y >= (unsigned)src_height) src_y = (unsigned)src_height - 1U;
 
         for (unsigned x = 0; x < target_width; ++x)
         {
-            unsigned src_x = ((uint64_t)x * (unsigned)src_width) / target_width;
+            unsigned src_x = crop_x + (unsigned)(((uint64_t)x * crop_w) / target_width);
             const stbi_uc *pixel;
             uint8_t r;
             uint8_t g;
@@ -949,7 +1106,7 @@ static bool ui_wallpaper_decode_file_to_image(const char *path, lv_image_dsc_t *
                                      UI_WALLPAPER_MAX_HEIGHT,
                                      out_image);
     }
-    rt_free(file_data);
+    audio_mem_free(file_data);
     return ok;
 }
 
@@ -1035,23 +1192,28 @@ static void ui_wallpaper_render(void)
         return;
     }
 
+    if (s_wallpaper_force_full_refresh_pending)
+    {
+        rt_kprintf("wallpaper: full refresh consume before image present\n");
+        lcd_request_epd_force_full_refresh_once();
+        s_wallpaper_force_full_refresh_pending = false;
+    }
+    lcd_set_epd_image_refresh_hint(RT_TRUE);
     s_wallpaper_refs.image = lv_img_create(s_wallpaper_refs.image_card);
     lv_obj_set_style_bg_opa(s_wallpaper_refs.image, LV_OPA_TRANSP, 0);
-    lv_img_set_src(s_wallpaper_refs.image, &s_wallpaper_image_dsc);
-    lv_obj_center(s_wallpaper_refs.image);
-    ui_wallpaper_set_status_overview(pic_dir,
-                                     s_wallpaper_image_path,
-                                     "成功",
-                                     "图片已解码并显示");
+    ui_img_set_src(s_wallpaper_refs.image, &s_wallpaper_image_dsc);
+    lv_image_set_inner_align(s_wallpaper_refs.image, LV_IMAGE_ALIGN_STRETCH);
+    lv_image_set_antialias(s_wallpaper_refs.image, false);
+    lv_obj_set_size(s_wallpaper_refs.image, 528, 792);
+    lv_obj_set_pos(s_wallpaper_refs.image, 0, 0);
+    ui_wallpaper_set_status_text(NULL);
 }
 
 void ui_Wallpaper_screen_init(void)
 {
-    ui_screen_scaffold_t page;
-
     if (ui_Wallpaper != NULL)
     {
-        return;
+        ui_Wallpaper_screen_destroy();
     }
 
     memset(&s_wallpaper_refs, 0, sizeof(s_wallpaper_refs));
@@ -1060,27 +1222,30 @@ void ui_Wallpaper_screen_init(void)
     memset(s_wallpaper_last_error, 0, sizeof(s_wallpaper_last_error));
     memset(s_wallpaper_status_text, 0, sizeof(s_wallpaper_status_text));
     memset(&s_wallpaper_image_dsc, 0, sizeof(s_wallpaper_image_dsc));
+    s_wallpaper_force_full_refresh_pending = true;
+    rt_kprintf("wallpaper: full refresh queued on enter\n");
 
     ui_Wallpaper = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Wallpaper, ui_i18n_pick("壁纸测试", "Wallpaper"), UI_SCREEN_SETTINGS);
-
-    s_wallpaper_refs.image_card = ui_create_card(page.content, 10, 12, 492, 560, UI_SCREEN_NONE, false, 20);
+    s_wallpaper_refs.image_card = ui_create_card(ui_Wallpaper, 0, 0, 528, 792, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_bg_color(s_wallpaper_refs.image_card, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_bg_opa(s_wallpaper_refs.image_card, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(s_wallpaper_refs.image_card, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_border_width(s_wallpaper_refs.image_card, 2, 0);
+    lv_obj_set_style_border_width(s_wallpaper_refs.image_card, 0, 0);
     lv_obj_set_style_pad_all(s_wallpaper_refs.image_card, 0, 0);
+    lv_obj_set_style_radius(s_wallpaper_refs.image_card, 0, 0);
     lv_obj_clear_flag(s_wallpaper_refs.image_card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_wallpaper_refs.image_card, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(s_wallpaper_refs.image_card, ui_wallpaper_input_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(s_wallpaper_refs.image_card, ui_wallpaper_input_event_cb, LV_EVENT_CLICKED, NULL);
 
-    s_wallpaper_refs.status_label = ui_create_label(page.content,
+    s_wallpaper_refs.status_label = ui_create_label(ui_Wallpaper,
                                                     ui_i18n_pick("目录：检测中\n文件：未选择\n结果：进行中\n说明：正在检测 TF 卡 pic 目录",
                                                                  "Scanning TF /pic..."),
+                                                    24,
+                                                    596,
+                                                    480,
+                                                    168,
                                                     18,
-                                                    560,
-                                                    476,
-                                                    120,
-                                                    16,
-                                                    LV_TEXT_ALIGN_LEFT,
+                                                    LV_TEXT_ALIGN_CENTER,
                                                     false,
                                                     true);
     lv_label_set_long_mode(s_wallpaper_refs.status_label, LV_LABEL_LONG_WRAP);
@@ -1090,11 +1255,16 @@ void ui_Wallpaper_screen_init(void)
     lv_obj_set_style_border_color(s_wallpaper_refs.status_label, lv_color_hex(0x000000), 0);
     lv_obj_set_style_border_width(s_wallpaper_refs.status_label, 1, 0);
     lv_obj_set_style_pad_all(s_wallpaper_refs.status_label, 8, 0);
+    lv_obj_add_flag(s_wallpaper_refs.status_label, LV_OBJ_FLAG_HIDDEN);
 
     if (s_wallpaper_refs.render_timer == NULL)
     {
         s_wallpaper_refs.render_timer = lv_timer_create(ui_wallpaper_render_timer_cb, 1, NULL);
     }
+
+    lv_obj_add_flag(ui_Wallpaper, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(ui_Wallpaper, ui_wallpaper_input_event_cb, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(ui_Wallpaper, ui_wallpaper_input_event_cb, LV_EVENT_CLICKED, NULL);
 }
 
 void ui_Wallpaper_screen_destroy(void)
@@ -1104,6 +1274,10 @@ void ui_Wallpaper_screen_destroy(void)
         lv_timer_del(s_wallpaper_refs.render_timer);
         s_wallpaper_refs.render_timer = NULL;
     }
+
+    s_wallpaper_force_full_refresh_pending = false;
+    rt_kprintf("wallpaper: full refresh request on exit\n");
+    lcd_request_epd_force_full_refresh_once();
 
     memset(&s_wallpaper_refs, 0, sizeof(s_wallpaper_refs));
     memset(s_wallpaper_image_path, 0, sizeof(s_wallpaper_image_path));

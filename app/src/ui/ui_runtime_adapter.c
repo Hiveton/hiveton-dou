@@ -171,6 +171,11 @@ static const ui_runtime_screen_entry_t *ui_runtime_find_entry_by_ref(lv_obj_t **
     return NULL;
 }
 
+static bool ui_runtime_screen_is_transient(ui_screen_id_t id)
+{
+    return id == UI_SCREEN_WALLPAPER;
+}
+
 static void ui_runtime_back_push(ui_screen_id_t screen_id)
 {
     rt_uint8_t i;
@@ -314,6 +319,13 @@ static void ui_runtime_prepare_target(const ui_runtime_screen_entry_t *entry)
         return;
     }
 
+    if (ui_runtime_screen_is_transient(entry->id) &&
+        *(entry->screen) != NULL &&
+        entry->destroy != NULL)
+    {
+        entry->destroy();
+    }
+
     if (*(entry->screen) == NULL)
     {
         entry->init();
@@ -441,6 +453,15 @@ void ui_runtime_switch_to(ui_screen_id_t target)
         ui_force_refresh_global_status_bar();
         lv_obj_update_layout(target_screen);
         lv_obj_invalidate(target_screen);
+
+        if (active_entry != NULL &&
+            active_entry->screen != NULL &&
+            *(active_entry->screen) == active_screen &&
+            ui_runtime_screen_is_transient(active_entry->id) &&
+            active_entry->destroy != NULL)
+        {
+            active_entry->destroy();
+        }
 
         if (!s_ui_runtime_first_present_done)
         {

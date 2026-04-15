@@ -159,7 +159,7 @@ static void ai_set_face_if_changed(const lv_image_dsc_t *img)
     }
 
     s_ai_face_cache = img;
-    lv_img_set_src(s_ai_face_img, img);
+    ui_img_set_src(s_ai_face_img, img);
 }
 
 static void ai_ui_pending_lock(void)

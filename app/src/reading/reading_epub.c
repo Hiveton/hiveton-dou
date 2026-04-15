@@ -1,4 +1,5 @@
 #include "reading_epub.h"
+#include "../ui/ui_image_policy.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -86,12 +87,17 @@ typedef struct
 typedef struct
 {
     uint32_t magic;
+    uint32_t size;
 } reading_epub_image_mem_hdr_t;
 
 typedef struct
 {
     unsigned src_width;
     unsigned src_height;
+    unsigned src_crop_x;
+    unsigned src_crop_y;
+    unsigned src_crop_width;
+    unsigned src_crop_height;
     unsigned target_width;
     unsigned target_height;
     lv_color_t *target_pixels;
@@ -194,6 +200,7 @@ static lv_color_t *reading_epub_alloc_image_pixels(size_t pixel_count)
         if (hdr != NULL)
         {
             hdr->magic = READING_EPUB_IMAGE_MEM_MAGIC_PSRAM;
+            hdr->size = (uint32_t)(pixel_count * sizeof(lv_color_t));
             return (lv_color_t *)(hdr + 1);
         }
     }
@@ -205,7 +212,42 @@ static lv_color_t *reading_epub_alloc_image_pixels(size_t pixel_count)
     }
 
     hdr->magic = READING_EPUB_IMAGE_MEM_MAGIC_SYS;
+    hdr->size = (uint32_t)(pixel_count * sizeof(lv_color_t));
     return (lv_color_t *)(hdr + 1);
+}
+
+static void *reading_epub_alloc_large_block(size_t size)
+{
+    reading_epub_image_mem_hdr_t *hdr = NULL;
+    rt_size_t alloc_size;
+
+    if (size == 0U)
+    {
+        return NULL;
+    }
+
+    alloc_size = RT_ALIGN(sizeof(*hdr) + size, RT_ALIGN_SIZE);
+    if (s_reading_epub_image_psram_heap_ready)
+    {
+        hdr = (reading_epub_image_mem_hdr_t *)rt_memheap_alloc(&s_reading_epub_image_psram_heap,
+                                                               alloc_size);
+        if (hdr != NULL)
+        {
+            hdr->magic = READING_EPUB_IMAGE_MEM_MAGIC_PSRAM;
+            hdr->size = (uint32_t)size;
+            return (void *)(hdr + 1);
+        }
+    }
+
+    hdr = (reading_epub_image_mem_hdr_t *)rt_malloc(alloc_size);
+    if (hdr == NULL)
+    {
+        return NULL;
+    }
+
+    hdr->magic = READING_EPUB_IMAGE_MEM_MAGIC_SYS;
+    hdr->size = (uint32_t)size;
+    return (void *)(hdr + 1);
 }
 
 static void reading_epub_free_image_pixels(void *ptr)
@@ -225,6 +267,62 @@ static void reading_epub_free_image_pixels(void *ptr)
     }
 
     rt_free(hdr);
+}
+
+static void reading_epub_free_large_block(void *ptr)
+{
+    reading_epub_free_image_pixels(ptr);
+}
+
+void *reading_epub_png_alloc(size_t size)
+{
+    void *ptr = reading_epub_alloc_large_block(size);
+
+    if (ptr == NULL)
+    {
+        rt_kprintf("reading_epub: png alloc failed size=%lu\n", (unsigned long)size);
+    }
+
+    return ptr;
+}
+
+void *reading_epub_png_realloc(void *ptr, size_t new_size)
+{
+    reading_epub_image_mem_hdr_t *hdr;
+    void *new_ptr;
+    size_t copy_size;
+
+    if (ptr == NULL)
+    {
+        return reading_epub_png_alloc(new_size);
+    }
+
+    if (new_size == 0U)
+    {
+        reading_epub_free_large_block(ptr);
+        return NULL;
+    }
+
+    hdr = ((reading_epub_image_mem_hdr_t *)ptr) - 1;
+    copy_size = hdr->size < new_size ? hdr->size : new_size;
+
+    new_ptr = reading_epub_alloc_large_block(new_size);
+    if (new_ptr == NULL)
+    {
+        rt_kprintf("reading_epub: png realloc failed old=%lu new=%lu\n",
+                   (unsigned long)copy_size,
+                   (unsigned long)new_size);
+        return NULL;
+    }
+
+    memcpy(new_ptr, ptr, copy_size);
+    reading_epub_free_large_block(ptr);
+    return new_ptr;
+}
+
+void reading_epub_png_free(void *ptr)
+{
+    reading_epub_free_large_block(ptr);
 }
 
 static void reading_epub_compute_target_size(unsigned src_width,
@@ -274,6 +372,59 @@ static void reading_epub_compute_target_size(unsigned src_width,
 
     if (target_width != NULL) *target_width = width;
     if (target_height != NULL) *target_height = height;
+}
+
+static void reading_epub_compute_fill_crop(unsigned src_width,
+                                           unsigned src_height,
+                                           unsigned dst_width,
+                                           unsigned dst_height,
+                                           unsigned *crop_x,
+                                           unsigned *crop_y,
+                                           unsigned *crop_width,
+                                           unsigned *crop_height)
+{
+    unsigned out_x = 0U;
+    unsigned out_y = 0U;
+    unsigned out_w = src_width;
+    unsigned out_h = src_height;
+    uint64_t lhs;
+    uint64_t rhs;
+
+    if (src_width == 0U || src_height == 0U || dst_width == 0U || dst_height == 0U)
+    {
+        if (crop_x != NULL) *crop_x = 0U;
+        if (crop_y != NULL) *crop_y = 0U;
+        if (crop_width != NULL) *crop_width = src_width;
+        if (crop_height != NULL) *crop_height = src_height;
+        return;
+    }
+
+    lhs = (uint64_t)src_width * (uint64_t)dst_height;
+    rhs = (uint64_t)dst_width * (uint64_t)src_height;
+
+    if (lhs > rhs)
+    {
+        out_w = (unsigned)(((uint64_t)src_height * (uint64_t)dst_width) / (uint64_t)dst_height);
+        if (out_w == 0U || out_w > src_width)
+        {
+            out_w = src_width;
+        }
+        out_x = (src_width - out_w) / 2U;
+    }
+    else if (lhs < rhs)
+    {
+        out_h = (unsigned)(((uint64_t)src_width * (uint64_t)dst_height) / (uint64_t)dst_width);
+        if (out_h == 0U || out_h > src_height)
+        {
+            out_h = src_height;
+        }
+        out_y = (src_height - out_h) / 2U;
+    }
+
+    if (crop_x != NULL) *crop_x = out_x;
+    if (crop_y != NULL) *crop_y = out_y;
+    if (crop_width != NULL) *crop_width = out_w;
+    if (crop_height != NULL) *crop_height = out_h;
 }
 
 static uint16_t reading_epub_le16(const uint8_t *data)
@@ -359,6 +510,7 @@ static bool reading_epub_zip_open(const char *epub_path, reading_epub_zip_t *zip
     off_t file_size;
     off_t tail_offset;
     uint8_t *tail_buffer;
+    size_t tail_size;
     ssize_t tail_read;
     ssize_t i;
     uint32_t central_dir_offset = 0U;
@@ -367,6 +519,7 @@ static bool reading_epub_zip_open(const char *epub_path, reading_epub_zip_t *zip
 
     if (epub_path == NULL || zip == NULL)
     {
+        rt_kprintf("reading_epub: zip open invalid args\n");
         return false;
     }
 
@@ -375,12 +528,18 @@ static bool reading_epub_zip_open(const char *epub_path, reading_epub_zip_t *zip
     fd = open(epub_path, O_RDONLY);
     if (fd < 0)
     {
+        rt_kprintf("reading_epub: zip open failed path=%s errno=%d\n",
+                   epub_path,
+                   rt_get_errno());
         return false;
     }
 
     file_size = lseek(fd, 0, SEEK_END);
     if (file_size <= 0)
     {
+        rt_kprintf("reading_epub: zip invalid file size path=%s size=%ld\n",
+                   epub_path,
+                   (long)file_size);
         close(fd);
         return false;
     }
@@ -390,22 +549,35 @@ static bool reading_epub_zip_open(const char *epub_path, reading_epub_zip_t *zip
                       0;
     if (lseek(fd, tail_offset, SEEK_SET) < 0)
     {
+        rt_kprintf("reading_epub: zip tail seek failed path=%s off=%ld errno=%d\n",
+                   epub_path,
+                   (long)tail_offset,
+                   rt_get_errno());
         close(fd);
         return false;
     }
 
-    tail_buffer = (uint8_t *)rt_malloc((size_t)(file_size - tail_offset));
+    tail_size = (size_t)(file_size - tail_offset);
+    tail_buffer = (uint8_t *)reading_epub_alloc_bytes(tail_size);
     if (tail_buffer == NULL)
     {
+        rt_kprintf("reading_epub: zip tail alloc failed path=%s size=%lu\n",
+                   epub_path,
+                   (unsigned long)tail_size);
         close(fd);
         return false;
     }
 
-    tail_read = read(fd, tail_buffer, (size_t)(file_size - tail_offset));
+    tail_read = read(fd, tail_buffer, tail_size);
     close(fd);
-    if (tail_read <= 0)
+    if (tail_read != (ssize_t)tail_size)
     {
-        rt_free(tail_buffer);
+        rt_kprintf("reading_epub: zip tail read failed path=%s read=%ld size=%lu errno=%d\n",
+                   epub_path,
+                   (long)tail_read,
+                   (unsigned long)tail_size,
+                   rt_get_errno());
+        reading_epub_free_bytes(tail_buffer);
         return false;
     }
 
@@ -422,21 +594,32 @@ static bool reading_epub_zip_open(const char *epub_path, reading_epub_zip_t *zip
         }
     }
 
-    rt_free(tail_buffer);
+    reading_epub_free_bytes(tail_buffer);
 
     if (entry_count == 0U || central_dir_offset == 0U)
     {
+        rt_kprintf("reading_epub: zip eocd invalid path=%s entries=%u cd_off=%lu\n",
+                   epub_path,
+                   (unsigned int)entry_count,
+                   (unsigned long)central_dir_offset);
         return false;
     }
 
     fd = open(epub_path, O_RDONLY);
     if (fd < 0)
     {
+        rt_kprintf("reading_epub: zip reopen failed path=%s errno=%d\n",
+                   epub_path,
+                   rt_get_errno());
         return false;
     }
 
     if (lseek(fd, (off_t)central_dir_offset, SEEK_SET) < 0)
     {
+        rt_kprintf("reading_epub: zip cdir seek failed path=%s off=%lu errno=%d\n",
+                   epub_path,
+                   (unsigned long)central_dir_offset,
+                   rt_get_errno());
         close(fd);
         return false;
     }
@@ -454,11 +637,22 @@ static bool reading_epub_zip_open(const char *epub_path, reading_epub_zip_t *zip
         read_size = read(fd, header, sizeof(header));
         if (read_size != (ssize_t)sizeof(header))
         {
+            rt_kprintf("reading_epub: zip cdir header read failed path=%s idx=%u errno=%d\n",
+                       epub_path,
+                       (unsigned int)zip->entry_count,
+                       rt_get_errno());
             break;
         }
 
         if (reading_epub_le32(header) != 0x02014B50UL)
         {
+            rt_kprintf("reading_epub: zip cdir signature mismatch path=%s idx=%u sig=%02x%02x%02x%02x\n",
+                       epub_path,
+                       (unsigned int)zip->entry_count,
+                       header[0],
+                       header[1],
+                       header[2],
+                       header[3]);
             break;
         }
 
@@ -498,6 +692,12 @@ static bool reading_epub_zip_open(const char *epub_path, reading_epub_zip_t *zip
     }
 
     close(fd);
+    if (zip->entry_count == 0U)
+    {
+        rt_kprintf("reading_epub: zip open no entries stored path=%s total=%u\n",
+                   epub_path,
+                   (unsigned int)entry_count);
+    }
     return zip->entry_count > 0U;
 }
 
@@ -1654,11 +1854,304 @@ static lv_color_t reading_epub_dither_to_bw_color(unsigned x,
                                                   uint8_t g,
                                                   uint8_t b)
 {
-    uint16_t gray = (uint16_t)(r * 30U + g * 59U + b * 11U) / 100U;
-    uint8_t threshold = (uint8_t)(reading_epub_bayer8_value(x, y) * 4U + 2U);
-    uint8_t bw = gray >= threshold ? 255U : 0U;
+    uint8_t level;
+    uint8_t out_gray;
 
-    return lv_color_make(bw, bw, bw);
+    level = ui_image_gray4_level_from_rgb(r, g, b);
+    (void)x;
+    (void)y;
+    out_gray = ui_image_gray4_level_to_u8(level);
+    return lv_color_make(out_gray, out_gray, out_gray);
+}
+
+static unsigned reading_epub_png_bit_extract(const unsigned char *row,
+                                             unsigned x,
+                                             unsigned bitdepth)
+{
+    unsigned bit_index;
+    unsigned byte_index;
+    unsigned shift;
+
+    switch (bitdepth)
+    {
+    case 1U:
+        bit_index = x;
+        byte_index = bit_index >> 3;
+        shift = 7U - (bit_index & 7U);
+        return (row[byte_index] >> shift) & 0x01U;
+    case 2U:
+        bit_index = x * 2U;
+        byte_index = bit_index >> 3;
+        shift = 6U - (bit_index & 7U);
+        return (row[byte_index] >> shift) & 0x03U;
+    case 4U:
+        bit_index = x * 4U;
+        byte_index = bit_index >> 3;
+        shift = 4U - (bit_index & 7U);
+        return (row[byte_index] >> shift) & 0x0FU;
+    case 8U:
+        return row[x];
+    case 16U:
+        return ((unsigned)row[x * 2U] << 8) | (unsigned)row[x * 2U + 1U];
+    default:
+        return 0U;
+    }
+}
+
+static unsigned reading_epub_png_row_stride(unsigned width,
+                                            const LodePNGColorMode *mode)
+{
+    unsigned channels = 0U;
+    unsigned bits_per_row;
+
+    if (mode == NULL || width == 0U)
+    {
+        return 0U;
+    }
+
+    switch (mode->colortype)
+    {
+    case LCT_GREY:
+    case LCT_PALETTE:
+        channels = 1U;
+        break;
+    case LCT_RGB:
+        channels = 3U;
+        break;
+    case LCT_GREY_ALPHA:
+        channels = 2U;
+        break;
+    case LCT_RGBA:
+        channels = 4U;
+        break;
+    default:
+        return 0U;
+    }
+
+    bits_per_row = width * channels * mode->bitdepth;
+    return (bits_per_row + 7U) >> 3;
+}
+
+static uint8_t reading_epub_png_scale_sample_to_u8(unsigned sample,
+                                                   unsigned bitdepth)
+{
+    if (bitdepth == 0U)
+    {
+        return 0U;
+    }
+
+    if (bitdepth >= 8U)
+    {
+        return (uint8_t)(sample >> (bitdepth - 8U));
+    }
+
+    return (uint8_t)((sample * 255U) / ((1U << bitdepth) - 1U));
+}
+
+static void reading_epub_png_read_rgb(const unsigned char *src,
+                                      unsigned src_width,
+                                      unsigned src_height,
+                                      const LodePNGColorMode *mode,
+                                      unsigned x,
+                                      unsigned y,
+                                      uint8_t *r,
+                                      uint8_t *g,
+                                      uint8_t *b)
+{
+    const unsigned char *row;
+    unsigned stride;
+    uint8_t rr = 255U;
+    uint8_t gg = 255U;
+    uint8_t bb = 255U;
+    uint8_t aa = 255U;
+
+    if (r != NULL) *r = 255U;
+    if (g != NULL) *g = 255U;
+    if (b != NULL) *b = 255U;
+
+    if (src == NULL || mode == NULL || x >= src_width || y >= src_height)
+    {
+        return;
+    }
+
+    stride = reading_epub_png_row_stride(src_width, mode);
+    if (stride == 0U)
+    {
+        return;
+    }
+
+    row = src + ((size_t)y * stride);
+
+    switch (mode->colortype)
+    {
+    case LCT_PALETTE:
+    {
+        unsigned index = reading_epub_png_bit_extract(row, x, mode->bitdepth);
+        if (mode->palette != NULL && index < mode->palettesize)
+        {
+            const unsigned char *palette = &mode->palette[index * 4U];
+            rr = palette[0];
+            gg = palette[1];
+            bb = palette[2];
+            aa = palette[3];
+        }
+        break;
+    }
+    case LCT_GREY:
+    {
+        uint8_t gray = reading_epub_png_scale_sample_to_u8(
+            reading_epub_png_bit_extract(row, x, mode->bitdepth),
+            mode->bitdepth);
+        rr = gray;
+        gg = gray;
+        bb = gray;
+        break;
+    }
+    case LCT_GREY_ALPHA:
+    {
+        unsigned gray_sample;
+        unsigned alpha_sample;
+
+        if (mode->bitdepth == 8U)
+        {
+            gray_sample = row[x * 2U];
+            alpha_sample = row[x * 2U + 1U];
+        }
+        else
+        {
+            gray_sample = ((unsigned)row[x * 4U] << 8) | row[x * 4U + 1U];
+            alpha_sample = ((unsigned)row[x * 4U + 2U] << 8) | row[x * 4U + 3U];
+        }
+
+        rr = gg = bb = reading_epub_png_scale_sample_to_u8(gray_sample, mode->bitdepth);
+        aa = reading_epub_png_scale_sample_to_u8(alpha_sample, mode->bitdepth);
+        break;
+    }
+    case LCT_RGB:
+        if (mode->bitdepth == 8U)
+        {
+            const unsigned char *pixel = &row[x * 3U];
+            rr = pixel[0];
+            gg = pixel[1];
+            bb = pixel[2];
+        }
+        else
+        {
+            const unsigned char *pixel = &row[x * 6U];
+            rr = pixel[0];
+            gg = pixel[2];
+            bb = pixel[4];
+        }
+        break;
+    case LCT_RGBA:
+        if (mode->bitdepth == 8U)
+        {
+            const unsigned char *pixel = &row[x * 4U];
+            rr = pixel[0];
+            gg = pixel[1];
+            bb = pixel[2];
+            aa = pixel[3];
+        }
+        else
+        {
+            const unsigned char *pixel = &row[x * 8U];
+            rr = pixel[0];
+            gg = pixel[2];
+            bb = pixel[4];
+            aa = pixel[6];
+        }
+        break;
+    default:
+        break;
+    }
+
+    if (aa < 255U)
+    {
+        rr = (uint8_t)(((unsigned)rr * aa + 255U * (255U - aa)) / 255U);
+        gg = (uint8_t)(((unsigned)gg * aa + 255U * (255U - aa)) / 255U);
+        bb = (uint8_t)(((unsigned)bb * aa + 255U * (255U - aa)) / 255U);
+    }
+
+    if (r != NULL) *r = rr;
+    if (g != NULL) *g = gg;
+    if (b != NULL) *b = bb;
+}
+
+static void reading_epub_scale_png_raw_to_rgb565(const unsigned char *src,
+                                                 unsigned src_width,
+                                                 unsigned src_height,
+                                                 const LodePNGColorMode *mode,
+                                                 uint16_t max_width,
+                                                 uint16_t max_height,
+                                                 lv_image_dsc_t *out_image)
+{
+    unsigned target_width;
+    unsigned target_height;
+    unsigned crop_x = 0U;
+    unsigned crop_y = 0U;
+    unsigned crop_width = src_width;
+    unsigned crop_height = src_height;
+    lv_color_t *pixels;
+
+    if (src == NULL || mode == NULL || out_image == NULL)
+    {
+        return;
+    }
+
+    target_width = (max_width > 0U) ? (unsigned)max_width : src_width;
+    target_height = (max_height > 0U) ? (unsigned)max_height : src_height;
+    if (target_width == 0U) target_width = src_width;
+    if (target_height == 0U) target_height = src_height;
+
+    reading_epub_compute_fill_crop(src_width,
+                                   src_height,
+                                   target_width,
+                                   target_height,
+                                   &crop_x,
+                                   &crop_y,
+                                   &crop_width,
+                                   &crop_height);
+
+    pixels = reading_epub_alloc_image_pixels((size_t)target_width * (size_t)target_height);
+    if (pixels == NULL)
+    {
+        memset(out_image, 0, sizeof(*out_image));
+        return;
+    }
+
+    for (unsigned y = 0; y < target_height; ++y)
+    {
+        unsigned src_y = crop_y + (unsigned)(((uint64_t)y * crop_height) / target_height);
+        if (src_y >= src_height)
+        {
+            src_y = src_height - 1U;
+        }
+
+        for (unsigned x = 0; x < target_width; ++x)
+        {
+            unsigned src_x = crop_x + (unsigned)(((uint64_t)x * crop_width) / target_width);
+            uint8_t r;
+            uint8_t g;
+            uint8_t b;
+
+            if (src_x >= src_width)
+            {
+                src_x = src_width - 1U;
+            }
+
+            reading_epub_png_read_rgb(src, src_width, src_height, mode, src_x, src_y, &r, &g, &b);
+            pixels[y * target_width + x] = reading_epub_dither_to_bw_color(x, y, r, g, b);
+        }
+    }
+
+    memset(out_image, 0, sizeof(*out_image));
+    out_image->header.magic = LV_IMAGE_HEADER_MAGIC;
+    out_image->header.cf = LV_COLOR_FORMAT_RGB565;
+    out_image->header.w = (lv_coord_t)target_width;
+    out_image->header.h = (lv_coord_t)target_height;
+    out_image->header.stride = (lv_coord_t)(target_width * sizeof(lv_color_t));
+    out_image->data_size = target_width * target_height * sizeof(lv_color_t);
+    out_image->data = (const uint8_t *)pixels;
 }
 
 static void reading_epub_scale_rgb_to_rgb565(const unsigned char *src,
@@ -1669,27 +2162,59 @@ static void reading_epub_scale_rgb_to_rgb565(const unsigned char *src,
                                              uint16_t max_height,
                                              lv_image_dsc_t *out_image)
 {
+    unsigned target_width;
+    unsigned target_height;
+    unsigned crop_x = 0U;
+    unsigned crop_y = 0U;
+    unsigned crop_width = src_width;
+    unsigned crop_height = src_height;
     lv_color_t *pixels;
 
-    (void)max_width;
-    (void)max_height;
+    target_width = (max_width > 0U) ? (unsigned)max_width : src_width;
+    target_height = (max_height > 0U) ? (unsigned)max_height : src_height;
+    if (target_width == 0U) target_width = src_width;
+    if (target_height == 0U) target_height = src_height;
 
-    pixels = reading_epub_alloc_image_pixels((size_t)src_width * (size_t)src_height);
+    reading_epub_compute_fill_crop(src_width,
+                                   src_height,
+                                   target_width,
+                                   target_height,
+                                   &crop_x,
+                                   &crop_y,
+                                   &crop_width,
+                                   &crop_height);
+
+    pixels = reading_epub_alloc_image_pixels((size_t)target_width * (size_t)target_height);
     if (pixels == NULL)
     {
-        rt_kprintf("reading_epub: image alloc failed src=%ux%u\n",
-                   src_width, src_height);
+        rt_kprintf("reading_epub: image alloc failed src=%ux%u dst=%ux%u\n",
+                   src_width, src_height, target_width, target_height);
         memset(out_image, 0, sizeof(*out_image));
         return;
     }
 
-    for (unsigned y = 0; y < src_height; ++y)
+    for (unsigned y = 0; y < target_height; ++y)
     {
-        for (unsigned x = 0; x < src_width; ++x)
-        {
-            const unsigned char *pixel = &src[(y * src_width + x) * src_channels];
+        unsigned src_y = crop_y + (unsigned)(((uint64_t)y * crop_height) / target_height);
 
-            pixels[y * src_width + x] =
+        if (src_y >= src_height)
+        {
+            src_y = src_height - 1U;
+        }
+
+        for (unsigned x = 0; x < target_width; ++x)
+        {
+            unsigned src_x = crop_x + (unsigned)(((uint64_t)x * crop_width) / target_width);
+            const unsigned char *pixel;
+
+            if (src_x >= src_width)
+            {
+                src_x = src_width - 1U;
+            }
+
+            pixel = &src[(src_y * src_width + src_x) * src_channels];
+
+            pixels[y * target_width + x] =
                 reading_epub_dither_to_bw_color(x, y, pixel[0], pixel[1], pixel[2]);
         }
     }
@@ -1697,10 +2222,10 @@ static void reading_epub_scale_rgb_to_rgb565(const unsigned char *src,
     memset(out_image, 0, sizeof(*out_image));
     out_image->header.magic = LV_IMAGE_HEADER_MAGIC;
     out_image->header.cf = LV_COLOR_FORMAT_RGB565;
-    out_image->header.w = (lv_coord_t)src_width;
-    out_image->header.h = (lv_coord_t)src_height;
-    out_image->header.stride = (lv_coord_t)(src_width * sizeof(lv_color_t));
-    out_image->data_size = src_width * src_height * sizeof(lv_color_t);
+    out_image->header.w = (lv_coord_t)target_width;
+    out_image->header.h = (lv_coord_t)target_height;
+    out_image->header.stride = (lv_coord_t)(target_width * sizeof(lv_color_t));
+    out_image->data_size = target_width * target_height * sizeof(lv_color_t);
     out_image->data = (const uint8_t *)pixels;
 }
 
@@ -1754,27 +2279,74 @@ static int reading_epub_jpeg_output(JDEC *jd, void *bitmap, JRECT *rect)
     rect_width = (unsigned)(rect->right - rect->left + 1U);
     for (unsigned sy = rect->top; sy <= rect->bottom; ++sy)
     {
-        unsigned dst_y = sy;
         unsigned row = sy - rect->top;
+        unsigned dst_y0;
+        unsigned dst_y1;
 
-        if (dst_y >= target->target_height)
+        if (target->src_height == 0U ||
+            sy < target->src_crop_y ||
+            sy >= (target->src_crop_y + target->src_crop_height))
         {
             continue;
         }
 
+        dst_y0 = ((uint64_t)(sy - target->src_crop_y) * target->target_height) /
+                 target->src_crop_height;
+        dst_y1 = ((uint64_t)(sy - target->src_crop_y + 1U) * target->target_height) /
+                 target->src_crop_height;
+        if (dst_y1 <= dst_y0)
+        {
+            dst_y1 = dst_y0 + 1U;
+        }
+        if (dst_y0 >= target->target_height)
+        {
+            continue;
+        }
+        if (dst_y1 > target->target_height)
+        {
+            dst_y1 = target->target_height;
+        }
+
         for (unsigned sx = rect->left; sx <= rect->right; ++sx)
         {
-            unsigned dst_x = sx;
             unsigned col = sx - rect->left;
-            const uint8_t *pixel = &src[(row * rect_width + col) * 3U];
+            unsigned dst_x0;
+            unsigned dst_x1;
+            const uint8_t *pixel;
 
-            if (dst_x >= target->target_width)
+            if (target->src_width == 0U ||
+                sx < target->src_crop_x ||
+                sx >= (target->src_crop_x + target->src_crop_width))
             {
                 continue;
             }
 
-            target->target_pixels[dst_y * target->target_width + dst_x] =
-                reading_epub_dither_to_bw_color(dst_x, dst_y, pixel[2], pixel[1], pixel[0]);
+            pixel = &src[(row * rect_width + col) * 3U];
+            dst_x0 = ((uint64_t)(sx - target->src_crop_x) * target->target_width) /
+                     target->src_crop_width;
+            dst_x1 = ((uint64_t)(sx - target->src_crop_x + 1U) * target->target_width) /
+                     target->src_crop_width;
+            if (dst_x1 <= dst_x0)
+            {
+                dst_x1 = dst_x0 + 1U;
+            }
+            if (dst_x0 >= target->target_width)
+            {
+                continue;
+            }
+            if (dst_x1 > target->target_width)
+            {
+                dst_x1 = target->target_width;
+            }
+
+            for (unsigned dy = dst_y0; dy < dst_y1; ++dy)
+            {
+                for (unsigned dx = dst_x0; dx < dst_x1; ++dx)
+                {
+                    target->target_pixels[dy * target->target_width + dx] =
+                        reading_epub_dither_to_bw_color(dx, dy, pixel[2], pixel[1], pixel[0]);
+                }
+            }
         }
     }
 
@@ -1793,10 +2365,8 @@ static bool reading_epub_decode_jpeg(const uint8_t *image_data,
     lv_color_t *pixels;
     JRESULT result;
     unsigned decode_scale = 0U;
-    unsigned decode_width;
-    unsigned decode_height;
     unsigned target_width;
-    (void)max_height;
+    unsigned target_height;
 
     if (image_data == NULL || image_size == 0U || out_image == NULL)
     {
@@ -1824,44 +2394,43 @@ static bool reading_epub_decode_jpeg(const uint8_t *image_data,
         return false;
     }
 
-    target_width = max_width > 0U ? max_width : (unsigned)jd.width;
-    while (decode_scale < 3U)
+    target_width = (max_width > 0U) ? (unsigned)max_width : (unsigned)jd.width;
+    target_height = (max_height > 0U) ? (unsigned)max_height : (unsigned)jd.height;
+    if (target_width == 0U)
     {
-        unsigned next_width = ((unsigned)jd.width + ((1U << (decode_scale + 1U)) - 1U)) >>
-                              (decode_scale + 1U);
-        if (next_width < target_width)
-        {
-            break;
-        }
-        ++decode_scale;
+        target_width = (unsigned)jd.width;
+    }
+    if (target_height == 0U)
+    {
+        target_height = (unsigned)jd.height;
     }
 
-    decode_width = ((unsigned)jd.width + ((1U << decode_scale) - 1U)) >> decode_scale;
-    decode_height = ((unsigned)jd.height + ((1U << decode_scale) - 1U)) >> decode_scale;
-    if (decode_width == 0U || decode_height == 0U)
-    {
-        rt_free(workbuf);
-        return false;
-    }
-
-    pixels = reading_epub_alloc_image_pixels((size_t)decode_width * (size_t)decode_height);
+    pixels = reading_epub_alloc_image_pixels((size_t)target_width * (size_t)target_height);
     if (pixels == NULL)
     {
-        rt_kprintf("reading_epub: jpeg alloc failed src=%ux%u decode=%ux%u scale=%u\n",
+        rt_kprintf("reading_epub: jpeg alloc failed src=%ux%u dst=%ux%u scale=%u\n",
                    jd.width,
                    jd.height,
-                   decode_width,
-                   decode_height,
+                   target_width,
+                   target_height,
                    decode_scale);
         rt_free(workbuf);
         return false;
     }
 
-    memset(pixels, 0xFF, decode_width * decode_height * sizeof(lv_color_t));
-    context.target.src_width = decode_width;
-    context.target.src_height = decode_height;
-    context.target.target_width = decode_width;
-    context.target.target_height = decode_height;
+    memset(pixels, 0xFF, target_width * target_height * sizeof(lv_color_t));
+    context.target.src_width = (unsigned)jd.width;
+    context.target.src_height = (unsigned)jd.height;
+    reading_epub_compute_fill_crop(context.target.src_width,
+                                   context.target.src_height,
+                                   target_width,
+                                   target_height,
+                                   &context.target.src_crop_x,
+                                   &context.target.src_crop_y,
+                                   &context.target.src_crop_width,
+                                   &context.target.src_crop_height);
+    context.target.target_width = target_width;
+    context.target.target_height = target_height;
     context.target.target_pixels = pixels;
 
     context.source.offset = 0U;
@@ -1968,24 +2537,39 @@ bool reading_epub_decode_image(const char *epub_path,
 
     if (reading_epub_has_extension(internal_path, ".png"))
     {
-        unsigned char *rgb = NULL;
+        unsigned char *raw = NULL;
         unsigned width = 0U;
         unsigned height = 0U;
-        unsigned error = lodepng_decode24(&rgb, &width, &height, image_data, image_size);
+        unsigned error;
+        LodePNGState state;
+
+        lodepng_state_init(&state);
+        state.decoder.color_convert = 0U;
+        error = lodepng_decode(&raw, &width, &height, &state, image_data, image_size);
 
         reading_epub_free_bytes(image_data);
         image_data = NULL;
-        if (error != 0U || rgb == NULL)
+        if (error != 0U || raw == NULL)
         {
-            rt_kprintf("reading_epub: png decode failed error=%u internal=%s\n",
+            rt_kprintf("reading_epub: png decode failed error=%u internal=%s type=%u depth=%u\n",
                        error,
-                       internal_path != NULL ? internal_path : "<null>");
-            if (rgb != NULL) lv_free(rgb);
+                       internal_path != NULL ? internal_path : "<null>",
+                       (unsigned)state.info_png.color.colortype,
+                       (unsigned)state.info_png.color.bitdepth);
+            if (raw != NULL) reading_epub_png_free(raw);
+            lodepng_state_cleanup(&state);
             goto cleanup;
         }
 
-        reading_epub_scale_rgb_to_rgb565(rgb, width, height, 3U, 0U, 0U, out_image);
-        lv_free(rgb);
+        reading_epub_scale_png_raw_to_rgb565(raw,
+                                             width,
+                                             height,
+                                             &state.info_png.color,
+                                             max_width,
+                                             max_height,
+                                             out_image);
+        reading_epub_png_free(raw);
+        lodepng_state_cleanup(&state);
         ok = out_image->data != NULL;
         goto cleanup;
     }

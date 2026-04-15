@@ -131,6 +131,49 @@ const unsigned char LUT_DU[282]={
 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
+
+static const unsigned char LUT_GRAY4[245] = {
+/*Vcom*/
+0x01, 0x08, 0x02, 0x08, 0x03, 0x01, 0x01,
+0x01, 0x09, 0x03, 0x04, 0x03, 0x01, 0x01,
+0x01, 0x0A, 0x02, 0x01, 0x01, 0x01, 0x01,
+0x01, 0x02, 0x02, 0x00, 0x00, 0x01, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+/*WW*/
+0x01, 0x08, 0x02, 0x08, 0x03, 0x01, 0x01,
+0x01, 0x49, 0x43, 0x44, 0x03, 0x01, 0x01,
+0x01, 0x8A, 0x82, 0x81, 0x81, 0x01, 0x01,
+0x01, 0x82, 0x02, 0x00, 0x00, 0x01, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+/*BW*/
+0x01, 0x88, 0x82, 0x08, 0x03, 0x01, 0x01,
+0x01, 0x49, 0x43, 0x04, 0x03, 0x01, 0x01,
+0x01, 0x0A, 0x82, 0x01, 0x01, 0x01, 0x01,
+0x01, 0x02, 0x02, 0x00, 0x00, 0x01, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+/*WB*/
+0x01, 0x88, 0x02, 0x08, 0x03, 0x01, 0x01,
+0x01, 0x49, 0x43, 0x04, 0x03, 0x01, 0x01,
+0x01, 0x0A, 0x82, 0x81, 0x81, 0x01, 0x01,
+0x01, 0x02, 0x02, 0x00, 0x00, 0x01, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+/*BB*/
+0x01, 0x88, 0x82, 0x88, 0x03, 0x01, 0x01,
+0x01, 0x49, 0x43, 0x44, 0x03, 0x01, 0x01,
+0x01, 0x0A, 0x02, 0x01, 0x01, 0x01, 0x01,
+0x01, 0x02, 0x42, 0x00, 0x00, 0x01, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
 static struct rt_device_pwm *g_epd_backlight_pwm = RT_NULL;
 static rt_bool_t g_epd_backlight_pwm_ready = RT_FALSE;
 
@@ -251,6 +294,7 @@ static void EPD_SetBacklight(uint8_t br)
  */
 #define EPD_MONO_THRESHOLD_LEVEL 2U
 #define EPD_USE_GRAY2_REFRESH 0
+#define EPD_USE_TRUE_GRAY4_GC 1
 
 #define REG_LUT_VCOM 0x20
 #define REG_LUT_W2W 0x21
@@ -323,6 +367,7 @@ static void EPD_DisplayImage(LCDC_HandleTypeDef *hlcdc, uint8_t img_flag);
 static void EPD_EnterDeepSleep(LCDC_HandleTypeDef *hlcdc);
 static void EPD_LoadLUT(LCDC_HandleTypeDef *hlcdc, uint8_t lut_mode);
 static void EPD_LoadLUTGrayExperiment(LCDC_HandleTypeDef *hlcdc);
+static void EPD_LoadLUTGray4(LCDC_HandleTypeDef *hlcdc);
 static void LUTGC(LCDC_HandleTypeDef *hlcdc);
 static void EPD_Refresh(LCDC_HandleTypeDef *hlcdc);
 static void EPD_ReadBusy(void);
@@ -366,6 +411,8 @@ static uint16_t s_epd_mono_dither_x0 = 0;
 static uint16_t s_epd_mono_dither_y0 = 0;
 static uint16_t s_epd_mono_dither_x1 = 0;
 static uint16_t s_epd_mono_dither_y1 = 0;
+static rt_bool_t s_epd_image_refresh_hint = RT_FALSE;
+static rt_bool_t s_epd_force_full_refresh_once = RT_FALSE;
 static rt_bool_t s_epd_gray4_experiment_region_valid = RT_FALSE;
 static uint16_t s_epd_gray4_experiment_x0 = 0;
 static uint16_t s_epd_gray4_experiment_y0 = 0;
@@ -866,6 +913,16 @@ void lcd_set_epd_gray4_experiment_region(rt_bool_t enabled,
     s_epd_gray4_experiment_y1 = py1;
 }
 
+void lcd_set_epd_image_refresh_hint(rt_bool_t enabled)
+{
+    s_epd_image_refresh_hint = enabled ? RT_TRUE : RT_FALSE;
+}
+
+void lcd_request_epd_force_full_refresh_once(void)
+{
+    s_epd_force_full_refresh_once = RT_TRUE;
+}
+
 static void EPD_MarkDirtyPhysicalRegion(uint16_t x0, uint16_t y0, uint16_t x1,
                                         uint16_t y1)
 {
@@ -1316,53 +1373,28 @@ static void EPD_FrameBuffer_Flush(LCDC_HandleTypeDef *hlcdc)
     EPD_SetFullWindow(hlcdc);
 #endif
 
-    if (s_epd_gray4_experiment_region_valid)
+#if EPD_USE_TRUE_GRAY4_GC
+    EPD_LoadLUTGray4(hlcdc);
+    EPD_Gray2ToDualMonoPlanes();
+    if (s_epd_stats_dump_count < 3U)
     {
-        EPD_LoadLUTGrayExperiment(hlcdc);
-        EPD_Gray2ToMonoAndGray4Experiment();
-        if (s_epd_stats_dump_count < 3U)
-        {
-            epd_debug_dump_stats("flush_gc_exp");
-            s_epd_stats_dump_count++;
-        }
-        /*
-         * Gray experiment needs the panel to physically start from the
-         * "old" state first; otherwise BW/WB transitions can collapse into
-         * plain black/white. Pre-condition one refresh with old->old, then
-         * perform the actual old->new transition.
-         */
-        EPD_SendCommandDataBuf(hlcdc, REG_WRITE_OLD_DATA, mixed_framebuffer_prev_mono,
-                               EPD_MONO_FRAME_SIZE);
-        EPD_SendCommandDataBuf(hlcdc, REG_WRITE_NEW_DATA, mixed_framebuffer_prev_mono,
-                               EPD_MONO_FRAME_SIZE);
-        s_epd_refresh_fallback_ms = EPD_GC_FULL_REFRESH_FALLBACK_MS;
-        refresh_start = rt_tick_get();
-        EPD_Refresh(hlcdc);
-        refresh_end = rt_tick_get();
-        rt_kprintf("[standby_dbg] epd gray prep refresh done elapsed=%u ms\n",
-                   epd_ticks_to_ms(refresh_end - refresh_start));
-
-        EPD_ReadBusy();
-        EPD_LoadLUTGrayExperiment(hlcdc);
-        EPD_SendCommandDataBuf(hlcdc, REG_WRITE_OLD_DATA, mixed_framebuffer_prev_mono,
-                               EPD_MONO_FRAME_SIZE);
-        EPD_SendCommandDataBuf(hlcdc, REG_WRITE_NEW_DATA, mixed_framebuffer_mono,
-                               EPD_MONO_FRAME_SIZE);
+        epd_debug_dump_stats("flush_gray4_gc");
+        s_epd_stats_dump_count++;
     }
-    else
+    EPD_SendCommandDataBuf(hlcdc, REG_WRITE_OLD_DATA, mixed_framebuffer_prev_mono,
+                           EPD_MONO_FRAME_SIZE);
+    EPD_SendCommandDataBuf(hlcdc, REG_WRITE_NEW_DATA, mixed_framebuffer_mono,
+                           EPD_MONO_FRAME_SIZE);
+#else
+    EPD_Gray2ToMono();
+    if (s_epd_stats_dump_count < 3U)
     {
-        // 使用Layer方式发送帧缓冲区数据
-        EPD_Gray2ToMono();
-        if (s_epd_stats_dump_count < 3U)
-        {
-            epd_debug_dump_stats("flush_gc");
-            s_epd_stats_dump_count++;
-        }
-
-        /* The new panel sample updates visible content through 0x13 only. */
-        EPD_SendCommandDataBuf(hlcdc, REG_WRITE_NEW_DATA, mixed_framebuffer_mono,
-                               EPD_MONO_FRAME_SIZE);
+        epd_debug_dump_stats("flush_gc");
+        s_epd_stats_dump_count++;
     }
+    EPD_SendCommandDataBuf(hlcdc, REG_WRITE_NEW_DATA, mixed_framebuffer_mono,
+                           EPD_MONO_FRAME_SIZE);
+#endif
 
     // 刷新显示
     s_epd_refresh_fallback_ms = EPD_GC_FULL_REFRESH_FALLBACK_MS;
@@ -1371,9 +1403,19 @@ static void EPD_FrameBuffer_Flush(LCDC_HandleTypeDef *hlcdc)
     refresh_end = rt_tick_get();
     rt_kprintf("[standby_dbg] epd full refresh done elapsed=%u ms\n",
                epd_ticks_to_ms(refresh_end - refresh_start));
+#if EPD_USE_TRUE_GRAY4_GC
+    /*
+     * Keep the partial DU baseline in sync with the currently displayed
+     * image. Full-screen true gray refresh uses dual planes, but later DU
+     * partial refreshes still compare against a mono buffer.
+     */
+    EPD_Gray2ToMono();
+#endif
     memcpy(mixed_framebuffer_prev_mono, mixed_framebuffer_mono,
            sizeof(mixed_framebuffer_prev_mono));
     s_partial_refresh_count = 0;
+    s_epd_image_refresh_hint = RT_FALSE;
+    s_epd_force_full_refresh_once = RT_FALSE;
     EPD_ClearDirtyRegion();
 }
 
@@ -1388,6 +1430,18 @@ static void EPD_FrameBuffer_FlushFast(LCDC_HandleTypeDef *hlcdc)
     }
 
     if (s_epd_mono_dither_enabled)
+    {
+        EPD_FrameBuffer_Flush(hlcdc);
+        return;
+    }
+
+    if (s_epd_force_full_refresh_once)
+    {
+        EPD_FrameBuffer_Flush(hlcdc);
+        return;
+    }
+
+    if (s_epd_image_refresh_hint)
     {
         EPD_FrameBuffer_Flush(hlcdc);
         return;
@@ -1427,6 +1481,7 @@ static void EPD_FrameBuffer_FlushFast(LCDC_HandleTypeDef *hlcdc)
     {
         s_partial_refresh_count++;
     }
+    s_epd_force_full_refresh_once = RT_FALSE;
     EPD_ClearDirtyRegion();
 }
 
@@ -1595,6 +1650,12 @@ static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
     }
 
     if (s_epd_mono_dither_enabled || s_epd_gray4_experiment_region_valid)
+    {
+        EPD_FrameBuffer_Flush(hlcdc);
+        return;
+    }
+
+    if (s_epd_image_refresh_hint)
     {
         EPD_FrameBuffer_Flush(hlcdc);
         return;
@@ -2024,6 +2085,14 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc,
                                                        s_dirty_y0,
                                                        s_dirty_x1,
                                                        s_dirty_y1);
+        if (s_epd_image_refresh_hint)
+        {
+            prefer_full_refresh = 1;
+        }
+        if (s_epd_force_full_refresh_once)
+        {
+            prefer_full_refresh = 1;
+        }
 #if EPD_USE_GRAY2_REFRESH
         prefer_full_refresh = 1;
 #endif
@@ -2042,13 +2111,37 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc,
         }
         else
         {
-            if (s_partial_refresh_count >= EPD_PERIODIC_GC_TRIGGER_COUNT)
+            const char *full_reason = "gc";
+            rt_bool_t periodic_gc_due = (s_partial_refresh_count >= EPD_PERIODIC_GC_TRIGGER_COUNT) ?
+                                        RT_TRUE : RT_FALSE;
+
+            if (s_epd_force_full_refresh_once)
+            {
+                full_reason = "force";
+            }
+            else if (s_epd_image_refresh_hint)
+            {
+                full_reason = "image";
+            }
+            else if (periodic_gc_due)
+            {
+                full_reason = "gc";
+            }
+            else if (!s_dirty_area_valid)
+            {
+                full_reason = "full";
+            }
+
+            if (periodic_gc_due &&
+                !s_epd_force_full_refresh_once &&
+                !s_epd_image_refresh_hint)
             {
                 rt_kprintf("[standby_dbg] epd periodic gc trigger at update %u (partial_count=%u)\n",
                            (unsigned int)EPD_PERIODIC_GC_AFTER_DU_COUNT,
                            (unsigned int)s_partial_refresh_count);
             }
-            rt_kprintf("[standby_dbg] epd gc full flush src=(%d,%d)-(%d,%d) dirty_valid=%d dirty=(%d,%d)-(%d,%d) partial_count=%u\n",
+            rt_kprintf("[standby_dbg] epd full flush reason=%s src=(%d,%d)-(%d,%d) dirty_valid=%d dirty=(%d,%d)-(%d,%d) partial_count=%u\n",
+                       full_reason,
                        Xpos0, Ypos0, Xpos1, Ypos1,
                        s_dirty_area_valid,
                        s_dirty_x0, s_dirty_y0, s_dirty_x1, s_dirty_y1,
@@ -2231,12 +2324,17 @@ static void EPD_LoadLUT(LCDC_HandleTypeDef *hlcdc, uint8_t lut_mode)
 
 static void EPD_LoadLUTGrayExperiment(LCDC_HandleTypeDef *hlcdc)
 {
+    EPD_LoadLUTGray4(hlcdc);
+}
+
+static void EPD_LoadLUTGray4(LCDC_HandleTypeDef *hlcdc)
+{
     EPD_SendCommandData(hlcdc, REG_VCOM_DATA_INTERV, 0x97);
-    EPD_SendCommandDataBuf(hlcdc, REG_LUT_VCOM, &LUT_GC[0], 49);
-    EPD_SendCommandDataBuf(hlcdc, REG_LUT_W2W, &LUT_GC[49], 49);
-    EPD_SendCommandDataBuf(hlcdc, REG_LUT_K2W, &LUT_GC[98], 49);
-    EPD_SendCommandDataBuf(hlcdc, REG_LUT_W2K, &LUT_GC[147], 49);
-    EPD_SendCommandDataBuf(hlcdc, REG_LUT_K2K, &LUT_GC[196], 49);
+    EPD_SendCommandDataBuf(hlcdc, REG_LUT_VCOM, &LUT_GRAY4[0], 49);
+    EPD_SendCommandDataBuf(hlcdc, REG_LUT_W2W, &LUT_GRAY4[49], 49);
+    EPD_SendCommandDataBuf(hlcdc, REG_LUT_K2W, &LUT_GRAY4[98], 49);
+    EPD_SendCommandDataBuf(hlcdc, REG_LUT_W2K, &LUT_GRAY4[147], 49);
+    EPD_SendCommandDataBuf(hlcdc, REG_LUT_K2K, &LUT_GRAY4[196], 49);
 }
 
 static void EPD_DisplayImage(LCDC_HandleTypeDef *hlcdc, uint8_t img_flag)

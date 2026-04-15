@@ -3,6 +3,7 @@
 #include "ui.h"
 #include "ui_i18n.h"
 #include "ui_helpers.h"
+#include "drv_lcd.h"
 #include "../../xiaozhi/recorder_service.h"
 
 extern const lv_image_dsc_t 录音开启;
@@ -30,7 +31,7 @@ static void ui_recorder_update_action_style(bool recording)
 
     if (s_recorder_refs.action_image != NULL)
     {
-        lv_img_set_src(s_recorder_refs.action_image, recording ? &录音开启 : &录音未开启);
+        ui_img_set_src(s_recorder_refs.action_image, recording ? &录音开启 : &录音未开启);
     }
 }
 
@@ -61,11 +62,11 @@ static void ui_recorder_refresh_view(void)
     {
         if (!storage_ready)
         {
-            lv_img_set_src(s_recorder_refs.action_image, &录音未开启);
+                ui_img_set_src(s_recorder_refs.action_image, &录音未开启);
         }
         else
         {
-            lv_img_set_src(s_recorder_refs.action_image, recording ? &录音开启 : &录音未开启);
+                ui_img_set_src(s_recorder_refs.action_image, recording ? &录音开启 : &录音未开启);
         }
     }
 
@@ -146,7 +147,7 @@ void ui_Recorder_screen_init(void)
     lv_obj_add_flag(action_button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(action_button, ui_recorder_action_event_cb, LV_EVENT_CLICKED, NULL);
     s_recorder_refs.action_image = action_button;
-    lv_img_set_src(s_recorder_refs.action_image, &录音未开启);
+    ui_img_set_src(s_recorder_refs.action_image, &录音未开启);
 
     s_recorder_refs.records_card = ui_create_card(page.content, 24, 560, 480, 82, UI_SCREEN_RECORD_LIST, true, 20);
     lv_obj_add_flag(s_recorder_refs.records_card, LV_OBJ_FLAG_CLICKABLE);
