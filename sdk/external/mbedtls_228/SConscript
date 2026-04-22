@@ -79,7 +79,7 @@ if GetDepend(['PKG_USING_MBEDTLS_USE_ALL_CERTS']):
     if len(file_list):
         for i in range(0, len(file_list)):
             path = os.path.join(certs_default_dir, file_list[i])
-            if os.path.isfile(path):
+            if os.path.isfile(path) and os.path.splitext(path)[1].lower() in ['.cer', '.crt', '.pem']:
                 ROOT_CA_FILE += [path]
 
 if GetDepend(['PKG_USING_MBEDTLS_USER_CERTS']):
@@ -87,7 +87,7 @@ if GetDepend(['PKG_USING_MBEDTLS_USER_CERTS']):
     if len(file_list):
         for i in range(0, len(file_list)):
             path = os.path.join(certs_user_dir, file_list[i])
-            if os.path.isfile(path):
+            if os.path.isfile(path) and os.path.splitext(path)[1].lower() in ['.cer', '.crt', '.pem']:
                 ROOT_CA_FILE += [path]
 
 

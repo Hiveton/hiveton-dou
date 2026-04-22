@@ -25,6 +25,11 @@ static struct firmware_file_info s_temp_firmware_files[MAX_FIRMWARE_FILES];
 #define CRC32_POLY 0xEDB88320
 static uint32_t crc32_table[256];
 
+RT_WEAK rt_bool_t dfu_pan_bluetooth_sniff_allowed(void)
+{
+    return RT_TRUE;
+}
+
 // Initialize the CRC32 table
 static void init_crc32_table(void)
 {
@@ -66,6 +71,12 @@ static uint32_t calculate_crc32(const uint8_t *data, size_t length,
 // Exit Bluetooth Sniff Mode
 static void exist_sniff_mode(void)
 {
+    if (!dfu_pan_bluetooth_sniff_allowed())
+    {
+        rt_kprintf("skip exit sniff mode: bluetooth disabled\n");
+        return;
+    }
+
     rt_kprintf("exit sniff mode\n");
     bt_interface_exit_sniff_mode(
         (unsigned char *)&g_bt_app_env_ota.bd_addr); // exit sniff mode
@@ -1103,40 +1114,56 @@ int dfu_pan_register_device(const char *server_url,
     }
 
     // Build JSON request body with all required parameters
-    int len =
-        rt_snprintf(request_body, body_size,
-                    "{"
-                    "\"mac\":\"%s\","
-                    "\"model\":\"%s\","
-                    "\"solution\":\"%s\","
-                    "\"version\":\"%s\","
-                    "\"ota_version\":\"%s\","
-                    "\"chip_id\":\"%s\"",
-                    params->mac, params->model, params->solution,
-                    params->version, params->ota_version, params->chip_id);
+    int len = 0;
+#define REGISTER_BODY_APPEND(fmt, ...)                                      \
+    do                                                                      \
+    {                                                                       \
+        int remaining = body_size - len;                                     \
+        int written;                                                         \
+        if (remaining <= 0)                                                  \
+        {                                                                   \
+            LOG_E("Register request body buffer is full");                  \
+            ret = -1;                                                       \
+            goto __exit;                                                    \
+        }                                                                   \
+        written = rt_snprintf(request_body + len, remaining, fmt, __VA_ARGS__); \
+        if (written < 0 || written >= remaining)                            \
+        {                                                                   \
+            LOG_E("Register request body too long, buffer size: %d", body_size); \
+            ret = -1;                                                       \
+            goto __exit;                                                    \
+        }                                                                   \
+        len += written;                                                     \
+    } while (0)
+
+    REGISTER_BODY_APPEND("{"
+                         "\"mac\":\"%s\","
+                         "\"model\":\"%s\","
+                         "\"solution\":\"%s\","
+                         "\"version\":\"%s\","
+                         "\"ota_version\":\"%s\","
+                         "\"chip_id\":\"%s\"",
+                         params->mac, params->model, params->solution,
+                         params->version, params->ota_version, params->chip_id);
 
     // Add optional parameters
     if (params->screen_width)
     {
-        len += rt_snprintf(request_body + len, body_size - len,
-                           ",\"screen_width\":\"%s\"", params->screen_width);
+        REGISTER_BODY_APPEND(",\"screen_width\":\"%s\"", params->screen_width);
     }
     if (params->screen_height)
     {
-        len += rt_snprintf(request_body + len, body_size - len,
-                           ",\"screen_height\":\"%s\"", params->screen_height);
+        REGISTER_BODY_APPEND(",\"screen_height\":\"%s\"", params->screen_height);
     }
     if (params->flash_type)
     {
-        len += rt_snprintf(request_body + len, body_size - len,
-                           ",\"flash_type\":\"%s\"", params->flash_type);
+        REGISTER_BODY_APPEND(",\"flash_type\":\"%s\"", params->flash_type);
     }
 
-    len += rt_snprintf(request_body + len, body_size - len, "}");
+    REGISTER_BODY_APPEND("%s", "}");
+#undef REGISTER_BODY_APPEND
 
-    LOG_I("Register request body: \n");
-    rt_kputs(request_body);
-    LOG_I("\n");
+    LOG_I("Register request url:%s body_len:%d\n", register_url, len);
 
     // Exit Bluetooth sniff mode
     exist_sniff_mode();
@@ -1158,8 +1185,6 @@ int dfu_pan_register_device(const char *server_url,
     // Send POST request
     resp_status = webclient_post(session, register_url, request_body,
                                  strlen(request_body));
-    rt_kputs(register_url);
-    LOG_I("\n");
     LOG_I("Device registration response status: %d\n", resp_status);
 
     // Check response status

@@ -30,6 +30,7 @@
 #include "xiaozhi/weather/weather.h"
 #include "xiaozhi/bt_env.h"
 #include "xiaozhi/xiaozhi_client_public.h"
+#include "xiaozhi/xiaozhi_service.h"
 #include "mem_section.h"
 #include "aw32001_debug.h"
 #include "bq27220_monitor.h"
@@ -37,13 +38,8 @@
 
 #define LCD_DEVICE_NAME "lcd"
 #define UI_BRIGHTNESS 100U
-#define BT_APP_READY 0U
-#define BT_APP_CONNECT_PAN 1U
-#define BT_APP_CONNECT_PAN_SUCCESS 2U
-#define PAN_TIMER_MS 3000U
-
 /* xz_ui 线程栈移到 PSRAM */
-#define XZ_UI_THREAD_STACK_SIZE (512 * 1024)  /* 512KB PSRAM */
+#define XZ_UI_THREAD_STACK_SIZE (256 * 1024)  /* 256KB PSRAM */
 #define XZ_UI_THREAD_PRIORITY 20
 #define XZ_UI_THREAD_TICK 10
 
@@ -56,6 +52,12 @@
 #define TF_MOUNT_RETRY_DELAY_MS 100U
 #define TF_DET_PIN 33
 #define TF_DET_DEBOUNCE_MS 80U
+#define TF_DET_POLL_INTERVAL_MS 1000U
+#define TF_LOG_RATE_LIMIT_MS 5000U
+
+#ifndef APP_TF_DET_DEBUG_LOG
+#define APP_TF_DET_DEBUG_LOG 0
+#endif
 
 #ifndef APP_KEEP_EPD_CONTENT_ON_SLEEP
 #define APP_KEEP_EPD_CONTENT_ON_SLEEP 1
@@ -87,9 +89,17 @@ static rt_uint8_t s_tf_mount_thread_stack[TF_MOUNT_THREAD_STACK_SIZE]
 
 static volatile rt_uint8_t s_ui_debug_open_reading = 0U;
 static volatile rt_uint8_t s_xiaozhi_registered = 0U;
+static volatile rt_uint8_t s_xiaozhi_registering = 0U;
 static volatile rt_uint8_t s_tf_card_present = 0U;
+static volatile rt_uint8_t s_tf_det_irq_pending = 0U;
+static volatile rt_uint8_t s_tf_det_available = 0U;
+static volatile rt_uint8_t s_tf_mount_sem_ready = 0U;
+static volatile rt_uint8_t s_tf_storage_ready = 0U;
 static rt_uint8_t s_backlight_target_brightness = 0U;
 static rt_tick_t s_petgame_reading_last_tick = 0;
+static rt_tick_t s_xiaozhi_register_last_try = 0;
+static rt_tick_t s_tf_last_no_device_log_tick = 0;
+static rt_tick_t s_tf_last_mount_fail_log_tick = 0;
 static ui_screen_id_t s_petgame_last_screen = UI_SCREEN_NONE;
 bt_app_t g_bt_app_env = {0};
 rt_mailbox_t g_bt_app_mb = RT_NULL;
@@ -128,171 +138,10 @@ void HAL_MspInit(void)
     set_pinmux();
 }
 
-static void bt_app_connect_pan_timeout_handle(void *parameter)
-{
-    (void)parameter;
-
-    if (g_bt_app_mb != RT_NULL)
-    {
-        rt_mb_send(g_bt_app_mb, BT_APP_CONNECT_PAN);
-    }
-}
-
-static rt_bool_t bt_app_has_paired_addr(void)
-{
-    rt_size_t i;
-
-    for (i = 0; i < sizeof(g_bt_app_env.bd_addr.addr); ++i)
-    {
-        if (g_bt_app_env.bd_addr.addr[i] != 0x00U &&
-            g_bt_app_env.bd_addr.addr[i] != 0xFFU)
-        {
-            return RT_TRUE;
-        }
-    }
-
-    return RT_FALSE;
-}
-
 static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
                                          uint8_t *data, uint16_t data_len)
 {
-    int pan_connect_pending = 0;
-
-    (void)data_len;
-
-    if (type == BT_NOTIFY_COMMON)
-    {
-        switch (event_id)
-        {
-        case BT_NOTIFY_COMMON_BT_STACK_READY:
-            net_manager_notify_bt_stack_ready(true);
-            if (g_bt_app_mb != RT_NULL)
-            {
-                rt_mb_send(g_bt_app_mb, BT_APP_READY);
-            }
-            break;
-        case BT_NOTIFY_COMMON_CLOSE_COMPLETE:
-            g_bt_app_env.bt_connected = FALSE;
-            g_pan_connected = FALSE;
-            net_manager_notify_bt_stack_ready(false);
-            net_manager_notify_bt_acl(false);
-            net_manager_notify_pan_ready(false);
-            if (g_bt_app_env.pan_connect_timer != RT_NULL)
-            {
-                rt_timer_stop(g_bt_app_env.pan_connect_timer);
-            }
-            break;
-        case BT_NOTIFY_COMMON_ENCRYPTION:
-        {
-            bt_notify_device_mac_t *mac = (bt_notify_device_mac_t *)data;
-
-            if (mac != RT_NULL)
-            {
-                g_bt_app_env.bd_addr = *mac;
-                pan_connect_pending = 1;
-                net_manager_request_bt_mode();
-                net_manager_notify_bt_acl(true);
-            }
-            break;
-        }
-        case BT_NOTIFY_COMMON_PAIR_IND:
-        {
-            bt_notify_device_base_info_t *info =
-                (bt_notify_device_base_info_t *)data;
-
-            if ((info != RT_NULL) && (info->res == BTS2_SUCC))
-            {
-                g_bt_app_env.bd_addr = info->mac;
-                pan_connect_pending = 1;
-                net_manager_request_bt_mode();
-                net_manager_notify_bt_acl(true);
-            }
-            break;
-        }
-        case BT_NOTIFY_COMMON_ACL_DISCONNECTED:
-            g_bt_app_env.bt_connected = FALSE;
-            g_pan_connected = FALSE;
-            net_manager_notify_bt_acl(false);
-            net_manager_notify_pan_ready(false);
-            if (g_bt_app_env.pan_connect_timer != RT_NULL)
-            {
-                rt_timer_stop(g_bt_app_env.pan_connect_timer);
-            }
-            break;
-        default:
-            break;
-        }
-
-        if (pan_connect_pending)
-        {
-            g_bt_app_env.bt_connected = TRUE;
-            if (g_bt_app_env.pan_connect_timer == RT_NULL)
-            {
-                g_bt_app_env.pan_connect_timer =
-                    rt_timer_create("connect_pan",
-                                    bt_app_connect_pan_timeout_handle,
-                                    &g_bt_app_env,
-                                    rt_tick_from_millisecond(PAN_TIMER_MS),
-                                    RT_TIMER_FLAG_SOFT_TIMER);
-            }
-            else
-            {
-                rt_timer_stop(g_bt_app_env.pan_connect_timer);
-            }
-
-            if (g_bt_app_env.pan_connect_timer != RT_NULL)
-            {
-                rt_timer_start(g_bt_app_env.pan_connect_timer);
-            }
-        }
-    }
-    else if (type == BT_NOTIFY_PAN)
-    {
-        switch (event_id)
-        {
-        case BT_NOTIFY_PAN_PROFILE_CONNECTED:
-            if (g_bt_app_env.pan_connect_timer != RT_NULL)
-            {
-                rt_timer_stop(g_bt_app_env.pan_connect_timer);
-            }
-            g_pan_connected = TRUE;
-            first_pan_connected = TRUE;
-            net_manager_request_bt_mode();
-            net_manager_notify_pan_ready(true);
-            if (g_bt_app_mb != RT_NULL)
-            {
-                rt_mb_send(g_bt_app_mb, BT_APP_CONNECT_PAN_SUCCESS);
-            }
-            break;
-        case BT_NOTIFY_PAN_PROFILE_DISCONNECTED:
-            g_pan_connected = FALSE;
-            net_manager_notify_pan_ready(false);
-            break;
-        default:
-            break;
-        }
-    }
-    else if (type == BT_NOTIFY_HID)
-    {
-        switch (event_id)
-        {
-        case BT_NOTIFY_HID_PROFILE_CONNECTED:
-            if (!g_pan_connected)
-            {
-                if (g_bt_app_env.pan_connect_timer != RT_NULL)
-                {
-                    rt_timer_stop(g_bt_app_env.pan_connect_timer);
-                }
-                bt_interface_conn_ext((char *)&g_bt_app_env.bd_addr,
-                                      BT_PROFILE_PAN);
-            }
-            break;
-        default:
-            break;
-        }
-    }
-
+    net_manager_notify_bt_event(type, event_id, data, data_len);
     return 0;
 }
 
@@ -339,7 +188,12 @@ static const char *tf_find_device_name(void)
 
 static rt_uint8_t tf_detect_card_present(void)
 {
-    return (rt_pin_read(TF_DET_PIN) == PIN_HIGH) ? 1U : 0U;
+    if (s_tf_det_available != 0U)
+    {
+        return (rt_pin_read(TF_DET_PIN) == PIN_HIGH) ? 1U : 0U;
+    }
+
+    return (tf_find_device_name() != RT_NULL) ? 1U : 0U;
 }
 
 static void tf_notify_state_changed(void)
@@ -372,6 +226,20 @@ static void tf_ensure_media_dirs(const char *mount_path)
 
         mkdir(path, 0);
     }
+}
+
+static rt_uint8_t tf_log_rate_limit(rt_tick_t *last_tick)
+{
+    rt_tick_t now = rt_tick_get();
+    rt_tick_t interval = rt_tick_from_millisecond(TF_LOG_RATE_LIMIT_MS);
+
+    if (*last_tick == 0 || (now - *last_tick) >= interval)
+    {
+        *last_tick = now;
+        return 1U;
+    }
+
+    return 0U;
 }
 
 static rt_err_t tf_try_unmount(const char *device_name)
@@ -426,7 +294,9 @@ static rt_err_t tf_try_mount(const char *device_name, const char *mount_path)
     mounted = dfs_filesystem_get_mounted_path(device);
     if (mounted != RT_NULL && mounted[0] != '\0')
     {
+#if APP_TF_DET_DEBUG_LOG
         rt_kprintf("tf: %s already mounted at %s\n", device_name, mounted);
+#endif
         return RT_EOK;
     }
 
@@ -442,16 +312,18 @@ static rt_err_t tf_try_mount(const char *device_name, const char *mount_path)
         return RT_EOK;
     }
 
-    rt_kprintf("tf: mount %s -> %s failed errno=%d\n", device_name, mount_path, rt_get_errno());
     return -RT_ERROR;
 }
 
 static void tf_det_irq_handler(void *args)
 {
-    rt_base_t level = (rt_base_t)args;
+    (void)args;
 
-    rt_kprintf("tf: det irq pin=%d level=%d\n", TF_DET_PIN, (int)level);
-    rt_sem_release(&s_tf_mount_sem);
+    s_tf_det_irq_pending = 1U;
+    if (s_tf_mount_sem_ready != 0U)
+    {
+        rt_sem_release(&s_tf_mount_sem);
+    }
 }
 
 static rt_err_t tf_det_init(void)
@@ -476,7 +348,8 @@ static rt_err_t tf_det_init(void)
         return result;
     }
 
-    s_tf_card_present = tf_detect_card_present();
+    s_tf_det_available = 1U;
+    s_tf_card_present = (rt_pin_read(TF_DET_PIN) == PIN_HIGH) ? 1U : 0U;
     rt_kprintf("tf: det init pin=%d present=%u level=%d\n",
                TF_DET_PIN,
                (unsigned int)s_tf_card_present,
@@ -484,21 +357,62 @@ static rt_err_t tf_det_init(void)
     return RT_EOK;
 }
 
+static void tf_det_disable_irq(void)
+{
+    rt_err_t result;
+
+    s_tf_mount_sem_ready = 0U;
+    if (s_tf_det_available != 0U)
+    {
+        result = rt_pin_irq_enable(TF_DET_PIN, PIN_IRQ_DISABLE);
+        if (result != RT_EOK)
+        {
+            rt_kprintf("tf: disable det irq failed=%d\n", result);
+        }
+        s_tf_det_available = 0U;
+    }
+    s_tf_det_irq_pending = 0U;
+}
+
 static void tf_mount_thread_entry(void *parameter)
 {
     const char *device_name;
     rt_uint32_t retry;
     rt_uint8_t present;
+    rt_uint8_t state_changed;
+    rt_uint8_t first_scan = 1U;
 
     (void)parameter;
 
     while (1)
     {
-        rt_sem_take(&s_tf_mount_sem, RT_WAITING_FOREVER);
-        rt_thread_mdelay(TF_DET_DEBOUNCE_MS);
+        if (s_tf_det_available != 0U && s_tf_mount_sem_ready != 0U)
+        {
+            rt_sem_take(&s_tf_mount_sem, RT_WAITING_FOREVER);
+            rt_thread_mdelay(TF_DET_DEBOUNCE_MS);
+            while (rt_sem_take(&s_tf_mount_sem, RT_WAITING_NO) == RT_EOK)
+            {
+                s_tf_det_irq_pending = 0U;
+            }
+#if APP_TF_DET_DEBUG_LOG
+            if (s_tf_det_irq_pending != 0U)
+            {
+                rt_kprintf("tf: det event pin=%d level=%d\n",
+                           TF_DET_PIN,
+                           rt_pin_read(TF_DET_PIN));
+            }
+#endif
+            s_tf_det_irq_pending = 0U;
+        }
+        else if (first_scan == 0U)
+        {
+            rt_thread_mdelay(TF_DET_POLL_INTERVAL_MS);
+        }
+        first_scan = 0U;
 
         present = tf_detect_card_present();
-        if (present != s_tf_card_present)
+        state_changed = (present != s_tf_card_present) ? 1U : 0U;
+        if (state_changed != 0U)
         {
             s_tf_card_present = present;
             tf_notify_state_changed();
@@ -506,13 +420,22 @@ static void tf_mount_thread_entry(void *parameter)
 
         if (!present)
         {
-            device_name = tf_find_device_name();
-            if (device_name != RT_NULL)
+            if (state_changed != 0U || s_tf_storage_ready != 0U)
             {
-                (void)tf_try_unmount(device_name);
+                device_name = tf_find_device_name();
+                if (device_name != RT_NULL)
+                {
+                    (void)tf_try_unmount(device_name);
+                }
+                ui_font_manager_notify_storage_removed();
+                s_tf_storage_ready = 0U;
+                rt_kprintf("tf: card removed\n");
             }
-            ui_font_manager_notify_storage_removed();
-            rt_kprintf("tf: card removed\n");
+            continue;
+        }
+
+        if (s_tf_storage_ready != 0U && state_changed == 0U)
+        {
             continue;
         }
 
@@ -522,10 +445,16 @@ static void tf_mount_thread_entry(void *parameter)
             device_name = tf_find_device_name();
             if (device_name != RT_NULL)
             {
+#if APP_TF_DET_DEBUG_LOG
                 rt_kprintf("tf: found storage device %s\n", device_name);
+#endif
                 if (tf_try_mount(device_name, "/") == RT_EOK)
                 {
-                    ui_font_manager_notify_storage_ready();
+                    if (s_tf_storage_ready == 0U)
+                    {
+                        ui_font_manager_notify_storage_ready();
+                    }
+                    s_tf_storage_ready = 1U;
                     break;
                 }
             }
@@ -534,8 +463,21 @@ static void tf_mount_thread_entry(void *parameter)
 
         if (device_name == RT_NULL)
         {
-            rt_kprintf("tf: no sd device found after %u ms\n",
-                       (unsigned int)(TF_MOUNT_RETRY_COUNT * TF_MOUNT_RETRY_DELAY_MS));
+            if (tf_log_rate_limit(&s_tf_last_no_device_log_tick) != 0U)
+            {
+                rt_kprintf("tf: no sd device found after %u ms\n",
+                           (unsigned int)(TF_MOUNT_RETRY_COUNT * TF_MOUNT_RETRY_DELAY_MS));
+            }
+        }
+        else if (s_tf_storage_ready == 0U)
+        {
+            if (tf_log_rate_limit(&s_tf_last_mount_fail_log_tick) != 0U)
+            {
+                rt_kprintf("tf: mount %s failed after %u ms errno=%d\n",
+                           device_name,
+                           (unsigned int)(TF_MOUNT_RETRY_COUNT * TF_MOUNT_RETRY_DELAY_MS),
+                           rt_get_errno());
+            }
         }
     }
 }
@@ -584,11 +526,6 @@ static void ui_thread_entry(void *parameter)
     rt_kprintf("ui: after switch home\n");
     ui_font_manager_notify_storage_ready();
     bq27220_monitor_start();
-    result = net_manager_init();
-    if (result != RT_EOK)
-    {
-        rt_kprintf("net: manager init failed=%d\n", result);
-    }
     rt_kprintf("ui: xz_ui thread ready, ai_dou loaded\n");
     petgame_init();
     petgame_set_reading_active(false);
@@ -694,14 +631,21 @@ static rt_err_t start_tf_mount_thread(void)
     result = rt_sem_init(&s_tf_mount_sem, "tf_det", 0, RT_IPC_FLAG_FIFO);
     if (result != RT_EOK)
     {
-        rt_kprintf("tf: semaphore init failed=%d\n", result);
-        return result;
+        rt_kprintf("tf: semaphore init failed=%d, fallback to polling\n", result);
+    }
+    else
+    {
+        s_tf_mount_sem_ready = 1U;
     }
 
-    result = tf_det_init();
-    if (result != RT_EOK)
+    if (s_tf_mount_sem_ready != 0U)
     {
-        return result;
+        result = tf_det_init();
+        if (result != RT_EOK)
+        {
+            s_tf_det_available = 0U;
+            rt_kprintf("tf: det unavailable, fallback to polling\n");
+        }
     }
 
     result = rt_thread_init(&s_tf_mount_thread,
@@ -714,12 +658,23 @@ static rt_err_t start_tf_mount_thread(void)
                             XZ_UI_THREAD_TICK);
     if (result != RT_EOK)
     {
-        rt_kprintf("tf: thread init failed=%d\n", result);
-        return result;
+        rt_kprintf("tf: thread init failed=%d, continue without auto remount\n", result);
+        tf_det_disable_irq();
+        return RT_EOK;
     }
 
-    rt_thread_startup(&s_tf_mount_thread);
-    rt_sem_release(&s_tf_mount_sem);
+    result = rt_thread_startup(&s_tf_mount_thread);
+    if (result != RT_EOK)
+    {
+        rt_kprintf("tf: thread startup failed=%d, continue without auto remount\n", result);
+        tf_det_disable_irq();
+        return RT_EOK;
+    }
+
+    if (s_tf_det_available != 0U && s_tf_mount_sem_ready != 0U)
+    {
+        rt_sem_release(&s_tf_mount_sem);
+    }
     return RT_EOK;
 }
 
@@ -750,6 +705,7 @@ int main(void)
     check_poweron_reason();
     set_pinmux();
     xiaozhi_time_use_china_timezone();
+    xz_prepare_tls_allocator();
     app_buttons_init();
     board_backlight_set(0U);
     aw32001_debug_ensure_charge_enabled();
@@ -758,11 +714,17 @@ int main(void)
     result = start_tf_mount_thread();
     if (result != RT_EOK)
     {
-        return 0;
+        rt_kprintf("tf: mount service unavailable=%d, continue boot\n", result);
     }
 
     /* Initialize audio manager */
     audio_manager_init();
+
+    result = xiaozhi_weather_service_start();
+    if (result != RT_EOK)
+    {
+        rt_kprintf("weather: service start failed=%d\n", result);
+    }
 
     g_bt_app_mb = rt_mb_create("bt_app", 8, RT_IPC_FLAG_FIFO);
     if (g_bt_app_mb == RT_NULL)
@@ -776,7 +738,12 @@ int main(void)
 #endif
     bt_interface_register_bt_event_notify_callback(
         bt_app_interface_event_handle);
-    sifli_ble_enable();
+
+    result = net_manager_init();
+    if (result != RT_EOK)
+    {
+        rt_kprintf("net: manager init failed=%d\n", result);
+    }
 
     result = start_ui_thread();
     if (result != RT_EOK)
@@ -786,55 +753,11 @@ int main(void)
 
     while (1)
     {
-        if (rt_mb_recv(g_bt_app_mb, &bt_event, RT_WAITING_FOREVER) != RT_EOK)
+        if (rt_mb_recv(g_bt_app_mb, &bt_event,
+                       rt_tick_from_millisecond(1000)) != RT_EOK)
         {
             continue;
         }
-
-        if (bt_event == BT_APP_READY)
-        {
-            bt_interface_set_local_name(strlen(s_local_bt_name),
-                                        (void *)s_local_bt_name);
-            rt_kprintf("bt: stack ready, name=%s\n", s_local_bt_name);
-            if (net_manager_get_desired_mode() == NET_MANAGER_MODE_BT &&
-                bt_app_has_paired_addr())
-            {
-                rt_mb_send(g_bt_app_mb, BT_APP_CONNECT_PAN);
-            }
-        }
-        else if (bt_event == BT_APP_CONNECT_PAN)
-        {
-            if (bt_app_has_paired_addr())
-            {
-                rt_kprintf("bt: connect PAN\n");
-                bt_interface_conn_ext((char *)&g_bt_app_env.bd_addr,
-                                      BT_PROFILE_PAN);
-            }
-        }
-        else if (bt_event == BT_APP_CONNECT_PAN_SUCCESS)
-        {
-            rt_kprintf("bt: PAN connected\n");
-
-            if (s_xiaozhi_registered == 0U)
-            {
-                int reg_result;
-
-                /* Follow the reference flow: PAN is ready first, then register
-                 * the device once against the OTA service. */
-                rt_thread_mdelay(2000);
-                reg_result = register_device_with_server();
-                if (reg_result == 0)
-                {
-                    s_xiaozhi_registered = 1U;
-                    rt_kprintf("xz: device registration complete\n");
-                }
-                else
-                {
-                    rt_kprintf("xz: device registration failed=%d, will retry on next PAN connect\n",
-                               reg_result);
-                }
-            }
-
-        }
+        net_manager_handle_bt_mailbox_event(bt_event);
     }
 }

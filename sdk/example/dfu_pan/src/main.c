@@ -321,9 +321,7 @@ int main(void)
     bt_interface_status_t status =
         bt_interface_register_bt_event_notify_callback(
             bt_app_interface_event_handle);
-    sifli_ble_enable();
-
-    LOG_I("---sifli_ble_enable---\n");
+    LOG_I("---sifli_ble_enable skipped: default 4G mode---\n");
 
     while (1)
     {

@@ -11,6 +11,23 @@
 
 namespace iot {
 
+inline std::string& LastErrorMessage() {
+    static std::string error;
+    return error;
+}
+
+inline void ClearLastError() {
+    LastErrorMessage().clear();
+}
+
+inline void SetLastError(const std::string& error) {
+    LastErrorMessage() = error;
+}
+
+inline const std::string& GetLastError() {
+    return LastErrorMessage();
+}
+
 enum ValueType {
     kValueTypeBoolean,
     kValueTypeNumber,
@@ -38,9 +55,9 @@ public:
     const std::string& description() const { return description_; }
     ValueType type() const { return type_; }
 
-    bool boolean() const { return boolean_getter_(); }
-    int number() const { return number_getter_(); }
-    std::string string() const { return string_getter_(); }
+    bool boolean() const { return boolean_getter_ ? boolean_getter_() : false; }
+    int number() const { return number_getter_ ? number_getter_() : 0; }
+    std::string string() const { return string_getter_ ? string_getter_() : ""; }
 
     std::string GetDescriptorJson() {
         std::string json_str = "{";
@@ -94,11 +111,10 @@ public:
                 return property;
             }
         }
-        // throw std::runtime_error("Property not found: " + name);
+        SetLastError("Property not found: " + name);
         rt_kprintf("Property not found: %s", name.c_str());
-        RT_ASSERT(0);
         static Property empty("", "", [](){ return std::string(); });
-        return empty; // 返回一个空的 Property 对象, 实际不会走到这里, 被assert拦住了 
+        return empty;
     }
 
     std::string GetDescriptorJson() {
@@ -138,7 +154,7 @@ private:
 
 public:
     Parameter(const std::string& name, const std::string& description, ValueType type, bool required = true) :
-        name_(name), description_(description), type_(type), required_(required) {}
+        name_(name), description_(description), type_(type), required_(required), boolean_(false), number_(0), string_() {}
 
     const std::string& name() const { return name_; }
     const std::string& description() const { return description_; }
@@ -185,11 +201,10 @@ public:
                 return parameter;
             }
         }
-        // throw std::runtime_error("Parameter not found: " + name);
+        SetLastError("Parameter not found: " + name);
         rt_kprintf("Parameter not found: %s", name.c_str());
-        RT_ASSERT(0);
         static Parameter empty("", "", kValueTypeString, false);
-        return empty; // 返回一个空的 Property 对象, 实际不会走到这里, 被assert拦住了 
+        return empty;
 
     }
 
@@ -233,8 +248,14 @@ public:
         return json_str;
     }
 
-    void Invoke() {
+    bool Invoke() {
+        if (!callback_) {
+            SetLastError("Method callback unavailable: " + name_);
+            rt_kprintf("Method callback unavailable: %s", name_.c_str());
+            return false;
+        }
         callback_(parameters_);
+        return true;
     }
 };
 
@@ -256,14 +277,13 @@ public:
                 return method;
             }
         }
-        // throw std::runtime_error("Method not found: " + name);
+        SetLastError("Method not found: " + name);
         rt_kprintf("Method not found: %s", name.c_str());
-        RT_ASSERT(0);
         static Method empty(
             "", "", ParameterList(),
             [](const ParameterList&) {}
         );
-        return empty; // 返回一个空的 Property 对象, 实际不会走到这里, 被assert拦住了 
+        return empty;
 
     }
 

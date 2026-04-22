@@ -201,7 +201,11 @@ static const char *ui_settings_network_mode_card_title(void)
 
 static const char *ui_settings_network_mode_card_summary(void)
 {
-    switch (net_manager_get_desired_mode())
+    net_manager_snapshot_t snapshot;
+
+    net_manager_get_snapshot(&snapshot);
+
+    switch (snapshot.desired_mode)
     {
     case NET_MANAGER_MODE_BT:
         return ui_i18n_pick("当前：蓝牙模式", "Current: Bluetooth");

@@ -38,9 +38,9 @@ static const char *ui_bt_cfg_pick(const char *zh, const char *en)
     return ui_settings_get_language() == UI_SETTINGS_LANGUAGE_EN_US ? en : zh;
 }
 
-static const char *ui_bt_cfg_get_link_text(void)
+static const char *ui_bt_cfg_get_link_text(net_manager_link_t link)
 {
-    switch (net_manager_get_active_link())
+    switch (link)
     {
     case NET_MANAGER_LINK_BT_PAN:
         return ui_bt_cfg_pick("蓝牙共享", "Bluetooth PAN");
@@ -82,9 +82,9 @@ static const char *ui_bt_cfg_get_4g_text(bool enabled)
     return ui_bt_cfg_pick("关闭", "Disabled");
 }
 
-static const char *ui_bt_cfg_get_mode_text(void)
+static const char *ui_bt_cfg_get_mode_text(net_manager_mode_t mode)
 {
-    switch (net_manager_get_desired_mode())
+    switch (mode)
     {
     case NET_MANAGER_MODE_BT:
         return ui_bt_cfg_pick("蓝牙模式", "Bluetooth mode");
@@ -124,32 +124,35 @@ static void ui_bt_cfg_set_button_selected(lv_obj_t *button, bool selected)
 
 static void ui_bt_cfg_refresh(void)
 {
+    net_manager_snapshot_t snapshot;
     char text[64];
     const char *selected_name = ui_bt_cfg_get_selected_name();
 
+    net_manager_get_snapshot(&snapshot);
+
     if (s_refs.bt_enabled_value != NULL)
     {
-        lv_label_set_text(s_refs.bt_enabled_value, ui_bt_cfg_get_enabled_text(net_manager_bt_enabled()));
+        lv_label_set_text(s_refs.bt_enabled_value, ui_bt_cfg_get_enabled_text(snapshot.bt_enabled));
     }
 
     if (s_refs.bt_connected_value != NULL)
     {
-        lv_label_set_text(s_refs.bt_connected_value, ui_bt_cfg_get_connected_text(net_manager_bt_connected()));
+        lv_label_set_text(s_refs.bt_connected_value, ui_bt_cfg_get_connected_text(snapshot.bt_connected));
     }
 
     if (s_refs.link_value != NULL)
     {
-        lv_label_set_text(s_refs.link_value, ui_bt_cfg_get_link_text());
+        lv_label_set_text(s_refs.link_value, ui_bt_cfg_get_link_text(snapshot.active_link));
     }
 
     if (s_refs.fourg_value != NULL)
     {
-        lv_label_set_text(s_refs.fourg_value, ui_bt_cfg_get_4g_text(net_manager_4g_enabled()));
+        lv_label_set_text(s_refs.fourg_value, ui_bt_cfg_get_4g_text(snapshot.net_4g_enabled));
     }
 
     if (s_refs.mode_value != NULL)
     {
-        lv_label_set_text(s_refs.mode_value, ui_bt_cfg_get_mode_text());
+        lv_label_set_text(s_refs.mode_value, ui_bt_cfg_get_mode_text(snapshot.desired_mode));
     }
 
     if (s_refs.device_name_value != NULL)

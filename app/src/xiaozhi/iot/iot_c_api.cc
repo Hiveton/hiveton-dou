@@ -28,20 +28,28 @@ void iot_invoke(const uint8_t* data, uint16_t len) {
     cJSON* root = cJSON_Parse(json_str);
     if (root == nullptr) {
         rt_kprintf("[IoT] Failed to parse command JSON\n");
-        rt_free(json_str);
+        delete[] json_str;
         return;
     }
 
-    // 打印完整 JSON
-    rt_kprintf("[IoT] Received command: %s\n", cJSON_PrintUnformatted(root));
+    char* command_json = cJSON_PrintUnformatted(root);
+    if (command_json != nullptr) {
+        // 打印完整 JSON
+        rt_kprintf("[IoT] Received command: %s\n", command_json);
+    } else {
+        rt_kprintf("[IoT] Failed to format command JSON\n");
+    }
 
     // 直接调用 ThingManager::Invoke(root)
     auto& manager = iot::ThingManager::GetInstance();
-    McpServer::GetInstance().ParseMessage(cJSON_PrintUnformatted(root));
+    if (command_json != nullptr) {
+        McpServer::GetInstance().ParseMessage(command_json);
+        cJSON_free(command_json);
+    }
     manager.Invoke(root);  // 这里直接传 root 即可
     
     cJSON_Delete(root);
-    rt_free(json_str);
+    delete[] json_str;
 }
 
 const char* iot_get_descriptors_json() {

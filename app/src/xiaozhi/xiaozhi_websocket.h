@@ -45,7 +45,7 @@ void xz_websocket_begin_barge_in(void);
     {
         uint32_t sample_rate;
         uint32_t frame_duration;
-        uint8_t session_id[12];
+        char session_id[40];
         wsock_state_t clnt;
         rt_sem_t sem;
         uint8_t is_connected;

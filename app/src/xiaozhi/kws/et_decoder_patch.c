@@ -10,6 +10,17 @@ extern int get_et_chuncksize(void);
 
 #define ET_PATCH_USE_EN 0
 
+#ifndef ET_DECODER_PATCH_LOG_EN
+#define ET_DECODER_PATCH_LOG_EN 0
+#endif
+
+#define ET_DECODER_PATCH_LOG(...) \
+    do { \
+        if (ET_DECODER_PATCH_LOG_EN) { \
+            printf(__VA_ARGS__); \
+        } \
+    } while (0)
+
 #define USE_TOPK 0
 #if USE_TOPK    //old decode without topk
 #define TOPK1 10
@@ -361,13 +372,15 @@ int8_t recheck_kws_raw(int8_t recheck_left,int8_t recheck_right,int16_t * aipos,
     }
 
     bool zero_k = has_k_zeros(alipos, label_seq[SEQ_LEN_POS],3);
+#if ET_DECODER_PATCH_LOG_EN
     if(count >= 4){
        for(int i = 0;i < 8;i++)
        {
-         printf("%d,",alipos[i]);
+         ET_DECODER_PATCH_LOG("%d,",alipos[i]);
        }
-       printf("\n");
+       ET_DECODER_PATCH_LOG("\n");
     }
+#endif
     //printf("2===> count count1 count2 zero_k %d %d %d %d \n",count,count1,count2);
     if(count < 5 || zero_k || (count1 < 3 && count2 < 2)){
         return 0;

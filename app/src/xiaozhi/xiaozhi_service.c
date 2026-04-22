@@ -25,6 +25,9 @@
 #define XZ_SERVICE_LOOP_INTERVAL_MS 500
 #define XZ_SERVICE_RESPONSE_TIMEOUT_MS 5000
 #define XZ_SERVICE_RECONNECT_INTERVAL_MS 3000
+#define XZ_SERVICE_GREETING_RETRY_MS 1000
+#define XZ_SERVICE_CONNECT_TIMEOUT_MS 12000
+#define XZ_SERVICE_SESSION_READY_TIMEOUT_MS 5000
 
 /* 全局状态 */
 static volatile xz_service_state_t s_state = XZ_SERVICE_IDLE;
@@ -48,18 +51,27 @@ static uint8_t s_thread_stack[XZ_SERVICE_THREAD_STACK_SIZE] L2_RET_BSS_SECT(xz_s
 #define XZ_EVT_ABORT 0x10
 #define XZ_EVT_KWS_TRIGGER 0x20
 #define XZ_EVT_GREETING 0x40
+#define XZ_EVT_RECONNECT 0x80
 
+static struct rt_event s_event_obj;
+static struct rt_mutex s_mutex_obj;
 static rt_event_t s_event = NULL;
 static rt_mutex_t s_mutex = NULL;
 static volatile bool s_pending_greeting = false;
 static volatile bool s_waiting_server_reply = false;
+static volatile bool s_connect_in_progress = false;
 static rt_tick_t s_waiting_reply_tick = 0;
+static rt_tick_t s_connect_start_tick = 0;
 static rt_tick_t s_last_reconnect_tick = 0;
+static rt_tick_t s_last_greeting_retry_tick = 0;
+static rt_tick_t s_last_connect_notice_tick = 0;
+static rt_tick_t s_session_wait_start_tick = 0;
 static bool s_reconnect_notice_sent = false;
 static net_manager_service_state_t s_last_network_state = (net_manager_service_state_t)-1;
 static bool s_last_network_ready = false;
 
 static void set_state(xz_service_state_t new_state);
+static void xiaozhi_service_try_pending_greeting(void);
 
 static void clear_waiting_server_reply(void)
 {
@@ -73,10 +85,24 @@ static void mark_waiting_server_reply(void)
     s_waiting_reply_tick = rt_tick_get();
 }
 
+static void clear_connect_attempt_state(void)
+{
+    s_connect_in_progress = false;
+    s_connect_start_tick = 0;
+    s_session_wait_start_tick = 0;
+}
+
 static void reset_reconnect_state(void)
 {
     s_last_reconnect_tick = 0;
+    s_last_connect_notice_tick = 0;
+    clear_connect_attempt_state();
     s_reconnect_notice_sent = false;
+}
+
+static void reset_greeting_retry_state(void)
+{
+    s_last_greeting_retry_tick = 0;
 }
 
 static void reset_network_notice_state(void)
@@ -85,33 +111,68 @@ static void reset_network_notice_state(void)
     s_last_network_ready = false;
 }
 
+static void xiaozhi_service_ensure_audio_ready(void)
+{
+    if (!net_manager_can_run_ai())
+    {
+        return;
+    }
+
+    if (audio_get_current_owner() != AUDIO_OWNER_XIAOZHI)
+    {
+        if (!audio_try_preempt(AUDIO_OWNER_XIAOZHI))
+        {
+            LOG_W("Failed to acquire audio for xiaozhi");
+            return;
+        }
+    }
+
+    if (!xz_audio_is_inited())
+    {
+        xz_audio_init();
+    }
+}
+
+static void xiaozhi_service_release_audio_when_idle(void)
+{
+    if (s_state == XZ_SERVICE_READY &&
+        audio_get_current_owner() == AUDIO_OWNER_XIAOZHI)
+    {
+        audio_release(AUDIO_OWNER_XIAOZHI);
+    }
+}
+
 static const char *network_unavailable_text(net_manager_service_state_t state)
 {
     switch (state)
     {
     case NET_MANAGER_SERVICE_OFFLINE:
-        return "网络未连接，等待自动重连";
+        return "网络未就绪：4G未驻网或蓝牙网络未连接";
     case NET_MANAGER_SERVICE_RADIO_READY:
-        return "网络正在建立，等待自动重连";
+        return "4G正在搜网，等待注册到运营商";
     case NET_MANAGER_SERVICE_LINK_READY:
-        return "网络链路已连接，等待自动重连";
+        return "网络链路已连接，等待DNS就绪";
     case NET_MANAGER_SERVICE_DNS_READY:
-        return "DNS 已就绪，等待自动重连";
+        return "DNS已就绪，等待互联网检测";
     case NET_MANAGER_SERVICE_INTERNET_READY:
-        return "网络已连接，等待自动重连";
+        return "网络已连接，正在自动重连小智";
     default:
-        return "网络状态未知，等待自动重连";
+        return "网络状态未知，等待自动重连小智";
     }
 }
 
 static void xiaozhi_service_sync_network_notice(bool network_ready, bool force_notice)
 {
     net_manager_service_state_t net_state = net_manager_get_service_state();
+    bool state_changed = (s_last_network_state != net_state) ||
+                         (s_last_network_ready != network_ready);
+    bool recovered = (!s_last_network_ready) || force_notice;
+    bool should_notice_recovered =
+        ((!s_last_network_ready && s_reconnect_notice_sent) || force_notice);
 
     if (network_ready)
     {
-        if ((!s_last_network_ready && s_reconnect_notice_sent) ||
-            force_notice)
+        if (should_notice_recovered)
         {
             if (s_ui_cbs.on_chat_output)
             {
@@ -119,23 +180,31 @@ static void xiaozhi_service_sync_network_notice(bool network_ready, bool force_n
             }
         }
 
-        if ((!s_last_network_ready && s_reconnect_notice_sent) ||
-            force_notice)
+        if (should_notice_recovered)
         {
             LOG_I("Network recovered, state=%d", (int)net_state);
         }
 
-        reset_reconnect_state();
+        if (recovered)
+        {
+            reset_reconnect_state();
+        }
     }
     else
     {
-        if (force_notice || s_last_network_ready)
+        if (force_notice || state_changed)
         {
+            const char *notice = network_unavailable_text(net_state);
+
             LOG_W("Network unavailable, waiting for auto reconnect (state=%d)",
                   (int)net_state);
             if (s_ui_cbs.on_error)
             {
-                s_ui_cbs.on_error(network_unavailable_text(net_state));
+                s_ui_cbs.on_error(notice);
+            }
+            if (s_ui_cbs.on_chat_output)
+            {
+                s_ui_cbs.on_chat_output(notice);
             }
         }
 
@@ -146,10 +215,109 @@ static void xiaozhi_service_sync_network_notice(bool network_ready, bool force_n
     s_last_network_ready = network_ready;
 }
 
+static void xiaozhi_service_notice_connecting(bool force_notice)
+{
+    rt_tick_t now = rt_tick_get();
+
+    if (!force_notice &&
+        s_last_connect_notice_tick != 0 &&
+        (now - s_last_connect_notice_tick) <
+            rt_tick_from_millisecond(XZ_SERVICE_RECONNECT_INTERVAL_MS))
+    {
+        return;
+    }
+
+    s_last_connect_notice_tick = now;
+    if (s_ui_cbs.on_chat_output)
+    {
+        s_ui_cbs.on_chat_output("正在连接小智，请稍候...");
+    }
+}
+
+static void xiaozhi_service_mark_connect_attempt(bool force_notice)
+{
+    s_connect_in_progress = true;
+    s_connect_start_tick = rt_tick_get();
+    s_session_wait_start_tick = 0;
+    clear_waiting_server_reply();
+    xiaozhi_service_notice_connecting(force_notice);
+    set_state(XZ_SERVICE_INITING);
+}
+
+static void xiaozhi_service_finish_connect_attempt(bool success)
+{
+    clear_connect_attempt_state();
+    clear_waiting_server_reply();
+    if (!success)
+    {
+        s_last_reconnect_tick = rt_tick_get();
+    }
+}
+
+static bool xiaozhi_service_connect_attempt_timed_out(rt_tick_t now)
+{
+    if (!s_connect_in_progress || s_connect_start_tick == 0)
+    {
+        return false;
+    }
+
+    return (now - s_connect_start_tick) >=
+           rt_tick_from_millisecond(XZ_SERVICE_CONNECT_TIMEOUT_MS);
+}
+
+static void xiaozhi_service_fail_connect_attempt(const char *reason,
+                                                 bool notify_error)
+{
+    if (reason != NULL)
+    {
+        LOG_W("%s", reason);
+    }
+
+    xiaozhi_service_finish_connect_attempt(false);
+
+    if (notify_error && reason != NULL && s_ui_cbs.on_error)
+    {
+        s_ui_cbs.on_error(reason);
+    }
+
+    if (s_initialized &&
+        s_state != XZ_SERVICE_IDLE &&
+        s_state != XZ_SERVICE_CLOSING)
+    {
+        set_state(XZ_SERVICE_READY);
+    }
+}
+
 static void xiaozhi_service_watchdog_tick(void)
 {
     rt_tick_t now = rt_tick_get();
     bool network_ready;
+
+    if (!s_initialized || s_state == XZ_SERVICE_IDLE || s_state == XZ_SERVICE_CLOSING)
+    {
+        reset_reconnect_state();
+        return;
+    }
+
+    network_ready = net_manager_can_run_ai() ? true : false;
+    xiaozhi_service_sync_network_notice(network_ready, false);
+    if (!network_ready)
+    {
+        if (xz_websocket_is_connected())
+        {
+            xz_websocket_disconnect();
+        }
+        if (s_state == XZ_SERVICE_INITING || s_connect_in_progress)
+        {
+            xiaozhi_service_finish_connect_attempt(false);
+            set_state(XZ_SERVICE_READY);
+        }
+        else
+        {
+            clear_waiting_server_reply();
+        }
+        return;
+    }
 
     if (s_waiting_server_reply &&
         (now - s_waiting_reply_tick) >=
@@ -163,25 +331,68 @@ static void xiaozhi_service_watchdog_tick(void)
         set_state(XZ_SERVICE_READY);
     }
 
-    if (!s_initialized || s_state == XZ_SERVICE_IDLE || s_state == XZ_SERVICE_CLOSING)
-    {
-        reset_reconnect_state();
-        return;
-    }
-
     if (xz_websocket_is_connected())
     {
-        xiaozhi_service_sync_network_notice(true, false);
-        reset_reconnect_state();
+        if (xz_websocket_get_session_id() != NULL)
+        {
+            xiaozhi_service_ensure_audio_ready();
+            xiaozhi_service_sync_network_notice(true, false);
+            reset_reconnect_state();
+            clear_waiting_server_reply();
+            if (s_state == XZ_SERVICE_INITING)
+            {
+                set_state(XZ_SERVICE_READY);
+            }
+            xiaozhi_service_try_pending_greeting();
+            return;
+        }
+
+        if (!s_connect_in_progress)
+        {
+            s_connect_in_progress = true;
+            s_connect_start_tick = now;
+        }
+        if (s_state != XZ_SERVICE_INITING)
+        {
+            set_state(XZ_SERVICE_INITING);
+        }
+
+        if (s_session_wait_start_tick == 0)
+        {
+            s_session_wait_start_tick = now;
+            xiaozhi_service_notice_connecting(false);
+            return;
+        }
+
+        if ((now - s_session_wait_start_tick) <
+                rt_tick_from_millisecond(XZ_SERVICE_SESSION_READY_TIMEOUT_MS) &&
+            !xiaozhi_service_connect_attempt_timed_out(now))
+        {
+            xiaozhi_service_notice_connecting(false);
+            return;
+        }
+
+        LOG_W("WebSocket connected but session is not ready");
+        xz_websocket_disconnect();
+        xiaozhi_service_fail_connect_attempt("小智握手超时，将稍后自动重试", true);
         return;
     }
 
-    network_ready = net_manager_can_run_ai() ? true : false;
-    xiaozhi_service_sync_network_notice(network_ready, false);
-    if (!network_ready)
+    if (s_connect_in_progress)
     {
+        if (xiaozhi_service_connect_attempt_timed_out(now))
+        {
+            xz_websocket_disconnect();
+            xiaozhi_service_fail_connect_attempt("小智连接超时，将稍后自动重试", true);
+        }
+        else
+        {
+            xiaozhi_service_notice_connecting(false);
+        }
         return;
     }
+
+    xiaozhi_service_notice_connecting(false);
 
     if ((s_last_reconnect_tick != 0) &&
         (now - s_last_reconnect_tick) <
@@ -192,22 +403,31 @@ static void xiaozhi_service_watchdog_tick(void)
 
     s_last_reconnect_tick = now;
     LOG_I("Attempting websocket auto reconnect");
-    set_state(XZ_SERVICE_INITING);
+    xiaozhi_service_mark_connect_attempt(false);
 
     if (xz_websocket_connect() == 0)
     {
-        LOG_I("Auto reconnect succeeded");
-        reset_reconnect_state();
-        clear_waiting_server_reply();
-        set_state(XZ_SERVICE_READY);
-        if (s_ui_cbs.on_chat_output) {
-            s_ui_cbs.on_chat_output("小智已自动重连");
+        if (xz_websocket_get_session_id() != NULL)
+        {
+            LOG_I("Auto reconnect succeeded");
+            reset_reconnect_state();
+            clear_waiting_server_reply();
+            set_state(XZ_SERVICE_READY);
+            xiaozhi_service_try_pending_greeting();
+            if (s_ui_cbs.on_chat_output) {
+                s_ui_cbs.on_chat_output("小智已自动重连");
+            }
+        }
+        else
+        {
+            LOG_I("Auto reconnect connected, waiting for session");
+            s_session_wait_start_tick = rt_tick_get();
+            xiaozhi_service_notice_connecting(false);
         }
     }
     else
     {
-        LOG_W("Auto reconnect failed");
-        set_state(XZ_SERVICE_READY);
+        xiaozhi_service_fail_connect_attempt("小智连接失败，将稍后自动重试", false);
     }
 }
 
@@ -241,6 +461,8 @@ static void set_state(xz_service_state_t new_state)
             }
         }
     }
+
+    xiaozhi_service_release_audio_when_idle();
 }
 
 /* 唤醒词触发回调 */
@@ -258,12 +480,23 @@ static void ws_state_callback(bool connected)
     if (connected) {
         LOG_I("WebSocket connected");
         clear_waiting_server_reply();
-        reset_reconnect_state();
-        if (s_state == XZ_SERVICE_INITING) {
-            set_state(XZ_SERVICE_READY);
+        if (xz_websocket_get_session_id() != NULL) {
+            reset_reconnect_state();
+            if (s_state == XZ_SERVICE_INITING) {
+                set_state(XZ_SERVICE_READY);
+            }
+        } else {
+            if (!s_connect_in_progress) {
+                s_connect_in_progress = true;
+                s_connect_start_tick = rt_tick_get();
+            }
+            if (s_state != XZ_SERVICE_INITING) {
+                set_state(XZ_SERVICE_INITING);
+            }
         }
     } else {
         LOG_W("WebSocket disconnected");
+        xiaozhi_service_finish_connect_attempt(false);
         if (s_state != XZ_SERVICE_IDLE) {
             set_state(XZ_SERVICE_READY);
         }
@@ -296,6 +529,38 @@ static void request_greeting_when_ready(void)
     }
 
     s_pending_greeting = true;
+    reset_greeting_retry_state();
+    rt_event_send(s_event, XZ_EVT_GREETING);
+}
+
+static void xiaozhi_service_try_pending_greeting(void)
+{
+    rt_tick_t now;
+
+    if (!s_pending_greeting || s_event == NULL)
+    {
+        return;
+    }
+
+    if (s_state != XZ_SERVICE_READY)
+    {
+        return;
+    }
+
+    if (xz_websocket_get_session_id() == NULL)
+    {
+        return;
+    }
+
+    now = rt_tick_get();
+    if (s_last_greeting_retry_tick != 0 &&
+        (now - s_last_greeting_retry_tick) <
+            rt_tick_from_millisecond(XZ_SERVICE_GREETING_RETRY_MS))
+    {
+        return;
+    }
+
+    s_last_greeting_retry_tick = now;
     rt_event_send(s_event, XZ_EVT_GREETING);
 }
 
@@ -312,7 +577,7 @@ static void xiaozhi_service_thread(void *parameter)
         if (rt_event_recv(s_event, XZ_EVT_INIT | XZ_EVT_DEINIT | 
                          XZ_EVT_START_LISTEN | XZ_EVT_STOP_LISTEN | 
                          XZ_EVT_ABORT | XZ_EVT_KWS_TRIGGER |
-                         XZ_EVT_GREETING,
+                         XZ_EVT_GREETING | XZ_EVT_RECONNECT,
                          RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
                          rt_tick_from_millisecond(XZ_SERVICE_LOOP_INTERVAL_MS),
                          &evt) == RT_EOK) {
@@ -329,46 +594,57 @@ static void xiaozhi_service_thread(void *parameter)
                     if (s_ui_cbs.on_error) {
                         s_ui_cbs.on_error("音频资源被占用");
                     }
+                    clear_connect_attempt_state();
                     s_initialized = false;
                     set_state(XZ_SERVICE_IDLE);
                     continue;
                 }
                 
                 set_state(XZ_SERVICE_INITING);
-                
-                /* 检查网络 */
+
+                /* 检查网络
+                 * 4G/蓝牙切换、PPP协商期间可能短暂不可用。
+                 * 这里不要直接退出到 IDLE，否则后续网络 ready 不会自动续上。
+                 */
                 if (!net_manager_can_run_ai()) {
                     LOG_E("Network not available");
                     xiaozhi_service_sync_network_notice(false, true);
-                    audio_release(AUDIO_OWNER_XIAOZHI);
-                    s_initialized = false;
-                    set_state(XZ_SERVICE_IDLE);
+                    set_state(XZ_SERVICE_READY);
                     continue;
                 }
                 
-                /* 初始化音频 */
-                xz_ws_audio_init();
-                
                 /* 初始化WebSocket */
+                xiaozhi_service_mark_connect_attempt(true);
                 if (xz_websocket_connect() != 0) {
                     LOG_E("WebSocket connect failed");
-                    audio_release(AUDIO_OWNER_XIAOZHI);
-                    s_initialized = false;
-                    set_state(XZ_SERVICE_IDLE);
-                    if (s_ui_cbs.on_error) {
-                        s_ui_cbs.on_error("服务器连接失败");
+                    if (net_manager_can_run_ai()) {
+                        xiaozhi_service_notice_connecting(true);
+                    } else {
+                        xiaozhi_service_sync_network_notice(false, true);
                     }
+                    xiaozhi_service_fail_connect_attempt("小智连接失败，将稍后自动重试", false);
                     continue;
                 }
                 
                 /* 唤醒词功能暂时禁用以节省内存 */
                 LOG_I("KWS disabled for memory saving");
                 
-                clear_waiting_server_reply();
-                reset_reconnect_state();
-                xiaozhi_service_sync_network_notice(true, false);
-                set_state(XZ_SERVICE_READY);
-                LOG_I("Service initialized");
+                if (xz_websocket_get_session_id() != NULL)
+                {
+                    xiaozhi_service_ensure_audio_ready();
+                    clear_waiting_server_reply();
+                    reset_reconnect_state();
+                    xiaozhi_service_sync_network_notice(true, false);
+                    set_state(XZ_SERVICE_READY);
+                    xiaozhi_service_try_pending_greeting();
+                    LOG_I("Service initialized");
+                }
+                else
+                {
+                    LOG_I("WebSocket connected, waiting for session");
+                    s_session_wait_start_tick = rt_tick_get();
+                    xiaozhi_service_notice_connecting(false);
+                }
             }
             
             if (evt & XZ_EVT_DEINIT) {
@@ -389,11 +665,15 @@ static void xiaozhi_service_thread(void *parameter)
                 xz_speaker_close(NULL);
                 
                 /* 释放音频资源 */
-                audio_release(AUDIO_OWNER_XIAOZHI);
+                if (audio_get_current_owner() == AUDIO_OWNER_XIAOZHI)
+                {
+                    audio_release(AUDIO_OWNER_XIAOZHI);
+                }
                 
                 set_state(XZ_SERVICE_IDLE);
                 s_initialized = false;
                 s_pending_greeting = false;
+                reset_greeting_retry_state();
                 clear_waiting_server_reply();
                 reset_reconnect_state();
                 reset_network_notice_state();
@@ -414,13 +694,20 @@ static void xiaozhi_service_thread(void *parameter)
                     if (session_id == NULL) {
                         LOG_W("WebSocket session not ready");
                         if (s_ui_cbs.on_error) {
-                            s_ui_cbs.on_error("连接尚未就绪，请稍后再试");
+                            s_ui_cbs.on_error("连接尚未就绪，正在自动连接小智");
                         }
+                        if (net_manager_can_run_ai()) {
+                            xiaozhi_service_notice_connecting(true);
+                        } else {
+                            xiaozhi_service_sync_network_notice(false, true);
+                        }
+                        rt_event_send(s_event, XZ_EVT_RECONNECT);
                         set_state(XZ_SERVICE_READY);
                         continue;
                     }
 
                     LOG_I("Start listening");
+                    xiaozhi_service_ensure_audio_ready();
                     
                     /* 中止当前播放 */
                     if (s_state == XZ_SERVICE_SPEAKING) {
@@ -452,8 +739,10 @@ static void xiaozhi_service_thread(void *parameter)
                         LOG_W("WebSocket session lost before listen stop");
                         xz_mic_close(NULL);
                         if (s_ui_cbs.on_error) {
-                            s_ui_cbs.on_error("连接已断开，请重新开始");
+                            s_ui_cbs.on_error("连接已断开，正在自动重连小智");
                         }
+                        clear_waiting_server_reply();
+                        rt_event_send(s_event, XZ_EVT_RECONNECT);
                         set_state(XZ_SERVICE_READY);
                         continue;
                     }
@@ -491,11 +780,13 @@ static void xiaozhi_service_thread(void *parameter)
 
                 if (xz_websocket_get_session_id() == NULL) {
                     LOG_I("Greeting deferred, session not ready");
+                    xiaozhi_service_watchdog_tick();
                     continue;
                 }
 
                 if (xz_websocket_send_detected("你好小智")) {
                     s_pending_greeting = false;
+                    reset_greeting_retry_state();
                     mark_waiting_server_reply();
                     if (s_ui_cbs.on_chat_output) {
                         s_ui_cbs.on_chat_output("已主动问候小智，等待回应...");
@@ -505,7 +796,12 @@ static void xiaozhi_service_thread(void *parameter)
                     if (s_ui_cbs.on_error) {
                         s_ui_cbs.on_error("主动问候发送失败");
                     }
+                    xiaozhi_service_watchdog_tick();
                 }
+            }
+
+            if (evt & XZ_EVT_RECONNECT) {
+                xiaozhi_service_watchdog_tick();
             }
         }
         else
@@ -527,19 +823,21 @@ int xiaozhi_service_init(void)
     
     /* 创建同步对象 */
     if (!s_event) {
-        s_event = rt_event_create("xz_svc_evt", RT_IPC_FLAG_FIFO);
-        if (!s_event) {
-            LOG_E("Failed to create event");
-            return -RT_ENOMEM;
+        result = rt_event_init(&s_event_obj, "xz_svc_evt", RT_IPC_FLAG_FIFO);
+        if (result != RT_EOK) {
+            LOG_E("Failed to init event: %d", result);
+            return result;
         }
+        s_event = &s_event_obj;
     }
     
     if (!s_mutex) {
-        s_mutex = rt_mutex_create("xz_svc_mtx", RT_IPC_FLAG_FIFO);
-        if (!s_mutex) {
-            LOG_E("Failed to create mutex");
-            return -RT_ENOMEM;
+        result = rt_mutex_init(&s_mutex_obj, "xz_svc_mtx", RT_IPC_FLAG_FIFO);
+        if (result != RT_EOK) {
+            LOG_E("Failed to init mutex: %d", result);
+            return result;
         }
+        s_mutex = &s_mutex_obj;
     }
     
     /* 创建线程（首次） */
@@ -628,6 +926,14 @@ void xiaozhi_service_request_greeting(void)
         return;
     }
 
+    if (!xz_websocket_get_session_id()) {
+        if (net_manager_can_run_ai()) {
+            xiaozhi_service_notice_connecting(true);
+        } else {
+            xiaozhi_service_sync_network_notice(false, true);
+        }
+    }
+
     request_greeting_when_ready();
 }
 
@@ -697,8 +1003,35 @@ void xiaozhi_service_notify_state(xz_service_state_t state)
         return;
     }
 
+    if (state == XZ_SERVICE_INITING) {
+        if (!s_connect_in_progress) {
+            s_connect_in_progress = true;
+            s_connect_start_tick = rt_tick_get();
+            s_session_wait_start_tick = 0;
+        }
+        xiaozhi_service_notice_connecting(false);
+    }
+
     if (state == XZ_SERVICE_READY || state == XZ_SERVICE_SPEAKING) {
         clear_waiting_server_reply();
+    }
+
+    if (state == XZ_SERVICE_READY &&
+        xz_websocket_get_session_id() != NULL)
+    {
+        xiaozhi_service_ensure_audio_ready();
+    }
+
+    if (state == XZ_SERVICE_READY &&
+        s_connect_in_progress &&
+        xz_websocket_is_connected() &&
+        xz_websocket_get_session_id() == NULL) {
+        LOG_I("Keep service connecting until session is ready");
+        state = XZ_SERVICE_INITING;
+    }
+    else if (state == XZ_SERVICE_READY && s_connect_in_progress) {
+        xiaozhi_service_finish_connect_attempt(
+            xz_websocket_get_session_id() != NULL ? true : false);
     }
 
     set_state(state);
@@ -743,6 +1076,11 @@ void xiaozhi_service_notify_error(const char* error_msg)
 {
     if (!s_initialized || error_msg == NULL) {
         return;
+    }
+
+    if (s_state == XZ_SERVICE_INITING || s_connect_in_progress) {
+        xiaozhi_service_finish_connect_attempt(false);
+        set_state(XZ_SERVICE_READY);
     }
 
     if (s_ui_cbs.on_error) {

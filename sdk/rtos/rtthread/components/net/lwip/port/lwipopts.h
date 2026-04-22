@@ -288,9 +288,9 @@
 //#define MEM_LIBC_MALLOC             1
 //#define MEM_USE_POOLS               1
 //#define MEMP_USE_CUSTOM_POOLS       1
-//#define MEM_SIZE                    (1024*64)
+#define MEM_SIZE                    (1024*512)
 
-#define MEMP_MEM_MALLOC             0
+#define MEMP_MEM_MALLOC             1
 
 /* MEMP_NUM_PBUF: the number of memp struct pbufs. If the application
    sends a lot of data out of ROM (or other static memory), this
@@ -552,13 +552,13 @@
         #define PPPOS_SUPPORT               0
     #endif
 
-    #define PAP_SUPPORT                 1      /* Set > 0 for PAP. */
-    #define CHAP_SUPPORT                1      /* Set > 0 for CHAP. */
+    #define PAP_SUPPORT                 0      /* Cellular PPP path uses dial-up only, no PAP auth. */
+    #define CHAP_SUPPORT                0      /* Disable CHAP to avoid lwIP PPP MD5 dependency clash. */
     #define MSCHAP_SUPPORT              0      /* Set > 0 for MSCHAP (NOT FUNCTIONAL!) */
     #define CBCP_SUPPORT                0      /* Set > 0 for CBCP (NOT FUNCTIONAL!) */
     #define CCP_SUPPORT                 0      /* Set > 0 for CCP (NOT FUNCTIONAL!) */
     #define VJ_SUPPORT                  1      /* Set > 0 for VJ header compression. */
-    #define MD5_SUPPORT                 1      /* Set > 0 for MD5 (see also CHAP) */
+    #define MD5_SUPPORT                 0      /* No PPP auth path, keep MD5 disabled. */
 
 #endif /* PPP_SUPPORT */
 

@@ -51,7 +51,17 @@ bool ThingManager::GetStatesJson(std::string& json, bool delta) {
 
 void ThingManager::Invoke(const cJSON* command) {
     // rt_kprintf("Invoke command: %s\n", cJSON_PrintUnformatted(command));
+    if (command == nullptr || !cJSON_IsObject(command)) {
+        rt_kprintf("Invalid command: command must be a JSON object\n");
+        return;
+    }
+
     auto name = cJSON_GetObjectItem(command, "name");
+    if (name == nullptr || !cJSON_IsString(name) || name->valuestring == nullptr) {
+        rt_kprintf("Invalid command: missing string field 'name'\n");
+        return;
+    }
+
     // rt_kprintf("Invoke name: %s\n", name->valuestring);
     for (auto& thing : things_) {
         rt_kprintf("Invoke: %s\n", thing->name().c_str());

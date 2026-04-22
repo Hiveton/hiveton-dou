@@ -1,18 +1,35 @@
 #include <string.h>
+#include <rtthread.h>
 
-#include "drv_lcd.h"
 #include "ui.h"
 #include "ui_i18n.h"
 #include "ui_helpers.h"
-#include "../../aw32001_debug.h"
-#include "../../bq27220_monitor.h"
 #include "../../network/net_manager.h"
-#include "cat1_modem.h"
 #include "../../xiaozhi/weather/weather.h"
+
+#ifndef UI_HOME_ENABLE_4G_TEST_PANEL
+#define UI_HOME_ENABLE_4G_TEST_PANEL 0
+#endif
+
+#ifndef UI_HOME_ENABLE_BOOT_4G_AUTO_CONNECT
+#define UI_HOME_ENABLE_BOOT_4G_AUTO_CONNECT 0
+#endif
+
+#if UI_HOME_ENABLE_4G_TEST_PANEL
+#include "cat1_modem.h"
+#endif
 
 lv_obj_t *ui_Home = NULL;
 
 static xiaozhi_home_screen_refs_t s_home_refs;
+#if UI_HOME_ENABLE_4G_TEST_PANEL
+static lv_obj_t *s_home_4g_panel = NULL;
+static lv_obj_t *s_home_4g_label = NULL;
+static lv_timer_t *s_home_4g_timer = NULL;
+
+#define HOME_4G_STATUS_REFRESH_MS 1000U
+#define HOME_4G_STATUS_TEXT_MAX   320U
+#endif
 #if 0
 static lv_obj_t *s_aw32001_debug_panel = NULL;
 static lv_obj_t *s_aw32001_debug_label = NULL;
@@ -54,6 +71,209 @@ static const ui_home_tile_t s_home_tiles[] = {
     {&home_settings, "设置", "Settings", UI_SCREEN_SETTINGS},
 };
 
+#if UI_HOME_ENABLE_4G_TEST_PANEL
+static const char *ui_home_net_mode_text(net_manager_mode_t mode)
+{
+    switch (mode)
+    {
+    case NET_MANAGER_MODE_BT:
+        return "蓝牙";
+    case NET_MANAGER_MODE_4G:
+        return "4G";
+    case NET_MANAGER_MODE_SLEEP:
+        return "睡眠";
+    case NET_MANAGER_MODE_NONE:
+    default:
+        return "关闭";
+    }
+}
+
+static const char *ui_home_net_link_text(net_manager_link_t link)
+{
+    switch (link)
+    {
+    case NET_MANAGER_LINK_BT_PAN:
+        return "蓝牙PAN";
+    case NET_MANAGER_LINK_4G_CAT1:
+        return "4G";
+    case NET_MANAGER_LINK_NONE:
+    default:
+        return "无";
+    }
+}
+
+static const char *ui_home_net_service_text(net_manager_service_state_t state)
+{
+    switch (state)
+    {
+    case NET_MANAGER_SERVICE_RADIO_READY:
+        return "无线就绪";
+    case NET_MANAGER_SERVICE_LINK_READY:
+        return "链路就绪";
+    case NET_MANAGER_SERVICE_DNS_READY:
+        return "DNS就绪";
+    case NET_MANAGER_SERVICE_INTERNET_READY:
+        return "公网可用";
+    case NET_MANAGER_SERVICE_OFFLINE:
+    default:
+        return "离线";
+    }
+}
+
+static const char *ui_home_bt_state_text(const net_manager_snapshot_t *snapshot)
+{
+    if (snapshot == NULL)
+    {
+        return "关";
+    }
+
+    if (snapshot->active_link == NET_MANAGER_LINK_BT_PAN)
+    {
+        return "连通";
+    }
+
+    if (snapshot->desired_mode == NET_MANAGER_MODE_BT)
+    {
+        return snapshot->bt_enabled ? "待连" : "关";
+    }
+
+    return snapshot->bt_enabled ? "开" : "关";
+}
+
+static const char *ui_home_4g_state_text(const net_manager_snapshot_t *snapshot)
+{
+    if (snapshot == NULL)
+    {
+        return "关";
+    }
+
+    if (snapshot->active_link == NET_MANAGER_LINK_4G_CAT1)
+    {
+        return "连通";
+    }
+
+    if (snapshot->desired_mode == NET_MANAGER_MODE_4G)
+    {
+        return snapshot->net_4g_enabled ? "待连" : "关";
+    }
+
+    return snapshot->net_4g_enabled ? "开" : "关";
+}
+
+static void ui_home_get_4g_problem_text(const net_manager_snapshot_t *snapshot, char *buffer, size_t size)
+{
+    if (snapshot == NULL || buffer == NULL || size == 0U)
+    {
+        return;
+    }
+
+    if (snapshot->radios_suspended)
+    {
+        rt_snprintf(buffer, size, "无线休眠中");
+    }
+    else if (snapshot->desired_mode != NET_MANAGER_MODE_4G)
+    {
+        rt_snprintf(buffer, size, "当前模式不是4G");
+    }
+    else if (snapshot->bt_enabled || snapshot->bt_connected || snapshot->pan_ready)
+    {
+        rt_snprintf(buffer, size, "蓝牙仍在占用链路");
+    }
+    else if (!snapshot->net_4g_enabled)
+    {
+        rt_snprintf(buffer, size, "4G未开启");
+    }
+    else if (snapshot->active_link != NET_MANAGER_LINK_4G_CAT1)
+    {
+        char cat1_status[96];
+
+        cat1_modem_get_status_text(cat1_status, sizeof(cat1_status));
+        rt_snprintf(buffer, size, "%s", cat1_status);
+    }
+    else if (!net_manager_dns_ready())
+    {
+        rt_snprintf(buffer, size, "DNS未就绪");
+    }
+    else if (!net_manager_internet_ready())
+    {
+        rt_snprintf(buffer, size, "公网未验证");
+    }
+    else
+    {
+        rt_snprintf(buffer, size, "无");
+    }
+}
+
+static void ui_home_refresh_4g_status(void)
+{
+    net_manager_snapshot_t snapshot;
+    char problem[96];
+    char text[HOME_4G_STATUS_TEXT_MAX];
+
+    if (s_home_4g_label == NULL)
+    {
+        return;
+    }
+
+    net_manager_get_snapshot(&snapshot);
+    ui_home_get_4g_problem_text(&snapshot, problem, sizeof(problem));
+    rt_snprintf(text,
+                sizeof(text),
+                "4G测试  模式:%s  BT:%s\n4G:%s  CAT1:%s  链路:%s\n服务:%s  DNS:%s  网络:%s\n问题:%s",
+                ui_home_net_mode_text(snapshot.desired_mode),
+                ui_home_bt_state_text(&snapshot),
+                ui_home_4g_state_text(&snapshot),
+                snapshot.cat1_ready ? "就绪" : "未就绪",
+                ui_home_net_link_text(snapshot.active_link),
+                ui_home_net_service_text(net_manager_get_service_state()),
+                net_manager_dns_ready() ? "就绪" : "未就绪",
+                net_manager_internet_ready() ? "可用" : "不可用",
+                problem);
+    lv_label_set_text(s_home_4g_label, text);
+}
+
+static void ui_home_4g_timer_cb(lv_timer_t *timer)
+{
+    LV_UNUSED(timer);
+    ui_home_refresh_4g_status();
+}
+
+static void ui_home_create_4g_test_panel(lv_obj_t *parent)
+{
+    if (parent == NULL)
+    {
+        return;
+    }
+
+    s_home_4g_panel = lv_obj_create(parent);
+    lv_obj_remove_flag(s_home_4g_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(s_home_4g_panel, ui_px_x(16), ui_px_y(632));
+    lv_obj_set_size(s_home_4g_panel, ui_px_w(496), ui_px_h(86));
+    lv_obj_set_style_radius(s_home_4g_panel, 0, 0);
+    lv_obj_set_style_bg_color(s_home_4g_panel, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(s_home_4g_panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_home_4g_panel, lv_color_black(), 0);
+    lv_obj_set_style_border_width(s_home_4g_panel, 2, 0);
+    lv_obj_set_style_shadow_width(s_home_4g_panel, 0, 0);
+    lv_obj_set_style_pad_all(s_home_4g_panel, 6, 0);
+
+    s_home_4g_label = lv_label_create(s_home_4g_panel);
+    lv_obj_set_width(s_home_4g_label, ui_px_w(484));
+    lv_obj_set_style_text_font(s_home_4g_label, home_screen_font_get(18), 0);
+    lv_obj_set_style_text_color(s_home_4g_label, lv_color_black(), 0);
+    lv_obj_set_style_text_line_space(s_home_4g_label, 2, 0);
+    lv_label_set_long_mode(s_home_4g_label, LV_LABEL_LONG_WRAP);
+    lv_obj_align(s_home_4g_label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    if (s_home_4g_timer != NULL)
+    {
+        lv_timer_delete(s_home_4g_timer);
+    }
+    s_home_4g_timer = lv_timer_create(ui_home_4g_timer_cb, HOME_4G_STATUS_REFRESH_MS, NULL);
+    ui_home_refresh_4g_status();
+}
+#endif
+
 #if 0
 static void ui_home_aw32001_debug_refresh_cb(lv_timer_t *timer)
 {
@@ -82,6 +302,25 @@ static void ui_home_aw32001_debug_refresh_cb(lv_timer_t *timer)
 }
 #endif
 
+static void ui_home_maybe_request_boot_network(void)
+{
+#if UI_HOME_ENABLE_BOOT_4G_AUTO_CONNECT
+    net_manager_mode_t desired_mode = net_manager_get_desired_mode();
+
+    if (desired_mode == NET_MANAGER_MODE_BT ||
+        desired_mode == NET_MANAGER_MODE_SLEEP)
+    {
+        rt_kprintf("[ui_home] skip boot 4G auto-connect, keep user mode=%d\n", (int)desired_mode);
+        return;
+    }
+
+    rt_kprintf("[ui_home] request boot 4G auto-connect, previous mode=%d\n", (int)desired_mode);
+    net_manager_request_4g_mode();
+#else
+    /* Keep the user's network mode unless a product build explicitly opts in. */
+#endif
+}
+
 static lv_obj_t *create_home_hotspot(lv_obj_t *parent,
                                      int x,
                                      int y,
@@ -104,48 +343,6 @@ static lv_obj_t *create_home_hotspot(lv_obj_t *parent,
     return zone;
 }
 
-static void ui_home_create_gray4_test_bar(lv_obj_t *parent)
-{
-    static const uint8_t s_gray_levels[4] = {0x00, 0x55, 0xAA, 0xFF};
-    static const char *s_gray_labels[4] = {"00", "01", "10", "11"};
-    const int bar_x = 12;
-    const int bar_y = 682;
-    const int bar_w = 504;
-    const int bar_h = 30;
-    const int block_w = bar_w / 4;
-    size_t i;
-
-    for (i = 0; i < 4; ++i)
-    {
-        lv_obj_t *block = lv_obj_create(parent);
-        lv_obj_t *label;
-        uint8_t gray = s_gray_levels[i];
-        bool dark_bg = gray < 0x80;
-
-        lv_obj_remove_flag(block, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_pos(block, ui_px_x(bar_x + ((int)i * block_w)), ui_px_y(bar_y));
-        lv_obj_set_size(block,
-                        ui_px_w((i == 3) ? (bar_w - block_w * 3) : block_w),
-                        ui_px_h(bar_h));
-        lv_obj_set_style_radius(block, 0, 0);
-        lv_obj_set_style_border_width(block, 1, 0);
-        lv_obj_set_style_border_color(block, lv_color_black(), 0);
-        lv_obj_set_style_pad_all(block, 0, 0);
-        lv_obj_set_style_shadow_width(block, 0, 0);
-        lv_obj_set_style_outline_width(block, 0, 0);
-        lv_obj_set_style_bg_opa(block, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(block, lv_color_make(gray, gray, gray), 0);
-
-        label = lv_label_create(block);
-        lv_label_set_text(label, s_gray_labels[i]);
-        lv_obj_set_style_text_font(label, home_screen_font_get(18), 0);
-        lv_obj_set_style_text_color(label,
-                                    dark_bg ? lv_color_white() : lv_color_black(),
-                                    0);
-        lv_obj_center(label);
-    }
-}
-
 const xiaozhi_home_screen_refs_t *ui_home_screen_refs_get(void)
 {
     return &s_home_refs;
@@ -157,7 +354,7 @@ void ui_Home_screen_init(void)
     size_t i;
     size_t visible_index = 0U;
     static const int home_tile_x_positions[3] = {18, 186, 354};
-    static const int home_tile_y_positions[3] = {46, 262, 478};
+    static const int home_tile_y_positions[3] = {18, 220, 422};
 
     if (ui_Home != NULL)
     {
@@ -168,11 +365,7 @@ void ui_Home_screen_init(void)
     ui_Home = ui_create_screen_base();
     s_home_refs.screen = ui_Home;
     ui_build_status_bar(ui_Home, &s_home_refs);
-    if (net_manager_get_desired_mode() != NET_MANAGER_MODE_BT &&
-        net_manager_get_desired_mode() != NET_MANAGER_MODE_SLEEP)
-    {
-        net_manager_request_4g_mode();
-    }
+    ui_home_maybe_request_boot_network();
     xiaozhi_weather_request_force_refresh();
     ui_force_refresh_global_status_bar();
     section = lv_obj_create(ui_Home);
@@ -181,6 +374,10 @@ void ui_Home_screen_init(void)
     lv_obj_set_style_border_width(section, 0, 0);
     lv_obj_set_pos(section, 0, ui_px_y(68));
     lv_obj_set_size(section, ui_px_w(528), ui_px_h(724));
+
+#if UI_HOME_ENABLE_4G_TEST_PANEL
+    ui_home_create_4g_test_panel(section);
+#endif
 
     for (i = 0; i < sizeof(s_home_tiles) / sizeof(s_home_tiles[0]); ++i)
     {
@@ -220,11 +417,20 @@ void ui_Home_screen_init(void)
         ++visible_index;
     }
 
-    ui_home_create_gray4_test_bar(section);
 }
 
 void ui_Home_screen_destroy(void)
 {
+#if UI_HOME_ENABLE_4G_TEST_PANEL
+    if (s_home_4g_timer != NULL)
+    {
+        lv_timer_delete(s_home_4g_timer);
+        s_home_4g_timer = NULL;
+    }
+    s_home_4g_panel = NULL;
+    s_home_4g_label = NULL;
+#endif
+
     if (ui_Home != NULL)
     {
         lv_obj_delete(ui_Home);

@@ -1401,8 +1401,7 @@ static void EPD_FrameBuffer_Flush(LCDC_HandleTypeDef *hlcdc)
     refresh_start = rt_tick_get();
     EPD_Refresh(hlcdc);
     refresh_end = rt_tick_get();
-    rt_kprintf("[standby_dbg] epd full refresh done elapsed=%u ms\n",
-               epd_ticks_to_ms(refresh_end - refresh_start));
+    (void)refresh_end;
 #if EPD_USE_TRUE_GRAY4_GC
     /*
      * Keep the partial DU baseline in sync with the currently displayed
@@ -1471,9 +1470,7 @@ static void EPD_FrameBuffer_FlushFast(LCDC_HandleTypeDef *hlcdc)
     refresh_start = rt_tick_get();
     EPD_Refresh(hlcdc);
     refresh_end = rt_tick_get();
-    rt_kprintf("[standby_dbg] epd fast full refresh done elapsed=%u ms partial_count=%u\n",
-               epd_ticks_to_ms(refresh_end - refresh_start),
-               (unsigned int)s_partial_refresh_count);
+    (void)refresh_end;
 
     memcpy(mixed_framebuffer_prev_mono, mixed_framebuffer_mono,
            sizeof(mixed_framebuffer_prev_mono));
@@ -1707,10 +1704,7 @@ static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
     refresh_start = rt_tick_get();
     EPD_Refresh(hlcdc);
     refresh_end = rt_tick_get();
-    rt_kprintf("[standby_dbg] epd partial refresh done area=(%d,%d)-(%d,%d) elapsed=%u ms partial_count=%u\n",
-               x0, y0, x1, y1,
-               epd_ticks_to_ms(refresh_end - refresh_start),
-               (unsigned int)s_partial_refresh_count);
+    (void)refresh_end;
 
     src_stride = (uint16_t)(EPD_WIDTH / 8U);
     x0_byte = (uint16_t)(x0 / 8U);
@@ -2037,9 +2031,6 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc,
     epd_flush_lock();
     EPD_GetEffectiveUpdateRegion(hlcdc, Xpos0, Ypos0, Xpos1, Ypos1,
                                  &upd_x0, &upd_y0, &upd_x1, &upd_y1);
-    rt_kprintf("EPD multiple pixels src:(%d,%d)-(%d,%d) roi:(%d,%d)-(%d,%d)\n",
-               Xpos0, Ypos0, Xpos1, Ypos1, upd_x0, upd_y0, upd_x1, upd_y1);
-
     if (!s_frame_collecting)
     {
         s_frame_collecting = 1;
@@ -2063,10 +2054,6 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc,
 
     if (!should_flush_now)
     {
-        rt_kprintf("[standby_dbg] epd defer flush src=(%d,%d)-(%d,%d) roi=(%d,%d)-(%d,%d) dirty=(%d,%d)-(%d,%d)\n",
-                   Xpos0, Ypos0, Xpos1, Ypos1,
-                   hlcdc->roi.x0, hlcdc->roi.y0, hlcdc->roi.x1, hlcdc->roi.y1,
-                   s_dirty_x0, s_dirty_y0, s_dirty_x1, s_dirty_y1);
     }
     else
     {
@@ -2099,10 +2086,6 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc,
 
         if (!prefer_full_refresh)
         {
-            rt_kprintf("[standby_dbg] epd partial du flush src=(%d,%d)-(%d,%d) dirty=(%d,%d)-(%d,%d) partial_count=%u\n",
-                       Xpos0, Ypos0, Xpos1, Ypos1,
-                       s_dirty_x0, s_dirty_y0, s_dirty_x1, s_dirty_y1,
-                       (unsigned int)s_partial_refresh_count);
             EPD_FrameBuffer_FlushRegion(hlcdc,
                                         s_dirty_x0,
                                         s_dirty_y0,
@@ -2136,16 +2119,8 @@ static void LCD_WriteMultiplePixels(LCDC_HandleTypeDef *hlcdc,
                 !s_epd_force_full_refresh_once &&
                 !s_epd_image_refresh_hint)
             {
-                rt_kprintf("[standby_dbg] epd periodic gc trigger at update %u (partial_count=%u)\n",
-                           (unsigned int)EPD_PERIODIC_GC_AFTER_DU_COUNT,
-                           (unsigned int)s_partial_refresh_count);
             }
-            rt_kprintf("[standby_dbg] epd full flush reason=%s src=(%d,%d)-(%d,%d) dirty_valid=%d dirty=(%d,%d)-(%d,%d) partial_count=%u\n",
-                       full_reason,
-                       Xpos0, Ypos0, Xpos1, Ypos1,
-                       s_dirty_area_valid,
-                       s_dirty_x0, s_dirty_y0, s_dirty_x1, s_dirty_y1,
-                       (unsigned int)s_partial_refresh_count);
+            (void)full_reason;
             EPD_FrameBuffer_Flush(hlcdc);
         }
         s_last_epd_refresh_tick = rt_tick_get();

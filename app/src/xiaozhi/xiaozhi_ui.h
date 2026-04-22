@@ -1,6 +1,7 @@
 #ifndef _XIAOZHI_UI_H_
 #define _XIAOZHI_UI_H_
 
+#include <stdbool.h>
 #include "lv_image_dsc.h"
 #include "lv_timer.h"
 #include "lv_display.h"

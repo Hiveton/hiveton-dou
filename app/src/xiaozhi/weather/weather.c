@@ -14,7 +14,9 @@
 #include "ulog.h"
 #include "ntp.h"
 #include "weather.h"
+#include "cat1_modem.h"
 #include "network/net_manager.h"
+#include "network/net_http_lock.h"
 #include "littlevgl2rtt.h"
 #include "ui.h"
 #include "ui/ui_dispatch.h"
@@ -24,8 +26,15 @@
 #include <time.h>
 #include "lv_image_dsc.h"
 
-#define XIAOZHI_CHINA_TIMEZONE_MINUTES (0)
-#define XIAOZHI_CHINA_TIMEZONE_SECONDS (8 * 3600)
+/*
+ * Keep RTC/time() as UTC epoch. China timezone is applied only by localtime()
+ * for display/scheduling; do not add +8h to NTP timestamps before storing.
+ *
+ * This RT-Thread libc applies tz_minuteswest as seconds east of UTC.
+ */
+#define XIAOZHI_CHINA_TIMEZONE_MINUTES (8 * 60)
+#define XIAOZHI_CHINA_UTC_OFFSET_SECONDS (8 * 3600)
+#define XIAOZHI_TIME_VALID_MIN 1000000000
 
 extern struct timeval _timevalue;
 
@@ -45,12 +54,39 @@ static void xiaozhi_time_update_system_clock(time_t second)
     _timevalue.tv_sec = second - tick / RT_TICK_PER_SECOND - 1;
 }
 
+static time_t xiaozhi_china_wall_epoch_to_utc(time_t china_wall_epoch)
+{
+    if (china_wall_epoch <= XIAOZHI_TIME_VALID_MIN + XIAOZHI_CHINA_UTC_OFFSET_SECONDS)
+    {
+        return 0;
+    }
+
+    return china_wall_epoch - XIAOZHI_CHINA_UTC_OFFSET_SECONDS;
+}
+
+static time_t xiaozhi_china_tm_to_utc_epoch(struct tm *tm_value)
+{
+    time_t china_wall_epoch;
+
+    if (tm_value == RT_NULL)
+    {
+        return 0;
+    }
+
+    china_wall_epoch = mktime(tm_value);
+    return xiaozhi_china_wall_epoch_to_utc(china_wall_epoch);
+}
+
 #define WEATHER_SERVICE_STACK_SIZE 6144
 #define WEATHER_SERVICE_PRIORITY   21
 #define WEATHER_SERVICE_TICK       10
 #define WEATHER_SERVICE_EVT_REFRESH       (1UL << 0)
 #define WEATHER_SERVICE_EVT_FORCE_REFRESH (1UL << 1)
 #define WEATHER_SERVICE_POLL_MS_RETRY   (5 * 60 * 1000U)
+#define WEATHER_NTP_SYNC_RETRIES 1
+#define WEATHER_FETCH_RETRIES 2
+#define WEATHER_SYNC_RETRY_DELAY_MS 1000U
+#define WEATHER_NTP_SERVER_RETRY_DELAY_MS 200U
 
 extern const lv_image_dsc_t w0;   // 晴
 extern const lv_image_dsc_t w1;   // 多云
@@ -110,8 +146,21 @@ rt_device_t g_rtc_device = RT_NULL;
 date_time_t g_current_time = {0};
 weather_info_t g_current_weather = {0};
 
-extern rt_err_t set_date(rt_uint32_t year, rt_uint32_t month, rt_uint32_t day);
-extern rt_err_t set_time(rt_uint32_t hour, rt_uint32_t minute, rt_uint32_t second);
+static bool xiaozhi_time_set_rtc_utc(time_t utc_time)
+{
+    if (utc_time <= XIAOZHI_TIME_VALID_MIN || g_rtc_device == RT_NULL)
+    {
+        return false;
+    }
+
+    if (rt_device_control(g_rtc_device, RT_DEVICE_CTRL_RTC_SET_TIME, &utc_time) != RT_EOK)
+    {
+        return false;
+    }
+
+    xiaozhi_time_update_system_clock(utc_time);
+    return true;
+}
 
 static bool weather_is_same_local_day(time_t lhs, time_t rhs)
 {
@@ -168,10 +217,9 @@ static uint32_t weather_next_refresh_delay_ms(void)
 {
     time_t now = time(RT_NULL);
     struct tm now_tm_storage;
-    struct tm next_tm_storage;
     struct tm *now_tm;
-    time_t next_time;
-    uint32_t delay_ms;
+    int seconds_to_next;
+    int hours_to_next;
 
     if (now <= 0)
     {
@@ -184,29 +232,21 @@ static uint32_t weather_next_refresh_delay_ms(void)
         return WEATHER_SERVICE_POLL_MS_RETRY;
     }
 
-    next_tm_storage = *now_tm;
-    next_tm_storage.tm_min = 0;
-    next_tm_storage.tm_sec = 0;
-    next_tm_storage.tm_hour = ((now_tm->tm_hour / 4) + 1) * 4;
-    if (next_tm_storage.tm_hour >= 24)
+    hours_to_next = 4 - (now_tm->tm_hour % 4);
+    if (hours_to_next <= 0)
     {
-        next_tm_storage.tm_hour = 0;
-        next_tm_storage.tm_mday += 1;
+        hours_to_next = 4;
     }
 
-    next_time = mktime(&next_tm_storage);
-    if (next_time <= now)
+    seconds_to_next = (hours_to_next * 3600) -
+                      (now_tm->tm_min * 60) -
+                      now_tm->tm_sec;
+    if (seconds_to_next <= 0)
     {
-        return WEATHER_SERVICE_POLL_MS_RETRY;
+        seconds_to_next += 4 * 3600;
     }
 
-    delay_ms = (uint32_t)(next_time - now) * 1000U;
-    if (delay_ms == 0U)
-    {
-        delay_ms = 60000U;
-    }
-
-    return delay_ms;
+    return (uint32_t)seconds_to_next * 1000U;
 }
 
 static bool weather_network_ready(void)
@@ -234,7 +274,9 @@ static bool weather_ntp_refresh_due(void)
 static void xiaozhi_time_apply_default_rtc_if_needed(void)
 {
     time_t rtc_time = 0;
+    time_t fallback_time;
     bool use_fallback = false;
+    struct tm fallback_tm;
     struct tm tm_storage;
     struct tm *tm_info;
 
@@ -263,8 +305,16 @@ static void xiaozhi_time_apply_default_rtc_if_needed(void)
         return;
     }
 
-    if (set_date(2026, 1, 1) == RT_EOK &&
-        set_time(1, 1, 0) == RT_EOK)
+    rt_memset(&fallback_tm, 0, sizeof(fallback_tm));
+    fallback_tm.tm_year = 2026 - 1900;
+    fallback_tm.tm_mon = 0;
+    fallback_tm.tm_mday = 1;
+    fallback_tm.tm_hour = 1;
+    fallback_tm.tm_min = 1;
+    fallback_tm.tm_sec = 0;
+    fallback_time = xiaozhi_china_tm_to_utc_epoch(&fallback_tm);
+
+    if (xiaozhi_time_set_rtc_utc(fallback_time))
     {
         LOG_I("RTC fallback applied: 2026/01/01 01:01");
     }
@@ -714,6 +764,13 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
         return -RT_ERROR;
     }
 
+    if (net_http_should_defer_generic())
+    {
+        LOG_W("Weather sync deferred while Xiaozhi HTTPS is active");
+        g_weather_sync_in_progress = 0;
+        return -RT_EBUSY;
+    }
+
 
 
     int ret = -RT_ERROR;
@@ -1119,13 +1176,10 @@ int xiaozhi_ntp_sync(void)
 #ifdef PKG_USING_NETUTILS
         xiaozhi_time_use_china_timezone();
         cur_time = ntp_get_time(ntp_servers[i]);
-        if (cur_time > 1000000000)
+        if (cur_time > XIAOZHI_TIME_VALID_MIN)
         {
-            cur_time += XIAOZHI_CHINA_TIMEZONE_SECONDS;
-            if (g_rtc_device != RT_NULL &&
-                rt_device_control(g_rtc_device, RT_DEVICE_CTRL_RTC_SET_TIME, &cur_time) == RT_EOK)
+            if (xiaozhi_time_set_rtc_utc(cur_time))
             {
-                xiaozhi_time_update_system_clock(cur_time);
                 sync_success = 1;
             }
             else
@@ -1137,7 +1191,7 @@ int xiaozhi_ntp_sync(void)
         // 如果没有NTP支持，使用系统时间
         LOG_W("NTP client not available, using system time");
         cur_time = time(RT_NULL);
-        if (cur_time > 1000000000)
+        if (cur_time > XIAOZHI_TIME_VALID_MIN)
         { // 基本的时间有效性检查
             sync_success = 1;
         }
@@ -1147,23 +1201,30 @@ int xiaozhi_ntp_sync(void)
         {
             time_t verify_time = 0;
             time_t verify_now = time(RT_NULL);
-            rt_err_t result = rt_device_control(
-                g_rtc_device, RT_DEVICE_CTRL_RTC_GET_TIME, &verify_time);
-            if (result == RT_EOK)
+            if (g_rtc_device != RT_NULL)
             {
-                LOG_I("RTC time verification successful: %ld", (long)verify_time);
-                if (verify_time == cur_time)
+                rt_err_t result = rt_device_control(
+                    g_rtc_device, RT_DEVICE_CTRL_RTC_GET_TIME, &verify_time);
+                if (result == RT_EOK)
                 {
-                    LOG_I("RTC time matches NTP time");
+                    LOG_I("RTC time verification successful: %ld", (long)verify_time);
+                    if (verify_time == cur_time)
+                    {
+                        LOG_I("RTC time matches NTP time");
+                    }
+                    else
+                    {
+                        LOG_W("RTC time mismatch. NTP: %ld, RTC: %ld", (long)cur_time, (long)verify_time);
+                    }
                 }
                 else
                 {
-                    LOG_W("RTC time mismatch. NTP: %ld, RTC: %ld", (long)cur_time, (long)verify_time);
+                    LOG_E("Failed to verify RTC time: %d", result);
                 }
             }
             else
             {
-                LOG_E("Failed to verify RTC time: %d", result);
+                LOG_W("RTC device not available for time verification");
             }
 
             if (verify_now == cur_time)
@@ -1179,8 +1240,24 @@ int xiaozhi_ntp_sync(void)
             return RT_EOK;
         }
 
-        rt_thread_mdelay(1000); // 等待1秒再尝试下一个服务器
+        if ((i + 1) < sizeof(ntp_servers) / sizeof(ntp_servers[0]))
+        {
+            rt_thread_mdelay(WEATHER_NTP_SERVER_RETRY_DELAY_MS);
+        }
     }
+    if (cat1_modem_get_network_time(&cur_time))
+    {
+        cur_time = xiaozhi_china_wall_epoch_to_utc(cur_time);
+        if (xiaozhi_time_set_rtc_utc(cur_time))
+        {
+            update_xiaozhi_ui_time(NULL);
+            LOG_I("Time synchronized from CAT1 network: %ld", (long)cur_time);
+            g_ntp_sync_in_progress = 0;
+            return RT_EOK;
+        }
+        LOG_W("RTC set time failed for CAT1 network time");
+    }
+
     // 清除同步进行标志
     g_ntp_sync_in_progress = 0;
     return -RT_ERROR;
@@ -1188,8 +1265,6 @@ int xiaozhi_ntp_sync(void)
 
 void xiaozhi_time_weather(void)//获取最新时间和天气
 {
-    const int max_retries = 5;
-
     if (!weather_network_ready())
     {
         return;
@@ -1217,9 +1292,9 @@ void xiaozhi_time_weather(void)//获取最新时间和天气
             {
                 retry_count++;
                 LOG_W("Initial time synchronization failed, retrying... attempt %d", retry_count);
-                if (retry_count < max_retries)
+                if (retry_count < WEATHER_NTP_SYNC_RETRIES)
                 {
-                    rt_thread_mdelay(3000); // 等待3秒后重试
+                    rt_thread_mdelay(WEATHER_SYNC_RETRY_DELAY_MS);
                 }
                 else
                 {
@@ -1230,7 +1305,7 @@ void xiaozhi_time_weather(void)//获取最新时间和天气
         }
 
         if (ntp_result != RT_EOK) {
-            LOG_W("Time synchronization failed after %d attempts, will retry in 5 minutes", max_retries);
+            LOG_W("Time synchronization failed after %d attempts, will retry in 5 minutes", WEATHER_NTP_SYNC_RETRIES);
         }
     }
 
@@ -1265,10 +1340,10 @@ void xiaozhi_time_weather(void)//获取最新时间和天气
         else 
         {
             retry_count++;
-            LOG_W("Failed to get weather information, attempt %d of %d", retry_count, max_retries);
-            if (retry_count < max_retries) 
+            LOG_W("Failed to get weather information, attempt %d of %d", retry_count, WEATHER_FETCH_RETRIES);
+            if (retry_count < WEATHER_FETCH_RETRIES) 
             {
-                rt_thread_mdelay(3000); // 等待3秒后重试
+                rt_thread_mdelay(WEATHER_SYNC_RETRY_DELAY_MS);
             }
             else 
             {
@@ -1279,7 +1354,7 @@ void xiaozhi_time_weather(void)//获取最新时间和天气
     }
     
     if (weather_result != RT_EOK) {
-        LOG_W("Failed to get weather information after %d attempts, will retry in 5 minutes", max_retries);
+        LOG_W("Failed to get weather information after %d attempts, will retry in 5 minutes", WEATHER_FETCH_RETRIES);
     }
 
 }

@@ -77,6 +77,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+
+void *network_mem_calloc(uint32_t count, uint32_t size);
+void network_mem_free(void *ptr);
+
 #include "lwip/altcp.h"
 #include "lwip/altcp_tcp.h"
 #include "lwip/altcp_tls.h"
@@ -120,6 +124,55 @@ static err_t wsock_connect_dns(wsock_state_t *pws, const char *srvname);
 static void wsock_hexdump(unsigned char *buf, size_t len);
 
 int wsverbose = 0;
+
+#if LWIP_SUPPORT_CUSTOM_PBUF
+typedef struct
+{
+    struct pbuf_custom custom;
+} wsock_network_pbuf_t;
+
+static void wsock_network_pbuf_free(struct pbuf *p)
+{
+    network_mem_free(p);
+}
+
+static struct pbuf *wsock_network_pbuf_alloc(u16_t len)
+{
+    size_t total_size;
+    wsock_network_pbuf_t *custom;
+    void *payload;
+    struct pbuf *p;
+
+    total_size = sizeof(wsock_network_pbuf_t) + MEM_ALIGNMENT + len;
+    if (total_size > UINT32_MAX)
+    {
+        return NULL;
+    }
+
+    custom = (wsock_network_pbuf_t *)network_mem_calloc(1U,
+                                                        (uint32_t)total_size);
+    if (custom == NULL)
+    {
+        return NULL;
+    }
+
+    payload = LWIP_MEM_ALIGN((void *)(custom + 1));
+    custom->custom.custom_free_function = wsock_network_pbuf_free;
+
+    p = pbuf_alloced_custom(PBUF_RAW, len, PBUF_RAM, &custom->custom,
+                            payload, len);
+    if (p == NULL)
+    {
+        network_mem_free(custom);
+    }
+
+    return p;
+}
+
+#define wsock_pbuf_alloc(len) wsock_network_pbuf_alloc((u16_t)(len))
+#else
+#define wsock_pbuf_alloc(len) pbuf_alloc(PBUF_RAW, (u16_t)(len), PBUF_RAM)
+#endif
 
 /**
  *  Initialize the websocket state structure.  The memory for the structure
@@ -251,7 +304,7 @@ wsock_connect(wsock_state_t *pws,    uint16_t len, const char *srvname, const ch
         printf("allocating handshake buffer: %d bytes\n", len);
 
     // Allocate the buffer; it cannot be chained.
-    pws->request = pbuf_alloc(PBUF_RAW, (u16_t)(len + 1), PBUF_RAM);
+    pws->request = wsock_pbuf_alloc((u16_t)(len + 1));
 
     if (pws->request == NULL)
         return ERR_MEM;
@@ -398,7 +451,10 @@ wsock_connect_addr(wsock_state_t *pws, const ip_addr_t *ipaddr)
 
     err = altcp_connect(pws->pcb, &pws->remote_addr, pws->remote_port, wsock_tcp_connected);
     if (err == ERR_OK)
+    {
+        pws->tcp_state = WS_TCP_CONNECTING;
         return ERR_OK;
+    }
 
     printf("altcp_connect failed: %d\n", (int)err);
     return err;
@@ -474,6 +530,10 @@ wsock_connect_dns(wsock_state_t *pws, const char *srvname)
     {
         printf("connecting valid IP\n");
         err = wsock_connect_addr(pws, &pws->remote_addr);
+        if (err == ERR_OK)
+        {
+            return ERR_OK;
+        }
     }
     else if (err == ERR_INPROGRESS)
     {
@@ -504,7 +564,10 @@ err_t wsock_close(wsock_state_t *pws, wsock_result_t result, err_t err)
         return ERR_CLSD;
     }
 
-    if (pws->tcp_state == WS_TCP_CLOSED)
+    if (pws->tcp_state == WS_TCP_CLOSED &&
+        pws->pcb == NULL &&
+        pws->pconf == NULL &&
+        pws->request == NULL)
     {
         rt_kprintf("wsocTCP already closed\n");
         return ERR_OK;
@@ -1202,7 +1265,7 @@ wsock_write(wsock_state_t *pws, const char *buf, u16_t buflen, uint8_t opcode)
     {
         // Only support smaller payload sizes.
         printf("aborting due to oversize payload\n");
-        err = wsock_close(pws, WSOCK_RESULT_ERR_MEM, ERR_MEM);
+        err = ERR_MEM;
         goto end;
     }
 
@@ -1215,11 +1278,11 @@ wsock_write(wsock_state_t *pws, const char *buf, u16_t buflen, uint8_t opcode)
     pktlen = hdrlen + buflen;
 
     // Allocate a request buffer, and write the data into the payload.
-    pws->request = pbuf_alloc(PBUF_RAW, (u16_t)(pktlen), PBUF_RAM);
+    pws->request = wsock_pbuf_alloc((u16_t)(pktlen));
     if (pws->request == NULL)
     {
         printf("aborting due to pbuf_alloc() failed ...\n");
-        err = wsock_close(pws, WSOCK_RESULT_ERR_MEM, ERR_MEM);
+        err = ERR_MEM;
         goto end;
     }
 
@@ -1227,7 +1290,9 @@ wsock_write(wsock_state_t *pws, const char *buf, u16_t buflen, uint8_t opcode)
     {
         // pbuf needs to be in one piece ...
         printf("aborting due to fragmented pbuf ...\n");
-        err = wsock_close(pws, WSOCK_RESULT_ERR_MEM, ERR_MEM);
+        pbuf_free(pws->request);
+        pws->request = NULL;
+        err = ERR_MEM;
         goto end;
     }
 
@@ -1254,8 +1319,26 @@ wsock_write(wsock_state_t *pws, const char *buf, u16_t buflen, uint8_t opcode)
     err = altcp_write(pws->pcb, pws->request->payload, pws->request->len, TCP_WRITE_FLAG_COPY);
     if (err != ERR_OK)
     {
-        printf("altcp_write() failed - closing wsock\n");
-        err = wsock_close(pws, WSOCK_RESULT_ERR_UNKNOWN, err);
+        static u32_t s_altcp_write_err_mem_count = 0;
+
+        if (err == ERR_MEM)
+        {
+            s_altcp_write_err_mem_count++;
+            if (s_altcp_write_err_mem_count <= 3 ||
+                (s_altcp_write_err_mem_count & (s_altcp_write_err_mem_count - 1)) == 0)
+            {
+                printf("altcp_write() failed: %s(%d), drop frame and keep wsock count=%u\n",
+                       err2str(err), err, (unsigned)s_altcp_write_err_mem_count);
+            }
+        }
+        else
+        {
+            printf("altcp_write() failed: %s(%d), drop frame and keep wsock\n",
+                   err2str(err), err);
+        }
+        pbuf_free(pws->request);
+        pws->request = NULL;
+        altcp_output(pws->pcb);
         goto end;
     }
 
@@ -1307,8 +1390,11 @@ wsock_tcp_poll(void *arg, struct altcp_pcb *pcb)
 
     if (pws->tcp_state != WS_TCP_CONNECTED)
     {
-        printf("wsock_tcp_poll TCP not connected\n");
-        return ERR_CLSD;
+        if (pws->tcp_state != WS_TCP_CONNECTING)
+        {
+            printf("wsock_tcp_poll TCP not connected state=%d\n", pws->tcp_state);
+        }
+        return ERR_OK;
     }
 
     // Send ping, if enabled.
@@ -1504,4 +1590,3 @@ const char *err2str(err_t errval)
     }
     return "UNK";
 }
-

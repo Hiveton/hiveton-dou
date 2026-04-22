@@ -13,8 +13,21 @@
 #define LOG_TAG       "APP.FWK.PM"
 #include "log.h"
 
+/*
+ * EPD pixels are persistent during sleep. EPD targets must keep the last frame
+ * visible and skip LCD poweroff/reopen paths that can blank or fully refresh.
+ * Non-EPD displays default to the original close/open behavior.
+ */
 #ifndef GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
+#if defined(BSP_LCDC_USING_EPD_8BIT)
 #define GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP 1
+#else
+#define GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP 0
+#endif
+#endif
+
+#if defined(BSP_LCDC_USING_EPD_8BIT) && !GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
+#error "EPD targets must keep display content on sleep; do not clear or power off the panel."
 #endif
 
 
@@ -138,7 +151,7 @@ void close_display(void)
     gui_pm_enter_critical();
     if (s_gui_ctx.lcd && s_gui_ctx.lcd_opened)
     {
-#if defined(BSP_LCDC_USING_EPD_8BIT) || GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
+#if GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
         /* EPD content is persistent after power loss. Do not issue LCD poweroff or
          * reopen cycles during GUI sleep, otherwise the panel may blank or force a
          * needless full refresh on wake. Let the PM flow sleep the system while the
@@ -171,7 +184,7 @@ void close_display(void)
 #ifdef GUI_PM_METRICS_ENABLED
         s_gui_ctx.stat.lcd_on_time += (float)(HAL_GTIMER_READ() - s_gui_ctx.stat.lcd_on_start_time) / HAL_LPTIM_GetFreq();
 #endif /* GUI_PM_METRICS_ENABLED */
-#endif /* BSP_LCDC_USING_EPD_8BIT || GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP */
+#endif /* GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP */
     }
     gui_pm_exit_critical();
 
@@ -186,7 +199,7 @@ void open_display(void)
 #endif  /* RT_USING_PM */
     if (s_gui_ctx.lcd && !s_gui_ctx.lcd_opened)
     {
-#if defined(BSP_LCDC_USING_EPD_8BIT) || GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
+#if GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
  #ifdef RT_USING_PM
         rt_pm_release(PM_SLEEP_MODE_IDLE);
  #endif  /* RT_USING_PM */
@@ -220,7 +233,7 @@ void open_display(void)
         s_gui_ctx.stat.lcd_brightness = 0;//Default value
         rt_device_control(s_gui_ctx.lcd, RTGRAPHIC_CTRL_GET_BRIGHTNESS_ASYNC, (void *)&s_gui_ctx.stat.lcd_brightness);
 #endif /* GUI_PM_METRICS_ENABLED */
-#endif /* BSP_LCDC_USING_EPD_8BIT || GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP */
+#endif /* GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP */
     }
 #ifdef RT_USING_PM
     rt_pm_release(PM_SLEEP_MODE_IDLE);

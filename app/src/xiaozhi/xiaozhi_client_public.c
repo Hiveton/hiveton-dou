@@ -11,6 +11,7 @@
 #include "string.h"
 #include <lwip/dns.h>
 #include <lwip/sys.h>
+#include "network/net_http_lock.h"
 #include "xiaozhi_websocket.h"
 #include "lwip/api.h"
 #include "lwip/dns.h"
@@ -30,6 +31,7 @@
 #include "mbedtls/platform.h"
 #include "gui_app_pm.h"
 #include "network/net_manager.h"
+#include "network/network_mem.h"
 #include "../board/board_hardware.h"
 static const char *ota_version =
     "{\r\n "
@@ -73,7 +75,6 @@ static const char *ota_version =
 
 // 公共变量定义
 extern uint8_t aec_enabled;
-extern BOOL first_pan_connected;
 
 static uint8_t g_en_vad = 1;
 static uint8_t g_en_aec = 1;
@@ -93,6 +94,13 @@ static rt_tick_t s_last_internet_access_tick = 0;
 
 #define XZ_INTERNET_ACCESS_CACHE_OK_MS   30000U
 #define XZ_INTERNET_ACCESS_CACHE_FAIL_MS 5000U
+#define XZ_INTERNET_ACCESS_DNS_WAIT_MS   3500U
+#define XZ_INTERNET_ACCESS_DNS_STEP_MS   100U
+#define XZ_OTA_HTTP_TIMEOUT_MS           10000
+#define XZ_OTA_REGISTER_COOLDOWN_BASE_MS 3000U
+#define XZ_OTA_REGISTER_COOLDOWN_MAX_MS  15000U
+#define XZ_OTA_REGISTER_ENTER_BUSY       (-1)
+#define XZ_OTA_REGISTER_ENTER_COOLDOWN   (-2)
 
 #if defined(__CC_ARM) || defined(__CLANG_ARM)
 L2_RET_BSS_SECT_BEGIN(xiaozhi_http_resp_buf)
@@ -103,11 +111,17 @@ static char s_xiaozhi_http_resp_buf[GET_RESP_BUFSZ]
     L2_RET_BSS_SECT(xiaozhi_http_resp_buf);
 #endif
 
+static volatile int s_dns_lookup_done = 0;
+static ip_addr_t s_dns_lookup_addr = {0};
+static volatile int s_xz_ota_register_busy = 0;
+static rt_tick_t s_xz_ota_register_next_tick = 0;
+static uint32_t s_xz_ota_register_failure_count = 0;
+
 static void *xz_mbedtls_calloc(size_t count, size_t size)
 {
     if (count == 0 || size == 0)
     {
-        return audio_mem_calloc(0, 0);
+        return network_mem_calloc(0, 0);
     }
 
     if (count > (SIZE_MAX / size) ||
@@ -116,12 +130,12 @@ static void *xz_mbedtls_calloc(size_t count, size_t size)
         return RT_NULL;
     }
 
-    return audio_mem_calloc((uint32_t)count, (uint32_t)size);
+    return network_mem_calloc((uint32_t)count, (uint32_t)size);
 }
 
 static void xz_mbedtls_free(void *ptr)
 {
-    audio_mem_free(ptr);
+    network_mem_free(ptr);
 }
 
 void xz_prepare_tls_allocator(void)
@@ -141,6 +155,138 @@ void xz_prepare_tls_allocator(void)
     {
         rt_kprintf("xiaozhi tls allocator setup failed\n");
     }
+}
+
+static rt_bool_t xz_tick_before(rt_tick_t left, rt_tick_t right)
+{
+    return ((rt_int32_t)(left - right) < 0) ? RT_TRUE : RT_FALSE;
+}
+
+static uint32_t xz_ota_register_failure_cooldown_ms(uint32_t failure_count)
+{
+    uint32_t cooldown_ms = XZ_OTA_REGISTER_COOLDOWN_BASE_MS;
+
+    while (failure_count > 1U)
+    {
+        if (cooldown_ms >= (XZ_OTA_REGISTER_COOLDOWN_MAX_MS / 2U))
+        {
+            cooldown_ms = XZ_OTA_REGISTER_COOLDOWN_MAX_MS;
+            break;
+        }
+
+        cooldown_ms *= 2U;
+        failure_count--;
+    }
+
+    if (cooldown_ms > XZ_OTA_REGISTER_COOLDOWN_MAX_MS)
+    {
+        cooldown_ms = XZ_OTA_REGISTER_COOLDOWN_MAX_MS;
+    }
+
+    return cooldown_ms;
+}
+
+static int xz_ota_register_try_enter(const char *name)
+{
+    int result = 0;
+    rt_tick_t now_tick = rt_tick_get();
+
+    rt_enter_critical();
+    if (s_xz_ota_register_busy)
+    {
+        result = XZ_OTA_REGISTER_ENTER_BUSY;
+    }
+    else if (s_xz_ota_register_next_tick != 0U &&
+             xz_tick_before(now_tick, s_xz_ota_register_next_tick))
+    {
+        result = XZ_OTA_REGISTER_ENTER_COOLDOWN;
+    }
+    else
+    {
+        s_xz_ota_register_busy = 1;
+        s_xz_ota_register_next_tick = 0U;
+    }
+    rt_exit_critical();
+
+    if (result == XZ_OTA_REGISTER_ENTER_BUSY)
+    {
+        rt_kprintf("xiaozhi %s skipped: ota/register busy\n", name);
+    }
+    else if (result == XZ_OTA_REGISTER_ENTER_COOLDOWN)
+    {
+        rt_kprintf("xiaozhi %s skipped: ota/register cooldown\n", name);
+    }
+
+    return result;
+}
+
+static void xz_ota_register_leave(rt_bool_t failed)
+{
+    uint32_t cooldown_ms = 0U;
+
+    rt_enter_critical();
+    s_xz_ota_register_busy = 0;
+
+    if (failed)
+    {
+        if (s_xz_ota_register_failure_count < 8U)
+        {
+            s_xz_ota_register_failure_count++;
+        }
+
+        cooldown_ms =
+            xz_ota_register_failure_cooldown_ms(s_xz_ota_register_failure_count);
+        s_xz_ota_register_next_tick =
+            rt_tick_get() + rt_tick_from_millisecond(cooldown_ms);
+    }
+    else
+    {
+        s_xz_ota_register_failure_count = 0U;
+        s_xz_ota_register_next_tick = 0U;
+    }
+    rt_exit_critical();
+
+    if (failed)
+    {
+        rt_kprintf("xiaozhi ota/register failure cooldown %ums\n",
+                   cooldown_ms);
+    }
+}
+
+static rt_err_t xz_xiaozhi_http_begin(const char *name, bool *lock_taken)
+{
+    rt_err_t lock_result;
+
+    if (lock_taken != RT_NULL)
+    {
+        *lock_taken = false;
+    }
+
+    net_http_set_xiaozhi_active(true);
+    lock_result = net_http_lock_take(NET_HTTP_CLIENT_XIAOZHI, RT_WAITING_FOREVER);
+    if (lock_result != RT_EOK)
+    {
+        net_http_set_xiaozhi_active(false);
+        rt_kprintf("xiaozhi %s failed: http lock unavailable(%d)\n",
+                   name, lock_result);
+        return lock_result;
+    }
+
+    if (lock_taken != RT_NULL)
+    {
+        *lock_taken = true;
+    }
+
+    return RT_EOK;
+}
+
+static void xz_xiaozhi_http_end(bool lock_taken)
+{
+    if (lock_taken)
+    {
+        net_http_lock_release(NET_HTTP_CLIENT_XIAOZHI);
+    }
+    net_http_set_xiaozhi_active(false);
 }
 
 static void xz_fill_device_address(bd_addr_t *addr)
@@ -249,7 +395,7 @@ char *get_client_id()
             }
             hex_2_asc(g_sha256_result[i], &client_id_string[j]);
         }
-        rt_kprintf(client_id_string);
+        rt_kprintf("client id initialized\n");
     }
     return (&(client_id_string[0]));
 }
@@ -264,8 +410,37 @@ static void svr_found_callback(const char *name, const ip_addr_t *ipaddr,
 {
     if (ipaddr != NULL)
     {
+        s_dns_lookup_addr = *ipaddr;
+        s_dns_lookup_done = 1;
         rt_kprintf("DNS lookup succeeded, IP: %s\n", ipaddr_ntoa(ipaddr));
     }
+    else
+    {
+        s_dns_lookup_done = -1;
+    }
+}
+
+static rt_bool_t xz_wait_dns_lookup_done(void)
+{
+    uint32_t waited_ms = 0;
+
+    while (waited_ms < XZ_INTERNET_ACCESS_DNS_WAIT_MS)
+    {
+        if (s_dns_lookup_done == 1)
+        {
+            return RT_TRUE;
+        }
+
+        if (s_dns_lookup_done < 0)
+        {
+            return RT_FALSE;
+        }
+
+        rt_thread_mdelay(XZ_INTERNET_ACCESS_DNS_STEP_MS);
+        waited_ms += XZ_INTERNET_ACCESS_DNS_STEP_MS;
+    }
+
+    return s_dns_lookup_done == 1 ? RT_TRUE : RT_FALSE;
 }
 
 static rt_bool_t xz_internet_access_cache_hit(int expected_result,
@@ -303,7 +478,7 @@ static void xz_report_internet_access_failure(int reason, const char *hostname)
     }
     else
     {
-        rt_kprintf("Coud not find %s, please check PAN connection\n",
+        rt_kprintf("Could not resolve %s, please check active network service\n",
                    hostname);
     }
 
@@ -317,7 +492,7 @@ int check_internet_access()
     ip_addr_t addr = {0};
     rt_tick_t now_tick = rt_tick_get();
 
-    if (!net_manager_network_ready())
+    if (!net_manager_can_run_ai())
     {
         xz_report_internet_access_failure(0, hostname);
         s_last_internet_access_result = 0;
@@ -336,20 +511,41 @@ int check_internet_access()
     }
 
     {
-        err_t err =
-            dns_gethostbyname(hostname, &addr, svr_found_callback, NULL);
-        if (err != ERR_OK && err != ERR_INPROGRESS)
-        {
-            xz_report_internet_access_failure(1, hostname);
-            s_last_internet_access_result = 0;
-            s_last_internet_access_tick = now_tick;
-        }
-        else
+        err_t err;
+
+        s_dns_lookup_done = 0;
+        memset(&s_dns_lookup_addr, 0, sizeof(s_dns_lookup_addr));
+
+        err = dns_gethostbyname(hostname, &addr, svr_found_callback, NULL);
+        if (err == ERR_OK)
         {
             r = 1;
             s_last_internet_access_result = 1;
             s_last_internet_access_tick = now_tick;
             s_last_internet_access_log_state = -1;
+            rt_kprintf("DNS lookup cached, IP: %s\n", ipaddr_ntoa(&addr));
+        }
+        else if (err == ERR_INPROGRESS)
+        {
+            if (xz_wait_dns_lookup_done())
+            {
+                r = 1;
+                s_last_internet_access_result = 1;
+                s_last_internet_access_tick = now_tick;
+                s_last_internet_access_log_state = -1;
+            }
+            else
+            {
+                xz_report_internet_access_failure(1, hostname);
+                s_last_internet_access_result = 0;
+                s_last_internet_access_tick = now_tick;
+            }
+        }
+        else
+        {
+            xz_report_internet_access_failure(1, hostname);
+            s_last_internet_access_result = 0;
+            s_last_internet_access_tick = now_tick;
         }
     }
 
@@ -373,22 +569,45 @@ char *get_xiaozhi()
     int content_pos = 0;
     int ota_len;
     rt_size_t ota_capacity;
+    int enter_result;
+    bool xiaozhi_lock_taken = false;
 
     s_xiaozhi_last_error[0] = '\0';
+
+    enter_result = xz_ota_register_try_enter("ota");
+    if (enter_result != 0)
+    {
+        if (enter_result == XZ_OTA_REGISTER_ENTER_BUSY)
+        {
+            rt_snprintf(s_xiaozhi_last_error, sizeof(s_xiaozhi_last_error),
+                        "OTA/注册请求正在进行");
+        }
+        else
+        {
+            rt_snprintf(s_xiaozhi_last_error, sizeof(s_xiaozhi_last_error),
+                        "网络请求冷却中，请稍后重试");
+        }
+        return RT_NULL;
+    }
+
     xz_prepare_tls_allocator();
+    if (xz_xiaozhi_http_begin("ota", &xiaozhi_lock_taken) != RT_EOK)
+    {
+        rt_snprintf(s_xiaozhi_last_error, sizeof(s_xiaozhi_last_error),
+                    "小智 OTA 请求资源不足");
+        goto __exit;
+    }
 
     if (xiaozhi_network_service_ready() == 0)
     {
         rt_snprintf(s_xiaozhi_last_error, sizeof(s_xiaozhi_last_error),
                     "网络未连接或服务未就绪");
-        return RT_NULL;
+        goto __exit;
     }
-
-    first_pan_connected = TRUE;
 
     ota_capacity = strlen(ota_version) + strlen(get_mac_address()) * 2U +
                    strlen(get_client_id()) + 32U;
-    ota_formatted = (char *)audio_mem_malloc((uint32_t)ota_capacity);
+    ota_formatted = (char *)network_mem_malloc((uint32_t)ota_capacity);
     if (ota_formatted == RT_NULL)
     {
         rt_snprintf(s_xiaozhi_last_error, sizeof(s_xiaozhi_last_error),
@@ -420,6 +639,7 @@ char *get_xiaozhi()
                     "创建网络会话失败");
         goto __exit;
     }
+    (void)webclient_set_timeout(session, XZ_OTA_HTTP_TIMEOUT_MS);
 
     webclient_header_fields_add(session, "Device-Id: %s \r\n",
                                 get_mac_address());
@@ -429,14 +649,17 @@ char *get_xiaozhi()
                                 ota_len);
     // webclient_header_fields_add(session, "X-language:");
 
-    /* 发送 GET 请求使用默认的头部 */
+    rt_kprintf("xiaozhi ota post start timeout=%dms\n",
+               XZ_OTA_HTTP_TIMEOUT_MS);
+
+    /* 发送 POST 请求使用默认的头部 */
     if ((resp_status = webclient_post(session, xiaozhi_url, ota_formatted,
                                       ota_len)) != 200)
     {
         rt_kprintf("webclient Post request failed, response(%d) error.\n",
                    resp_status);
         rt_snprintf(s_xiaozhi_last_error, sizeof(s_xiaozhi_last_error),
-                    "小智 OTA 接口返回异常(%d)", resp_status);
+                    "小智 OTA 接口连接失败(%d)", resp_status);
         goto __exit;
     }
 
@@ -480,9 +703,11 @@ __exit:
         UNLOCK_TCPIP_CORE();
     }
 
+    xz_xiaozhi_http_end(xiaozhi_lock_taken);
+
     if (ota_formatted != RT_NULL)
     {
-        audio_mem_free(ota_formatted);
+        network_mem_free(ota_formatted);
     }
 
     if (content_pos <= 0)
@@ -492,10 +717,12 @@ __exit:
             rt_snprintf(s_xiaozhi_last_error, sizeof(s_xiaozhi_last_error),
                         "小智 OTA 接口未返回有效内容");
         }
+        xz_ota_register_leave(RT_TRUE);
         return RT_NULL;
     }
 
     s_xiaozhi_http_resp_buf[content_pos] = '\0';
+    xz_ota_register_leave(RT_FALSE);
     return s_xiaozhi_http_resp_buf;
 }
 char *my_json_string(cJSON *json, char *key)
@@ -557,6 +784,15 @@ void xz_set_config_update(uint8_t en)
 int register_device_with_server(void)
 {
     device_register_params_t reg_params = {0};
+    int enter_result;
+    int result;
+    bool xiaozhi_lock_taken = false;
+
+    enter_result = xz_ota_register_try_enter("register");
+    if (enter_result != 0)
+    {
+        return -RT_EBUSY;
+    }
     
     // 填充注册参数
     reg_params.mac = get_mac_address();
@@ -581,18 +817,29 @@ int register_device_with_server(void)
     reg_params.version = VERSION; // 当前固件版本
     reg_params.ota_version = VERSION;
     reg_params.chip_id = get_client_id();
+
+    xz_prepare_tls_allocator();
+    if (xz_xiaozhi_http_begin("register", &xiaozhi_lock_taken) != RT_EOK)
+    {
+        result = -RT_ERROR;
+        goto __exit;
+    }
     
     // 服务器注册设备URL
     const char* ota_server_url = "https://ota.sifli.com";
     
     // 执行设备注册
-    int result = dfu_pan_register_device(ota_server_url, &reg_params);
+    result = dfu_pan_register_device(ota_server_url, &reg_params);
     
     if (result == 0) {
-        rt_kprintf("Device registered successfully with chip_id: %s\n", get_client_id());
+        rt_kprintf("Device registered successfully\n");
     } else {
-        rt_kprintf("Device registration failed\n");
+        rt_kprintf("Device registration failed(%d)\n", result);
     }
+
+__exit:
+    xz_xiaozhi_http_end(xiaozhi_lock_taken);
+    xz_ota_register_leave(result == 0 ? RT_FALSE : RT_TRUE);
     
     return result;
 }

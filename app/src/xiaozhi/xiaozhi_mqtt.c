@@ -38,6 +38,20 @@ xiaozhi_context_t g_xz_context;
 #ifdef XIAOZHI_USING_MQTT
 enum DeviceState mqtt_g_state;
 
+#ifndef XIAOZHI_MQTT_DEBUG_LOG
+#define XIAOZHI_MQTT_DEBUG_LOG 0
+#endif
+
+#define XZ_MQTT_LOG(...)                                                       \
+    do                                                                         \
+    {                                                                          \
+        if (XIAOZHI_MQTT_DEBUG_LOG)                                            \
+        {                                                                      \
+            rt_kprintf(__VA_ARGS__);                                           \
+        }                                                                      \
+    } while (0)
+
+static bool g_mqtt_drop_incoming_payload = false;
 static char message[256];
 static const char *hello_message =
     "{"
@@ -56,6 +70,107 @@ static rt_tick_t g_speaking_start_tick = 0;  // 讲话开始时间
 static rt_tick_t g_total_speaking_time = 0;  // 累计讲话时间
 static bool g_is_speaking = false;           // 是否正在讲话
 #define SPEAKING_THRESHOLD_MS (5 * 60 * 1000) // 5分钟阈值 (毫秒)
+
+static void xz_mqtt_release_rx_buf(xiaozhi_context_t *ctx, xz_topic_buf_t *buf)
+{
+    if (!ctx || !buf)
+    {
+        return;
+    }
+
+    if (buf->buf)
+    {
+        audio_mem_free(buf->buf);
+    }
+
+    buf->buf = NULL;
+    buf->total_len = 0;
+    buf->used_len = 0;
+    ctx->topic_buf_pool.rd_idx = (ctx->topic_buf_pool.rd_idx + 1) & 1;
+}
+
+static void xz_mqtt_drop_current_publish(const char *reason, u32_t total_len)
+{
+    g_mqtt_drop_incoming_payload = (total_len > 0);
+    rt_kprintf("MQTT drop incoming publish: %s, len=%u\n", reason,
+               (unsigned int)total_len);
+}
+
+static void xz_mqtt_disconnect_for_bad_payload(xiaozhi_context_t *ctx,
+                                                const char *reason)
+{
+    rt_kprintf("MQTT disconnect malformed incoming payload: %s\n", reason);
+    mqtt_g_state = kDeviceStateUnknown;
+    if (ctx && mqtt_client_is_connected(&(ctx->clnt)))
+    {
+        mqtt_disconnect(&(ctx->clnt));
+    }
+}
+
+static const char *xz_json_get_string(cJSON *obj, const char *name)
+{
+    if (!obj || !name)
+    {
+        return NULL;
+    }
+
+    cJSON *item = cJSON_GetObjectItem(obj, name);
+    if (!item || !cJSON_IsString(item) || !item->valuestring)
+    {
+        return NULL;
+    }
+
+    return item->valuestring;
+}
+
+static bool xz_json_get_int(cJSON *obj, const char *name, int *value)
+{
+    if (!obj || !name || !value)
+    {
+        return false;
+    }
+
+    cJSON *item = cJSON_GetObjectItem(obj, name);
+    if (!item)
+    {
+        return false;
+    }
+
+    if (cJSON_IsString(item) && item->valuestring)
+    {
+        *value = atoi(item->valuestring);
+    }
+    else if (cJSON_IsNumber(item))
+    {
+        *value = item->valueint;
+    }
+    else
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static void xz_mqtt_handle_mcp_payload(cJSON *root)
+{
+    cJSON *payload = cJSON_GetObjectItem(root, "payload");
+    if (!payload || !cJSON_IsObject(payload))
+    {
+        rt_kprintf("MQTT mcp payload missing object payload\n");
+        return;
+    }
+
+    char *payload_json = cJSON_PrintUnformatted(payload);
+    if (!payload_json)
+    {
+        rt_kprintf("MQTT mcp payload serialization failed\n");
+        return;
+    }
+
+    McpServer_ParseMessage(payload_json);
+    cJSON_free(payload_json);
+}
 
 void my_mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len);
 void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
@@ -110,21 +225,33 @@ void my_mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len)
     xz_topic_buf_pool_t *topic_buf_pool;
     xz_topic_buf_t *buf;
 
-    rt_kprintf("MQTT incoming topic : %d\n", tot_len);
-    rt_kputs(topic);
-    rt_kputs("\n");
+    XZ_MQTT_LOG("MQTT incoming topic len: %u\n", (unsigned int)tot_len);
 
     topic_buf_pool = &ctx->topic_buf_pool;
     buf = &topic_buf_pool->buf[topic_buf_pool->wr_idx];
     if (buf->buf)
     {
         /* pool full */
-        RT_ASSERT(0);
+        xz_mqtt_drop_current_publish("topic buffer full", tot_len);
+        return;
+    }
+
+    if (tot_len == 0 || tot_len == (u32_t)-1)
+    {
+        xz_mqtt_drop_current_publish("invalid payload length", tot_len);
+        return;
     }
 
     /* allocate buffer for incoming payload */
-    buf->buf = audio_mem_malloc(tot_len);
-    RT_ASSERT(buf->buf);
+    buf->buf = audio_mem_malloc(tot_len + 1);
+    if (!buf->buf)
+    {
+        buf->total_len = 0;
+        buf->used_len = 0;
+        xz_mqtt_drop_current_publish("payload allocation failed", tot_len);
+        return;
+    }
+
     buf->total_len = tot_len;
     buf->used_len = 0;
 
@@ -138,14 +265,33 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
     xz_topic_buf_pool_t *topic_buf_pool;
     xz_topic_buf_t *buf;
 
-    rt_kprintf("MQTT incoming pub data : %d, %x\n", len, flags);
-    // rt_kputs(data);
+    XZ_MQTT_LOG("MQTT incoming pub data: len=%u flags=%x\n",
+                (unsigned int)len, flags);
+    if (g_mqtt_drop_incoming_payload)
+    {
+        if (flags)
+        {
+            g_mqtt_drop_incoming_payload = false;
+        }
+        return;
+    }
 
     topic_buf_pool = &ctx->topic_buf_pool;
     buf = &topic_buf_pool->buf[topic_buf_pool->rd_idx];
-    RT_ASSERT(buf->buf);
+    if (!buf->buf)
+    {
+        g_mqtt_drop_incoming_payload = !flags;
+        xz_mqtt_disconnect_for_bad_payload(ctx, "data without payload buffer");
+        return;
+    }
 
-    RT_ASSERT(buf->used_len + len <= buf->total_len);
+    if (len > buf->total_len || buf->used_len > buf->total_len - len)
+    {
+        g_mqtt_drop_incoming_payload = !flags;
+        xz_mqtt_release_rx_buf(ctx, buf);
+        xz_mqtt_disconnect_for_bad_payload(ctx, "fragment length overflow");
+        return;
+    }
     memcpy(buf->buf + buf->used_len, data, len);
     buf->used_len += len;
     if (!flags)
@@ -154,45 +300,62 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
         return;
     }
 
-    cJSON *item = NULL;
-    cJSON *root = NULL;
-    rt_kputs(buf->buf);
-    rt_kputs("\r\n");
-    root = cJSON_Parse(buf->buf); /*json_data 为MQTT的原始数据*/
-    rt_kprintf("buf range: %p~%p\n", buf->buf, buf->buf + buf->total_len);
-    audio_mem_free(buf->buf);
-    buf->buf = NULL;
-    topic_buf_pool->rd_idx = (topic_buf_pool->rd_idx + 1) & 1;
-    if (!root)
+    if (buf->used_len != buf->total_len)
     {
-        rt_kprintf("Error before: [%s]\n", cJSON_GetErrorPtr());
+        xz_mqtt_release_rx_buf(ctx, buf);
+        xz_mqtt_disconnect_for_bad_payload(ctx, "fragment length mismatch");
         return;
     }
 
-    char *type = cJSON_GetObjectItem(root, "type")->valuestring;
-    rt_kprintf("type addr: %p\n", type);
+    buf->buf[buf->used_len] = '\0';
+    cJSON *item = NULL;
+    cJSON *root = NULL;
+    root = cJSON_Parse(buf->buf); /*json_data 为MQTT的原始数据*/
+    xz_mqtt_release_rx_buf(ctx, buf);
+    if (!root)
+    {
+        rt_kprintf("MQTT incoming payload JSON parse failed\n");
+        return;
+    }
+
+    char *type = (char *)xz_json_get_string(root, "type");
+    if (!type)
+    {
+        rt_kprintf("MQTT incoming payload missing type\n");
+        cJSON_Delete(root);
+        return;
+    }
+    XZ_MQTT_LOG("MQTT incoming payload type: %s\n", type);
     if (strcmp(type, "hello") == 0)
     {
         cJSON *udp = cJSON_GetObjectItem(root, "udp");
-        char *server = cJSON_GetObjectItem(udp, "server")->valuestring;
-        int port = cJSON_GetObjectItem(udp, "port")->valueint;
-        char *key = cJSON_GetObjectItem(udp, "key")->valuestring;
-        char *nonce = cJSON_GetObjectItem(udp, "nonce")->valuestring;
+        char *server = (char *)xz_json_get_string(udp, "server");
+        char *key = (char *)xz_json_get_string(udp, "key");
+        char *nonce = (char *)xz_json_get_string(udp, "nonce");
+        int port = 0;
+
+
+        cJSON *audio_param = cJSON_GetObjectItem(root, "audio_params");
+        int sample_rate = 0;
+        int duration = 0;
+        char *session_id = (char *)xz_json_get_string(root, "session_id");
+        if (!server || !key || !nonce || !xz_json_get_int(udp, "port", &port) ||
+                !xz_json_get_int(audio_param, "sample_rate", &sample_rate) ||
+                !xz_json_get_int(audio_param, "duration", &duration) ||
+                !session_id)
+        {
+            rt_kprintf("MQTT hello payload missing required fields\n");
+            cJSON_Delete(root);
+            return;
+        }
 
         ip4addr_aton(server, &(ctx->udp_addr));
         ctx->port = port;
         hex2data(key, ctx->key, 16);
         hex2data(nonce, ctx->nonce, 16);
+        ctx->sample_rate = sample_rate;
+        ctx->frame_duration = duration;
 
-        cJSON *audio_param = cJSON_GetObjectItem(root, "audio_params");
-        char *sample_rate =
-            cJSON_GetObjectItem(audio_param, "sample_rate")->valuestring;
-        char *duration =
-            cJSON_GetObjectItem(audio_param, "duration")->valuestring;
-        ctx->sample_rate = atoi(sample_rate);
-        ctx->frame_duration = atoi(duration);
-
-        char *session_id = cJSON_GetObjectItem(root, "session_id")->valuestring;
         strncpy(ctx->session_id, session_id, 9);
         mqtt_g_state = kDeviceStateIdle;
         xz_audio_init();
@@ -212,7 +375,14 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
     }
     else if (strcmp(type, "tts") == 0)
     {
-        char *state = cJSON_GetObjectItem(root, "state")->valuestring;
+        char *state = (char *)xz_json_get_string(root, "state");
+        if (!state)
+        {
+            rt_kprintf("MQTT tts payload missing state\n");
+            cJSON_Delete(root);
+            return;
+        }
+
         if (strcmp(state, "start") == 0)
         {
             if (mqtt_g_state == kDeviceStateIdle ||
@@ -253,14 +423,26 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
         }
         else if (strcmp(state, "sentence_start") == 0)
         {
-            char *txt = cJSON_GetObjectItem(root, "text")->valuestring;
+            char *txt = (char *)xz_json_get_string(root, "text");
+            if (!txt)
+            {
+                rt_kprintf("MQTT tts payload missing text\n");
+                cJSON_Delete(root);
+                return;
+            }
             // rt_kputs(txt);
             xiaozhi_ui_tts_output(txt); // 使用专用函数处理 tts 输出
         }
     }
     else if (strcmp(type, "stt") == 0)
     {
-        char *txt = cJSON_GetObjectItem(root, "text")->valuestring;
+        char *txt = (char *)xz_json_get_string(root, "text");
+        if (!txt)
+        {
+            rt_kprintf("MQTT stt payload missing text\n");
+            cJSON_Delete(root);
+            return;
+        }
         xiaozhi_ui_chat_output(txt);
         last_listen_tick = rt_tick_get();
         mqtt_g_state = kDeviceStateSpeaking;
@@ -269,26 +451,20 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
     else if (strcmp(type, "llm") ==0) // {"type":"llm", "text": "😊", "emotion": "smile"}
 
     {
-        rt_kputs(cJSON_GetObjectItem(root, "emotion")->valuestring);
-        xiaozhi_ui_update_emoji(cJSON_GetObjectItem(root, "emotion")->valuestring);
+        char *emotion = (char *)xz_json_get_string(root, "emotion");
+        if (!emotion)
+        {
+            rt_kprintf("MQTT llm payload missing emotion\n");
+            cJSON_Delete(root);
+            return;
+        }
+        XZ_MQTT_LOG("MQTT llm emotion: %s\n", emotion);
+        xiaozhi_ui_update_emoji(emotion);
     }
     else if (strcmp(type, "mcp") == 0)
     {
         rt_kprintf("mcp command\n");
-        cJSON *payload = cJSON_GetObjectItem(root, "payload");
-        if (payload && cJSON_IsObject(payload))
-        {
-            McpServer_ParseMessage(cJSON_PrintUnformatted(payload));
-        }
-    }
-    else if (strcmp(type, "mcp") == 0)
-    {
-        rt_kprintf("mcp command\n");
-        cJSON *payload = cJSON_GetObjectItem(root, "payload");
-        if (payload && cJSON_IsObject(payload))
-        {
-            McpServer_ParseMessage(cJSON_PrintUnformatted(payload));
-        }
+        xz_mqtt_handle_mcp_payload(root);
     }
     else
     {
@@ -298,12 +474,10 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
 
 void mqtt_hello(xiaozhi_context_t *ctx)
 {
-    rt_kprintf("Publish topic:");
-    rt_kputs(ctx->publish_topic);
-
-    rt_kprintf("\r\nhello_message:");
-    rt_kputs(hello_message);
-    rt_kprintf("\r\n");
+    XZ_MQTT_LOG("Publish topic len: %u\n",
+                (unsigned int)strlen(ctx->publish_topic));
+    XZ_MQTT_LOG("hello payload len: %u\n",
+                (unsigned int)strlen(hello_message));
     LOCK_TCPIP_CORE();
     if (mqtt_client_is_connected(&(ctx->clnt)))
     {
@@ -479,54 +653,90 @@ mqtt_client_t *mqtt_xiaozhi(xiaozhi_context_t *ctx)
     return clnt;
 }
 
+static char *mqtt_dup_json_string(cJSON *object, const char *key)
+{
+    cJSON *item = cJSON_GetObjectItem(object, key);
+    if (!cJSON_IsString(item) || item->valuestring == RT_NULL)
+    {
+        rt_kprintf("MQTT HTTP config missing string field: %s\n", key);
+        return RT_NULL;
+    }
+
+    size_t len = strlen(item->valuestring);
+    char *copy = (char *)rt_malloc(len + 1);
+    if (copy == RT_NULL)
+    {
+        rt_kprintf("MQTT HTTP config alloc failed: %s len=%u\n", key, (unsigned int)len);
+        return RT_NULL;
+    }
+    memcpy(copy, item->valuestring, len + 1);
+    return copy;
+}
+
+static void mqtt_free_context_config(xiaozhi_context_t *ctx)
+{
+    if (ctx->endpoint) { rt_free(ctx->endpoint); ctx->endpoint = RT_NULL; }
+    if (ctx->client_id) { rt_free(ctx->client_id); ctx->client_id = RT_NULL; }
+    if (ctx->username) { rt_free(ctx->username); ctx->username = RT_NULL; }
+    if (ctx->password) { rt_free(ctx->password); ctx->password = RT_NULL; }
+    if (ctx->publish_topic) { rt_free(ctx->publish_topic); ctx->publish_topic = RT_NULL; }
+}
+
 int mqtt_http_xiaozhi_data_parse(char *json_data)
 {
+    if (json_data == RT_NULL)
+    {
+        return -1;
+    }
 
-    uint8_t i, j;
-    uint8_t result_array_size = 0;
-
-    cJSON *item = NULL;
     cJSON *root = NULL;
 
-    rt_kputs(json_data);
     root = cJSON_Parse(json_data); /*json_data 为MQTT的原始数据*/
     if (!root)
     {
-        rt_kprintf("Error before: [%s]\n", cJSON_GetErrorPtr());
+        rt_kprintf("MQTT HTTP data JSON parse failed\n");
         return -1;
     }
 
     cJSON *Presult = cJSON_GetObjectItem(root, "mqtt"); /*mqtt的键值对为数组，*/
-    result_array_size =
-        cJSON_GetArraySize(Presult); /*求results键值对数组中有多少个元素*/
-    item = cJSON_GetObjectItem(Presult, "endpoint");
-    g_xz_context.endpoint = cJSON_Print(item);
-    item = cJSON_GetObjectItem(Presult, "client_id");
-    g_xz_context.client_id = cJSON_Print(item);
-    item = cJSON_GetObjectItem(Presult, "username");
-    g_xz_context.username = cJSON_Print(item);
-    item = cJSON_GetObjectItem(Presult, "password");
-    g_xz_context.password = cJSON_Print(item);
-    item = cJSON_GetObjectItem(Presult, "publish_topic");
-    g_xz_context.publish_topic = cJSON_Print(item);
+    if (!cJSON_IsObject(Presult))
+    {
+        rt_kprintf("MQTT HTTP data missing mqtt object\n");
+        cJSON_Delete(root);
+        return -1;
+    }
 
-    // Skip the "..." in string
-    g_xz_context.endpoint++;
-    g_xz_context.endpoint[strlen(g_xz_context.endpoint) - 1] = '\0';
-    g_xz_context.client_id++;
-    g_xz_context.client_id[strlen(g_xz_context.client_id) - 1] = '\0';
-    g_xz_context.username++;
-    g_xz_context.username[strlen(g_xz_context.username) - 1] = '\0';
-    g_xz_context.password++;
-    g_xz_context.password[strlen(g_xz_context.password) - 1] = '\0';
-    g_xz_context.publish_topic++;
-    g_xz_context.publish_topic[strlen(g_xz_context.publish_topic) - 1] = '\0';
+    char *endpoint = mqtt_dup_json_string(Presult, "endpoint");
+    char *client_id = mqtt_dup_json_string(Presult, "client_id");
+    char *username = mqtt_dup_json_string(Presult, "username");
+    char *password = mqtt_dup_json_string(Presult, "password");
+    char *publish_topic = mqtt_dup_json_string(Presult, "publish_topic");
 
-    rt_kprintf("\r\nmqtt:\r\n\t%s\r\n\t%s\r\n\r\n", g_xz_context.endpoint,
-               g_xz_context.client_id);
-    rt_kprintf("\t%s\r\n\t%s\r\n", g_xz_context.username,
-               g_xz_context.password);
-    rt_kprintf("\t%s\r\n", g_xz_context.publish_topic);
+    if (endpoint == RT_NULL || client_id == RT_NULL || username == RT_NULL ||
+        password == RT_NULL || publish_topic == RT_NULL)
+    {
+        if (endpoint) { rt_free(endpoint); }
+        if (client_id) { rt_free(client_id); }
+        if (username) { rt_free(username); }
+        if (password) { rt_free(password); }
+        if (publish_topic) { rt_free(publish_topic); }
+        cJSON_Delete(root);
+        return -1;
+    }
+
+    mqtt_free_context_config(&g_xz_context);
+    g_xz_context.endpoint = endpoint;
+    g_xz_context.client_id = client_id;
+    g_xz_context.username = username;
+    g_xz_context.password = password;
+    g_xz_context.publish_topic = publish_topic;
+
+    rt_kprintf("MQTT config loaded: endpoint=%s, client_id_len=%u, "
+               "username_len=%u, password=<redacted>, publish_topic_len=%u\n",
+               g_xz_context.endpoint,
+               (unsigned int)strlen(g_xz_context.client_id),
+               (unsigned int)strlen(g_xz_context.username),
+               (unsigned int)strlen(g_xz_context.publish_topic));
     mqtt_xiaozhi(&g_xz_context);
     cJSON_Delete(root); /*每次调用cJSON_Parse函数后，都要释放内存*/
     return 0;

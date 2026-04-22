@@ -9,6 +9,7 @@ extern "C" {
 
 void xz_mqtt_button_init(void);
 void xz_audio_init(void);
+bool xz_audio_is_inited(void);
 void xz_speaker_open(xz_audio_t *thiz);
 void xz_speaker_close(xz_audio_t *thiz);
 void xz_speaker_abort(xz_audio_t *thiz);

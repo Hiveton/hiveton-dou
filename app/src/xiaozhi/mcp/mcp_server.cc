@@ -8,20 +8,21 @@
 #include <cstring>
 #include "../iot/thing_manager.h"
 #include <webclient.h>
+#include "audio_mem.h"
 #include "rgbled_mcp.h" 
 // #include "lwip/apps/websocket_client.h"   // 提供 wsock_write 和 OPCODE_TEXT 定义
 #include "../xiaozhi_websocket.h"        // 提供 g_xz_ws 定义
 #include "../xiaozhi_mqtt.h" 
 extern xiaozhi_ws_t g_xz_ws; 
 extern xiaozhi_context_t g_xz_context;     
-extern uint8_t aec_enabled;
-extern uint8_t vad_enable;
 extern "C" {
 extern void xiaozhi_ui_update_volume(int volume);
 extern void xiaozhi_ui_update_brightness(int brightness);
-extern void ctrl_wakeup(bool is_wakeup);
-extern void ctrl_interrupt(bool is_interrupt);
 extern void my_mqtt_request_cb2(void *arg, err_t err);
+extern uint8_t aec_is_enable(void);
+extern void aec_set_enable(uint8_t enable);
+extern uint8_t vad_is_enable(void);
+extern void vad_set_enable(uint8_t enable);
 }
 
 
@@ -29,6 +30,58 @@ extern void my_mqtt_request_cb2(void *arg, err_t err);
 #define TAG "MCP"
 #define BOARD_NAME "XiaoZhi-SF32"
 #define DEFAULT_TOOLCALL_STACK_SIZE 6144
+#ifndef MCP_LOG_MESSAGE_CONTENT
+#define MCP_LOG_MESSAGE_CONTENT 0
+#endif
+#define MCP_LOG_CONTENT_PREVIEW_BYTES 256
+#define MCP_MAX_REPLY_RESULT_BYTES 8192
+#define MCP_MAX_ERROR_MESSAGE_BYTES 256
+#define MCP_MAX_OUTBOUND_MESSAGE_BYTES 16384
+
+static std::string McpExtractStringField(const std::string& json, const char* field)
+{
+    std::string pattern = "\"";
+    pattern += field;
+    pattern += "\":\"";
+
+    auto start = json.find(pattern);
+    if (start == std::string::npos) {
+        return "unknown";
+    }
+
+    start += pattern.length();
+    auto end = json.find('"', start);
+    if (end == std::string::npos || end == start) {
+        return "unknown";
+    }
+
+    return json.substr(start, end - start);
+}
+
+static std::string McpTruncateString(const std::string& value, size_t max_len)
+{
+    if (value.length() <= max_len) {
+        return value;
+    }
+
+    return value.substr(0, max_len);
+}
+
+static void McpLogContentPreview(const char* label, const std::string& text)
+{
+#if MCP_LOG_MESSAGE_CONTENT
+    std::string preview = McpTruncateString(text, MCP_LOG_CONTENT_PREVIEW_BYTES);
+    rt_kprintf("[MCP] %s preview(%u/%u): %s%s\n",
+               label,
+               (unsigned int)preview.length(),
+               (unsigned int)text.length(),
+               preview.c_str(),
+               preview.length() < text.length() ? "..." : "");
+#else
+    (void)label;
+    (void)text;
+#endif
+}
 
 McpServer::McpServer() {
 }
@@ -127,7 +180,7 @@ void McpServer::AddCommonTools() {
         PropertyList(),
         [=](const PropertyList&) -> ReturnValue 
         {
-            ctrl_wakeup(true);
+            aec_set_enable(1);
             return true;
         });
 
@@ -136,7 +189,7 @@ void McpServer::AddCommonTools() {
         PropertyList(),
         [=](const PropertyList&) -> ReturnValue 
         {
-            ctrl_wakeup(false);
+            aec_set_enable(0);
             return true;
         });
 
@@ -145,7 +198,7 @@ void McpServer::AddCommonTools() {
         PropertyList(),
         [=](const PropertyList&) -> ReturnValue 
         {
-            return (bool)aec_enabled;
+            return (bool)aec_is_enable();
         });
 
     // 添加打断功能控制工具
@@ -154,7 +207,7 @@ void McpServer::AddCommonTools() {
         PropertyList(),
         [=](const PropertyList&) -> ReturnValue 
         {
-            ctrl_interrupt(true);
+            vad_set_enable(0);
             return true;
         });
 
@@ -163,7 +216,7 @@ void McpServer::AddCommonTools() {
         PropertyList(),
         [=](const PropertyList&) -> ReturnValue 
         {
-            ctrl_interrupt(false);
+            vad_set_enable(1);
             return true;
         });
 
@@ -173,7 +226,7 @@ void McpServer::AddCommonTools() {
         [=](const PropertyList&) -> ReturnValue 
         {
             // 注意：vad_enable为1表示不打断，为0表示可打断
-            return (bool)(!vad_enable);
+            return (bool)(!vad_is_enable());
         });
 
 #endif 
@@ -183,9 +236,27 @@ void McpServer::AddCommonTools() {
 
 void McpServer::SendText(const std::string& text)
 {
-    rt_kprintf("[MCP] Sending text via MQTT:\n");
-    rt_kprintf("[MCP] Current tools count: %d\n", tools_.size());
-    rt_kprintf("[MCP] Message content: %s\n", text.c_str());
+#ifdef XIAOZHI_USING_MQTT
+    const char* transport = "MQTT";
+#else
+    const char* transport = "WebSocket";
+#endif
+    std::string message_type = McpExtractStringField(text, "type");
+    rt_kprintf("[MCP] Sending text via %s len=%u type=%s tools=%d\n",
+               transport,
+               (unsigned int)text.length(),
+               message_type.c_str(),
+               (int)tools_.size());
+    McpLogContentPreview("Outgoing message", text);
+
+    if (text.length() > MCP_MAX_OUTBOUND_MESSAGE_BYTES) {
+        rt_kprintf("[MCP] Outgoing message too large, dropped len=%u limit=%u type=%s\n",
+                   (unsigned int)text.length(),
+                   (unsigned int)MCP_MAX_OUTBOUND_MESSAGE_BYTES,
+                   message_type.c_str());
+        return;
+    }
+
 #ifdef XIAOZHI_USING_MQTT
     //  MQTT 发送逻辑
     if (mqtt_client_is_connected(&g_xz_context.clnt)) {
@@ -200,34 +271,95 @@ void McpServer::SendText(const std::string& text)
 #endif
 }
 void print_long_string(const char* str, int max_len_per_line = 100) {
-    int len = strlen(str);
-    for (int i = 0; i < len; i += max_len_per_line) {
-        char buffer[max_len_per_line + 1];
-        int copy_len = (len - i) < max_len_per_line ? (len - i) : max_len_per_line;
-        strncpy(buffer, str + i, copy_len);
-        buffer[copy_len] = '\0';
-        rt_kprintf("%s\n", buffer);
+    if (str == nullptr) {
+        return;
     }
+
+    (void)max_len_per_line;
+    McpLogContentPreview("Message content", std::string(str));
 }
 void McpServer::SendmcpMessage(const std::string& payload) {
-    std::string session_id;
+    const char *session_id;
+    const char prefix[] = "{\"session_id\":\"";
+    const char middle[] = "\",\"type\":\"mcp\",\"payload\":";
+    const char suffix[] = "}";
+    size_t session_id_len;
+    size_t total_len;
+    uint32_t alloc_len;
+    char *message;
+    char *p;
 #ifdef XIAOZHI_USING_MQTT
-    session_id = std::string(reinterpret_cast<const char*>(g_xz_context.session_id));
-    rt_kprintf(" MQTT session_id: %s\n", session_id.c_str());
+    session_id = reinterpret_cast<const char*>(g_xz_context.session_id);
+    if (session_id == nullptr || session_id[0] == '\0') {
+        session_id = "unknown-session";
+    }
+    rt_kprintf("[MCP] MQTT session_id len=%u\n", (unsigned int)strlen(session_id));
 #else
     // WebSocket 逻辑
     if (g_xz_ws.session_id[0]) {
-        session_id = std::string(reinterpret_cast<const char*>(g_xz_ws.session_id));
+        session_id = reinterpret_cast<const char*>(g_xz_ws.session_id);
     } else {
         session_id = "unknown-session";
     }
-    rt_kprintf("WebSocket session_id: %s\n", session_id.c_str());
+    rt_kprintf("[MCP] WebSocket session_id len=%u\n", (unsigned int)strlen(session_id));
 #endif
 
-    std::string message = "{\"session_id\":\"" + session_id +
-                         "\",\"type\":\"mcp\",\"payload\":" + payload + "}";
-    print_long_string(message.c_str());
-    McpServer::SendText(message);
+    session_id_len = strlen(session_id);
+    total_len = (sizeof(prefix) - 1U) + session_id_len +
+                (sizeof(middle) - 1U) + payload.length() +
+                (sizeof(suffix) - 1U);
+    if (total_len > MCP_MAX_OUTBOUND_MESSAGE_BYTES) {
+        rt_kprintf("[MCP] MCP envelope too large, dropped payload_len=%u message_len=%u limit=%u\n",
+                   (unsigned int)payload.length(),
+                   (unsigned int)total_len,
+                   (unsigned int)MCP_MAX_OUTBOUND_MESSAGE_BYTES);
+        return;
+    }
+
+    alloc_len = (uint32_t)(total_len + 1U);
+    if (alloc_len < 256U) {
+        /* Force audio_mem_malloc() onto its PSRAM heap instead of the exhausted system heap. */
+        alloc_len = 256U;
+    }
+
+    message = static_cast<char *>(audio_mem_malloc(alloc_len));
+    if (message == nullptr) {
+        rt_kprintf("[MCP] MCP envelope alloc failed message_len=%u\n",
+                   (unsigned int)total_len);
+        return;
+    }
+
+    p = message;
+    memcpy(p, prefix, sizeof(prefix) - 1U);
+    p += sizeof(prefix) - 1U;
+    memcpy(p, session_id, session_id_len);
+    p += session_id_len;
+    memcpy(p, middle, sizeof(middle) - 1U);
+    p += sizeof(middle) - 1U;
+    memcpy(p, payload.data(), payload.length());
+    p += payload.length();
+    memcpy(p, suffix, sizeof(suffix) - 1U);
+    p += sizeof(suffix) - 1U;
+    *p = '\0';
+
+    rt_kprintf("[MCP] MCP envelope payload_len=%u message_len=%u\n",
+               (unsigned int)payload.length(),
+               (unsigned int)total_len);
+#if MCP_LOG_MESSAGE_CONTENT
+    McpLogContentPreview("MCP envelope", std::string(message, total_len));
+#endif
+
+#ifdef XIAOZHI_USING_MQTT
+    if (mqtt_client_is_connected(&g_xz_context.clnt)) {
+        mqtt_publish(&g_xz_context.clnt, g_xz_context.publish_topic, message,
+                     total_len, 0, 0, NULL, NULL);
+    } else {
+        rt_kprintf("[MCP] MQTT client not connected\n");
+    }
+#else
+    wsock_write(&g_xz_ws.clnt, message, total_len, OPCODE_TEXT);
+#endif
+    audio_mem_free(message);
 }
 
 void McpServer::AddTool(McpTool* tool) {
@@ -264,7 +396,8 @@ void McpServer::ParseMessage(const cJSON* json)
     // Check JSONRPC version
     auto version = cJSON_GetObjectItem(json, "jsonrpc");
     if (version == nullptr || !cJSON_IsString(version) || strcmp(version->valuestring, "2.0") != 0) {
-        rt_kprintf(TAG, "Invalid JSONRPC version: %s", version ? version->valuestring : "null");
+        const char* version_text = (cJSON_IsString(version) && version->valuestring) ? version->valuestring : "non-string/null";
+        rt_kprintf("[MCP] Invalid JSONRPC version: %s\n", version_text);
         return;
     }
     
@@ -344,6 +477,15 @@ void McpServer::ParseMessage(const cJSON* json)
 }
 
 void McpServer::ReplyResult(int id, const std::string& result) {
+    if (result.length() > MCP_MAX_REPLY_RESULT_BYTES) {
+        rt_kprintf("[MCP] Reply result too large, returning error id=%d result_len=%u limit=%u\n",
+                   id,
+                   (unsigned int)result.length(),
+                   (unsigned int)MCP_MAX_REPLY_RESULT_BYTES);
+        ReplyError(id, "Result too large");
+        return;
+    }
+
     std::string payload = "{\"jsonrpc\":\"2.0\",\"id\":";
     payload += std::to_string(id) + ",\"result\":";
     payload += result;
@@ -352,10 +494,18 @@ void McpServer::ReplyResult(int id, const std::string& result) {
     //wsock_write(&g_xz_ws.clnt, payload, strlen(payload), OPCODE_TEXT)
 }
 void McpServer::ReplyError(int id, const std::string& message) {
+    std::string safe_message = McpTruncateString(message, MCP_MAX_ERROR_MESSAGE_BYTES);
+    if (safe_message.length() < message.length()) {
+        rt_kprintf("[MCP] Reply error message truncated id=%d message_len=%u limit=%u\n",
+                   id,
+                   (unsigned int)message.length(),
+                   (unsigned int)MCP_MAX_ERROR_MESSAGE_BYTES);
+    }
+
     std::string payload = "{\"jsonrpc\":\"2.0\",\"id\":";
     payload += std::to_string(id);
     payload += ",\"error\":{\"message\":\"";
-    payload += message;
+    payload += safe_message;
     payload += "\"}}";
     McpServer::SendmcpMessage(payload);
     //wsock_write(&g_xz_ws.clnt, payload, strlen(payload), OPCODE_TEXT)
@@ -430,21 +580,43 @@ void McpServer::DoToolCall(int id, const std::string& tool_name, const cJSON* to
             bool found = false;
             if (cJSON_IsObject(tool_arguments)) {
                 auto value = cJSON_GetObjectItem(tool_arguments, argument.name().c_str());
-                if (argument.type() == kPropertyTypeBoolean && cJSON_IsBool(value)) {
-                    argument.set_value<bool>(value->valueint == 1);
-                    found = true;
-                } else if (argument.type() == kPropertyTypeInteger && cJSON_IsNumber(value)) {
-                    int value_int = value->valueint;
-                    rt_kprintf("value_int: %d\n", value_int);
-                    if (argument.has_range()) {
-                    value_int = std::clamp(value_int, argument.min_value(), argument.max_value());
-                }
-
-                    argument.set_value<int>(value_int);
-                    found = true;
-                } else if (argument.type() == kPropertyTypeString && cJSON_IsString(value)) {
-                    argument.set_value<std::string>(value->valuestring);
-                    found = true;
+                if (value != nullptr) {
+                    if (argument.type() == kPropertyTypeBoolean) {
+                        if (!cJSON_IsBool(value)) {
+                            argument.SetError("Invalid argument type: " + argument.name());
+                            ReplyResult(id, (*tool_iter)->Call(arguments));
+                            return;
+                        }
+                        if (!argument.TrySetValue<bool>(value->valueint == 1)) {
+                            ReplyResult(id, (*tool_iter)->Call(arguments));
+                            return;
+                        }
+                        found = true;
+                    } else if (argument.type() == kPropertyTypeInteger) {
+                        if (!cJSON_IsNumber(value)) {
+                            argument.SetError("Invalid argument type: " + argument.name());
+                            ReplyResult(id, (*tool_iter)->Call(arguments));
+                            return;
+                        }
+                        int value_int = value->valueint;
+                        rt_kprintf("value_int: %d\n", value_int);
+                        if (!argument.TrySetValue<int>(value_int)) {
+                            ReplyResult(id, (*tool_iter)->Call(arguments));
+                            return;
+                        }
+                        found = true;
+                    } else if (argument.type() == kPropertyTypeString) {
+                        if (!cJSON_IsString(value)) {
+                            argument.SetError("Invalid argument type: " + argument.name());
+                            ReplyResult(id, (*tool_iter)->Call(arguments));
+                            return;
+                        }
+                        if (!argument.TrySetValue<std::string>(value->valuestring)) {
+                            ReplyResult(id, (*tool_iter)->Call(arguments));
+                            return;
+                        }
+                        found = true;
+                    }
                 }
             }
 

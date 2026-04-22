@@ -30,6 +30,10 @@
 
 #define RECORD_DATA_MAX_SIZE    (ET_ASR_RECORD_BUF_SIZE * 2)
 
+#define KWS_RECORD_FRAME_SIZE   320
+#define KWS_RECORD_CALLBACK_LOG_ENABLE 0
+#define KWS_RECORD_CALLBACK_LOG_INTERVAL 128
+
 #define KWS_QUEUE_NUM       3
 
 #define KWS_EVT_START       (1 << 0)
@@ -75,6 +79,9 @@ typedef struct
     uint16_t        record_offset;
     rt_slist_t      recording;
     rt_slist_t      recorded;
+    uint32_t        abnormal_frame_count;
+    uint32_t        dropped_frame_count;
+    uint32_t        dropped_byte_count;
     uint8_t         is_inited;
     uint8_t         is_exit;
 } kws_data_t;
@@ -133,6 +140,66 @@ void et_asr_up_wordend(int ret, u16_et voice_cnt)
     //audio_ioctl(instance.client, AUDIO_IOCTL_ENABLE_CPU_LOW_SPEED, (void *)1);  //进入低速模式
 }
 
+static void kws_record_callback_log_limited(kws_data_t *thiz, const char *reason, uint32_t data_len, uint32_t dropped_bytes)
+{
+#if KWS_RECORD_CALLBACK_LOG_ENABLE
+    if ((thiz->abnormal_frame_count % KWS_RECORD_CALLBACK_LOG_INTERVAL) == 1)
+    {
+        LOG_I("kws record %s,len:%d,drop:%d,abnormal:%d,drop_frame:%d,drop_byte:%d\n",
+              reason,
+              data_len,
+              dropped_bytes,
+              thiz->abnormal_frame_count,
+              thiz->dropped_frame_count,
+              thiz->dropped_byte_count);
+    }
+#else
+    (void)thiz;
+    (void)reason;
+    (void)data_len;
+    (void)dropped_bytes;
+#endif
+}
+
+static void kws_record_note_abnormal(kws_data_t *thiz, const char *reason, uint32_t data_len, uint32_t dropped_bytes)
+{
+    thiz->abnormal_frame_count++;
+    thiz->dropped_byte_count += dropped_bytes;
+    kws_record_callback_log_limited(thiz, reason, data_len, dropped_bytes);
+}
+
+static void kws_record_enqueue_frame(kws_data_t *thiz, const uint8_t *data)
+{
+    rt_slist_t *idle;
+    rt_enter_critical();
+    idle = rt_slist_first(&thiz->recording);
+    rt_exit_critical();
+    if (!idle)
+    {
+        thiz->dropped_frame_count++;
+        return;
+    }
+
+    if (thiz->record_offset + KWS_RECORD_FRAME_SIZE > RECORD_DATA_MAX_SIZE)
+    {
+        thiz->record_offset = 0;
+        thiz->dropped_frame_count++;
+        return;
+    }
+
+    kws_queue_t *queue = rt_container_of(idle, kws_queue_t, node);
+    memcpy(queue->data + thiz->record_offset, data, KWS_RECORD_FRAME_SIZE);
+    thiz->record_offset += KWS_RECORD_FRAME_SIZE;
+    if (thiz->record_offset >= RECORD_DATA_MAX_SIZE)
+    {
+        thiz->record_offset = 0;
+        rt_enter_critical();
+        rt_slist_remove(&thiz->recording, idle);
+        rt_slist_append(&thiz->recorded, idle);
+        rt_exit_critical();
+        rt_event_send(thiz->event, KWS_EVT_DECODE);
+    }
+}
 
 static int app_audio_record_callback(audio_server_callback_cmt_t cmd, void *callback_userdata, uint32_t reserved)
 {
@@ -144,29 +211,26 @@ static int app_audio_record_callback(audio_server_callback_cmt_t cmd, void *call
     {
         audio_server_coming_data_t *p = (audio_server_coming_data_t *)reserved;
 
-        RT_ASSERT(p->data_len == 320);
-
-        rt_slist_t *idle;
-        rt_enter_critical();
-        idle = rt_slist_first(&thiz->recording);
-        rt_exit_critical();
-        if (!idle)
+        if (!p || !p->data || p->data_len == 0)
         {
-            //LOG_I("drop mic data\n");
+            kws_record_note_abnormal(thiz, "empty", p ? p->data_len : 0, p ? p->data_len : 0);
             return 0;
         }
-        kws_queue_t *queue = rt_container_of(idle, kws_queue_t, node);
-        RT_ASSERT(thiz->record_offset + p->data_len <= RECORD_DATA_MAX_SIZE);
-        memcpy(queue->data + thiz->record_offset, p->data, p->data_len);
-        thiz->record_offset += p->data_len;
-        if (thiz->record_offset >= RECORD_DATA_MAX_SIZE)
+
+        if (p->data_len == KWS_RECORD_FRAME_SIZE)
         {
-            thiz->record_offset = 0;
-            rt_enter_critical();
-            rt_slist_remove(&thiz->recording, idle);
-            rt_slist_append(&thiz->recorded, idle);
-            rt_exit_critical();
-             rt_event_send(thiz->event, KWS_EVT_DECODE);
+            kws_record_enqueue_frame(thiz, (const uint8_t *)p->data);
+            return 0;
+        }
+
+        uint32_t full_frame_bytes = (p->data_len / KWS_RECORD_FRAME_SIZE) * KWS_RECORD_FRAME_SIZE;
+        uint32_t dropped_bytes = p->data_len - full_frame_bytes;
+
+        kws_record_note_abnormal(thiz, "len", p->data_len, dropped_bytes);
+
+        for (uint32_t offset = 0; offset < full_frame_bytes; offset += KWS_RECORD_FRAME_SIZE)
+        {
+            kws_record_enqueue_frame(thiz, (const uint8_t *)p->data + offset);
         }
     }
     return 0;
@@ -289,6 +353,9 @@ void kws_start(kws_data_t *thiz)
     }
     thiz->is_inited = 1;
     thiz->is_exit = 0;
+    thiz->abnormal_frame_count = 0;
+    thiz->dropped_frame_count = 0;
+    thiz->dropped_byte_count = 0;
     g_kws_running = 1;
     
     et_bsp_ctrl_main_init();
@@ -363,4 +430,3 @@ void kws_demo()
     LOG_I("kws_demo\n");
     kws_start(&instance);
 }
-

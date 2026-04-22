@@ -20,6 +20,20 @@
 #include <string.h>
 #include <ctype.h>
 
+#include <stdint.h>
+
+void *network_mem_malloc(uint32_t size);
+void *network_mem_calloc(uint32_t count, uint32_t size);
+void *network_mem_realloc(void *ptr, uint32_t newsize);
+void network_mem_free(void *ptr);
+char *network_mem_strdup(const char *str);
+
+#define web_malloc(size)            network_mem_malloc((uint32_t)(size))
+#define web_calloc(count, size)     network_mem_calloc((uint32_t)(count), (uint32_t)(size))
+#define web_realloc(ptr, size)      network_mem_realloc((ptr), (uint32_t)(size))
+#define web_free(ptr)               network_mem_free((ptr))
+#define web_strdup(str)             network_mem_strdup((str))
+
 #include <webclient.h>
 
 #include <sys/errno.h>
@@ -47,10 +61,92 @@
 #define DBG_COLOR
 #include <rtdbg.h>
 
+RT_WEAK void *network_mem_malloc(uint32_t size)
+{
+    return rt_malloc(size);
+}
+
+RT_WEAK void *network_mem_calloc(uint32_t count, uint32_t size)
+{
+    return rt_calloc(count, size);
+}
+
+RT_WEAK void *network_mem_realloc(void *ptr, uint32_t newsize)
+{
+    return rt_realloc(ptr, newsize);
+}
+
+RT_WEAK void network_mem_free(void *ptr)
+{
+    rt_free(ptr);
+}
+
+RT_WEAK char *network_mem_strdup(const char *str)
+{
+    return rt_strdup(str);
+}
+
 /* default receive or send timeout */
 #define WEBCLIENT_DEFAULT_TIMEO        6
+#define WEBCLIENT_DEFAULT_TIMEOUT_MS   (WEBCLIENT_DEFAULT_TIMEO * 1000)
 
 extern long int strtol(const char *nptr, char **endptr, int base);
+
+static int webclient_apply_timeout(struct webclient_session *session, int socket_handle)
+{
+    struct timeval timeout;
+    int millisecond;
+
+    RT_ASSERT(session);
+
+    if (socket_handle < 0)
+    {
+        return -WEBCLIENT_NOSOCKET;
+    }
+
+    millisecond = session->timeout_is_set ? session->timeout_ms : WEBCLIENT_DEFAULT_TIMEOUT_MS;
+    if (millisecond < 0)
+    {
+        millisecond = 0;
+    }
+
+    timeout.tv_sec = millisecond / 1000;
+    timeout.tv_usec = (millisecond % 1000) * 1000;
+
+    setsockopt(socket_handle, SOL_SOCKET, SO_RCVTIMEO,
+               (void *) &timeout, sizeof(timeout));
+    setsockopt(socket_handle, SOL_SOCKET, SO_SNDTIMEO,
+               (void *) &timeout, sizeof(timeout));
+
+    return 0;
+}
+
+static int webclient_timeout_ms(struct webclient_session *session)
+{
+    int millisecond;
+
+    RT_ASSERT(session);
+
+    millisecond = session->timeout_is_set ? session->timeout_ms : WEBCLIENT_DEFAULT_TIMEOUT_MS;
+    if (millisecond < 0)
+    {
+        millisecond = 0;
+    }
+
+    return millisecond;
+}
+
+static rt_bool_t webclient_timeout_expired(rt_tick_t start_tick, int timeout_ms)
+{
+    if (timeout_ms <= 0)
+    {
+        return RT_TRUE;
+    }
+
+    return ((rt_tick_t)(rt_tick_get() - start_tick) >= rt_tick_from_millisecond(timeout_ms))
+               ? RT_TRUE
+               : RT_FALSE;
+}
 
 static int webclient_strncasecmp(const char *a, const char *b, size_t n)
 {
@@ -111,19 +207,37 @@ static int webclient_recv(struct webclient_session* session, void *buffer, size_
 static int webclient_read_line(struct webclient_session *session, char *buffer, int size)
 {
     int rc, count = 0;
+    int timeout_ms;
+    rt_tick_t start_tick;
     char ch = 0, last_ch = 0;
 
     RT_ASSERT(session);
     RT_ASSERT(buffer);
 
+    timeout_ms = webclient_timeout_ms(session);
+    start_tick = rt_tick_get();
+
     /* Keep reading until we fill the buffer. */
     while (count < size)
     {
+        if (webclient_timeout_expired(start_tick, timeout_ms))
+        {
+            LOG_E("read line timeout after %dms", timeout_ms);
+            return -WEBCLIENT_TIMEOUT;
+        }
+
         rc = webclient_recv(session, (unsigned char *) &ch, 1, 0);
 #if defined(WEBCLIENT_USING_MBED_TLS) || defined(WEBCLIENT_USING_SAL_TLS)
         if (session->is_tls && (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE))
         {
             continue;
+        }
+#endif
+#if defined(WEBCLIENT_USING_MBED_TLS) || defined(WEBCLIENT_USING_SAL_TLS)
+        if (rc == MBEDTLS_ERR_SSL_TIMEOUT || (rc <= 0 && (errno == EWOULDBLOCK || errno == EAGAIN)))
+        {
+            LOG_E("read line timeout after %dms", timeout_ms);
+            return -WEBCLIENT_TIMEOUT;
         }
 #endif
         if (rc <= 0)
@@ -145,6 +259,8 @@ static int webclient_read_line(struct webclient_session *session, char *buffer, 
 
     return count;
 }
+
+static int webclient_clean(struct webclient_session *session);
 
 /**
  * resolve server address
@@ -331,6 +447,7 @@ __exit:
 }
 
 #ifdef WEBCLIENT_USING_MBED_TLS
+static int webclient_clean(struct webclient_session *session);
 /**
  * create and initialize https session.
  *
@@ -347,23 +464,27 @@ static int webclient_open_tls(struct webclient_session *session, const char *URI
 
     RT_ASSERT(session);
 
-    session->tls_session = (MbedTLSSession *) web_calloc(1, sizeof(MbedTLSSession));
+    session->tls_session = (MbedTLSSession *)hiveton_tls_calloc(1, sizeof(MbedTLSSession));
     if (session->tls_session == RT_NULL)
     {
         return -WEBCLIENT_NOMEM;
     }
 
     session->tls_session->buffer_len = WEBCLIENT_RESPONSE_BUFSZ;
-    session->tls_session->buffer = web_malloc(session->tls_session->buffer_len);
+    session->tls_session->buffer = hiveton_tls_malloc(session->tls_session->buffer_len);
     if(session->tls_session->buffer == RT_NULL)
     {
         LOG_E("no memory for tls_session buffer!");
+        hiveton_tls_free(session->tls_session);
+        session->tls_session = RT_NULL;
         return -WEBCLIENT_ERROR;
     }
 
     if((tls_ret = mbedtls_client_init(session->tls_session, (void *)pers, strlen(pers))) < 0)
     {
         LOG_E("initialize https client failed return: -0x%x.", -tls_ret);
+        mbedtls_client_close(session->tls_session);
+        session->tls_session = RT_NULL;
         return -WEBCLIENT_ERROR;
     }
 
@@ -384,15 +505,11 @@ static int webclient_connect(struct webclient_session *session, const char *URI)
 {
     int rc = WEBCLIENT_OK;
     int socket_handle;
-    struct timeval timeout;
     struct addrinfo *res = RT_NULL;
     const char *req_url;
 
     RT_ASSERT(session);
     RT_ASSERT(URI);
-
-    timeout.tv_sec = WEBCLIENT_DEFAULT_TIMEO;
-    timeout.tv_usec = 0;
 
     if (strncmp(URI, "https://", 8) == 0)
     {
@@ -431,6 +548,12 @@ static int webclient_connect(struct webclient_session *session, const char *URI)
     if (req_url)
     {
         session->req_url = web_strdup(req_url);
+        if (session->req_url == RT_NULL)
+        {
+            LOG_E("connect failed, no memory for request url.");
+            rc = -WEBCLIENT_NOMEM;
+            goto __exit;
+        }
     }
     else
     {
@@ -447,22 +570,28 @@ static int webclient_connect(struct webclient_session *session, const char *URI)
         if ((tls_ret = mbedtls_client_context(session->tls_session)) < 0)
         {
             LOG_E("connect failed, https client context return: -0x%x", -tls_ret);
-            return -WEBCLIENT_ERROR;
+            rc = -WEBCLIENT_ERROR;
+            goto __exit;
         }
 
         if ((tls_ret = mbedtls_client_connect(session->tls_session)) < 0)
         {
-            LOG_E("connect failed, https client connect return: -0x%x", -tls_ret);
-            return -WEBCLIENT_CONNECT_FAILED;
+            if (tls_ret == MBEDTLS_ERR_SSL_TIMEOUT)
+            {
+                LOG_E("connect failed, https client connect timeout after %dms", WEBCLIENT_DEFAULT_TIMEOUT_MS);
+                rc = -WEBCLIENT_TIMEOUT;
+            }
+            else
+            {
+                LOG_E("connect failed, https client connect return: -0x%x", -tls_ret);
+                rc = -WEBCLIENT_CONNECT_FAILED;
+            }
+            goto __exit;
         }
 
         socket_handle = session->tls_session->server_fd.fd;
 
-        /* set recv timeout option */
-        setsockopt(socket_handle, SOL_SOCKET, SO_RCVTIMEO, (void*) &timeout,
-                sizeof(timeout));
-        setsockopt(socket_handle, SOL_SOCKET, SO_SNDTIMEO, (void*) &timeout,
-                sizeof(timeout));
+        webclient_apply_timeout(session, socket_handle);
 
         session->socket = socket_handle;
 
@@ -492,10 +621,7 @@ static int webclient_connect(struct webclient_session *session, const char *URI)
         }
 
         /* set receive and send timeout option */
-        setsockopt(socket_handle, SOL_SOCKET, SO_RCVTIMEO, (void *) &timeout,
-                   sizeof(timeout));
-        setsockopt(socket_handle, SOL_SOCKET, SO_SNDTIMEO, (void *) &timeout,
-                   sizeof(timeout));
+        webclient_apply_timeout(session, socket_handle);
 
         if (connect(socket_handle, res->ai_addr, res->ai_addrlen) != 0)
         {
@@ -513,6 +639,11 @@ __exit:
     if (res)
     {
         freeaddrinfo(res);
+    }
+
+    if (rc != WEBCLIENT_OK)
+    {
+        webclient_clean(session);
     }
 
     return rc;
@@ -1227,13 +1358,11 @@ int webclient_post(struct webclient_session *session, const char *URI, const voi
 
     if (post_data && (data_len > 0))
     {
-        rt_kprintf("Post data len:%d", data_len);
-        rt_kputs(post_data);
         webclient_write(session, post_data, data_len);
 
         /* resolve response data, get http status code */
         resp_status = webclient_handle_response(session);
-        LOG_D("post handle response(%d).", resp_status);
+        LOG_D("POST url:%s body_len:%d status:%d.", URI, (int)data_len, resp_status);
     }
 
     return resp_status;
@@ -1250,19 +1379,15 @@ int webclient_post(struct webclient_session *session, const char *URI, const voi
  */
 int webclient_set_timeout(struct webclient_session *session, int millisecond)
 {
-    struct timeval timeout;
-    int second = rt_tick_from_millisecond(millisecond) / 1000;
-
     RT_ASSERT(session);
 
-    timeout.tv_sec = second;
-    timeout.tv_usec = 0;
+    session->timeout_ms = millisecond;
+    session->timeout_is_set = RT_TRUE;
 
-    /* set recv timeout option */
-    setsockopt(session->socket, SOL_SOCKET, SO_RCVTIMEO,
-               (void *) &timeout, sizeof(timeout));
-    setsockopt(session->socket, SOL_SOCKET, SO_SNDTIMEO,
-               (void *) &timeout, sizeof(timeout));
+    if (session->socket >= 0)
+    {
+        webclient_apply_timeout(session, session->socket);
+    }
 
     return 0;
 }
@@ -1357,6 +1482,13 @@ int webclient_read(struct webclient_session *session, void *buffer, size_t lengt
         bytes_read = webclient_recv(session, buffer, length, 0);
         if (bytes_read <= 0)
         {
+#if defined(WEBCLIENT_USING_SAL_TLS) || defined(WEBCLIENT_USING_MBED_TLS)
+            if (session->is_tls && bytes_read == MBEDTLS_ERR_SSL_TIMEOUT)
+            {
+                LOG_E("receive data timeout.");
+                return -WEBCLIENT_TIMEOUT;
+            }
+#endif
             if (errno == EWOULDBLOCK || errno == EAGAIN)
             {
                 /* recv timeout */
@@ -1407,6 +1539,11 @@ int webclient_read(struct webclient_session *session, void *buffer, size_t lengt
                 (bytes_read == MBEDTLS_ERR_SSL_WANT_READ || bytes_read == MBEDTLS_ERR_SSL_WANT_WRITE))
             {
                 continue;
+            }
+            if (session->is_tls && bytes_read == MBEDTLS_ERR_SSL_TIMEOUT)
+            {
+                LOG_E("receive data timeout.");
+                return -WEBCLIENT_TIMEOUT;
             }
 
 #endif
@@ -1487,6 +1624,15 @@ int webclient_write(struct webclient_session *session, const void *buffer, size_
             {
                 continue;
             }
+            if (session->is_tls && bytes_write == MBEDTLS_ERR_SSL_TIMEOUT)
+            {
+                if (total_write == 0)
+                {
+                    LOG_E("send data timeout.");
+                    return -WEBCLIENT_TIMEOUT;
+                }
+                break;
+            }
 #endif
             if (errno == EWOULDBLOCK || errno == EAGAIN)
             {
@@ -1527,6 +1673,8 @@ static int webclient_clean(struct webclient_session *session)
     if (session->tls_session)
     {
         mbedtls_client_close(session->tls_session);
+        session->tls_session = RT_NULL;
+        session->socket = -1;
     }
     else
     {
@@ -1904,4 +2052,3 @@ int webclient_send_usermethod(struct webclient_session *session, const char *uri
 
     return resp_status;
 }
-

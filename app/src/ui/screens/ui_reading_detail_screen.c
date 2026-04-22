@@ -57,6 +57,16 @@
 #define UI_READING_DETAIL_TEXT_STREAM_WINDOW_BYTES (128 * 1024U)
 #define UI_READING_DETAIL_NAV_LOCK_MS 520U
 
+#ifndef UI_EPD_REFRESH_LOG_ENABLED
+#define UI_EPD_REFRESH_LOG_ENABLED 0
+#endif
+
+#if UI_EPD_REFRESH_LOG_ENABLED
+#define UI_EPD_REFRESH_LOG(...) rt_kprintf(__VA_ARGS__)
+#else
+#define UI_EPD_REFRESH_LOG(...) do { } while (0)
+#endif
+
 typedef struct
 {
     lv_obj_t *reading_box;
@@ -404,6 +414,7 @@ static void ui_reading_detail_release_current_image(void);
 static bool ui_reading_detail_page_has_image(const ui_reading_detail_page_entry_t *page);
 static void ui_reading_detail_prepare_page_transition_refresh(uint16_t target_page);
 static void ui_reading_detail_queue_full_refresh_on_input(const char *source);
+static bool ui_reading_detail_consume_image_transition_refresh(const char *reason);
 static bool ui_reading_detail_probe_image_layout(uint16_t image_index,
                                                  uint16_t *scaled_height_out,
                                                  bool *cropped_out);
@@ -425,9 +436,22 @@ static const lv_font_t *ui_reading_detail_get_text_font(void)
     return ui_font_get_actual(ui_reading_detail_get_actual_font_size());
 }
 
+static void ui_reading_detail_release_text_bitmap_buffer(void)
+{
+    if (s_reading_detail_bitmap_buffer != NULL)
+    {
+        audio_mem_free(s_reading_detail_bitmap_buffer);
+        s_reading_detail_bitmap_buffer = NULL;
+    }
+
+    memset(&s_reading_detail_bitmap_dsc, 0, sizeof(s_reading_detail_bitmap_dsc));
+    s_reading_detail_bitmap_inited = false;
+    s_reading_detail_first_page_bitmap_ready = false;
+}
+
 static void ui_reading_detail_release_current_image(void)
 {
-    if (s_reading_detail_refs.content_image != NULL)
+    if (ui_Reading_Detail != NULL && s_reading_detail_refs.content_image != NULL)
     {
         lv_image_set_scale(s_reading_detail_refs.content_image, LV_SCALE_NONE);
         lv_image_set_pivot(s_reading_detail_refs.content_image, 0, 0);
@@ -438,6 +462,7 @@ static void ui_reading_detail_release_current_image(void)
     }
 
     reading_epub_release_image(&s_reading_detail_current_image_dsc);
+    memset(&s_reading_detail_current_image_dsc, 0, sizeof(s_reading_detail_current_image_dsc));
 }
 
 static bool ui_reading_detail_page_has_image(const ui_reading_detail_page_entry_t *page)
@@ -470,9 +495,9 @@ static void ui_reading_detail_prepare_page_transition_refresh(uint16_t target_pa
             ui_reading_detail_page_has_image(&s_reading_detail_pages[target_page])))
     {
         s_reading_detail_image_transition_refresh_pending = true;
-        rt_kprintf("reading_detail: image full refresh queued current=%u target=%u\n",
-                   (unsigned int)(s_reading_detail_current_page + 1U),
-                   (unsigned int)(target_page + 1U));
+        UI_EPD_REFRESH_LOG("reading_detail: image full refresh queued current=%u target=%u\n",
+                           (unsigned int)(s_reading_detail_current_page + 1U),
+                           (unsigned int)(target_page + 1U));
     }
 }
 
@@ -496,10 +521,59 @@ static void ui_reading_detail_queue_full_refresh_on_input(const char *source)
     if (!s_reading_detail_image_transition_refresh_pending)
     {
         s_reading_detail_image_transition_refresh_pending = true;
-        rt_kprintf("reading_detail: image full refresh queued by input source=%s page=%u\n",
-                   source != NULL ? source : "?",
-                   (unsigned int)(s_reading_detail_current_page + 1U));
+        UI_EPD_REFRESH_LOG("reading_detail: image full refresh queued by input source=%s page=%u\n",
+                           source != NULL ? source : "?",
+                           (unsigned int)(s_reading_detail_current_page + 1U));
     }
+}
+
+static bool ui_reading_detail_consume_image_transition_refresh(const char *reason)
+{
+    if (!s_reading_detail_image_transition_refresh_pending)
+    {
+        return false;
+    }
+
+    UI_EPD_REFRESH_LOG("reading_detail: image full refresh consume reason=%s page=%u\n",
+                       reason != NULL ? reason : "?",
+                       (unsigned int)(s_reading_detail_current_page + 1U));
+    lcd_request_epd_force_full_refresh_once();
+    s_reading_detail_image_transition_refresh_pending = false;
+    return true;
+}
+
+void ui_reading_detail_request_leave_refresh(void)
+{
+    bool has_last_page = false;
+    bool current_page_has_image = false;
+    uint16_t page_count;
+
+    if (ui_Reading_Detail == NULL)
+    {
+        return;
+    }
+
+    page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
+    (void)has_last_page;
+    if (page_count > 0U && s_reading_detail_current_page < page_count)
+    {
+        current_page_has_image = ui_reading_detail_page_has_image(
+            &s_reading_detail_pages[s_reading_detail_current_page]);
+    }
+
+    if (ui_reading_detail_consume_image_transition_refresh("leave"))
+    {
+        return;
+    }
+
+    if (!current_page_has_image)
+    {
+        return;
+    }
+
+    UI_EPD_REFRESH_LOG("reading_detail: image full refresh request on leave page=%u\n",
+                       (unsigned int)(s_reading_detail_current_page + 1U));
+    lcd_request_epd_force_full_refresh_once();
 }
 
 static uint32_t ui_reading_detail_compute_image_zoom(uint16_t src_width)
@@ -1059,6 +1133,7 @@ static void ui_reading_detail_reset_pages(void)
     rt_hw_interrupt_enable(level);
 
     ui_reading_detail_release_current_image();
+    ui_reading_detail_release_text_bitmap_buffer();
     s_reading_detail_current_page = 0U;
     s_reading_detail_image_transition_refresh_pending = false;
     ui_reading_detail_clear_navigation_lock();
@@ -1079,6 +1154,8 @@ static void ui_reading_detail_reset_epub_lazy_state(void)
 
 static void ui_reading_detail_show_loading_state(void)
 {
+    ui_reading_detail_release_current_image();
+
     rt_snprintf(s_reading_detail_page_buffer,
                 sizeof(s_reading_detail_page_buffer),
                 "%s",
@@ -1997,6 +2074,8 @@ static void ui_reading_detail_rebuild_layout(void)
         return;
     }
 
+    ui_reading_detail_release_current_image();
+    ui_reading_detail_release_text_bitmap_buffer();
     s_reading_detail_stb_ready = false;
     s_reading_detail_width_cache_size = 0U;
     s_reading_detail_first_page_layout_ready = false;
@@ -2367,6 +2446,7 @@ static void ui_reading_detail_set_button_enabled(lv_obj_t *button, bool enabled)
 static bool ui_reading_detail_render_page(void)
 {
     bool render_ok = false;
+    bool pending_refresh_consumed = false;
     bool has_last_page = false;
     uint16_t page_count;
     uint32_t render_start_ms;
@@ -2410,24 +2490,24 @@ static bool ui_reading_detail_render_page(void)
         decode_image_height = ui_px_h(UI_READING_DETAIL_READING_BOX_HEIGHT);
     }
     lcd_set_epd_mono_dither_enabled(RT_FALSE);
+    pending_refresh_consumed = ui_reading_detail_consume_image_transition_refresh("render");
 
     if (page->type == UI_READING_DETAIL_PAGE_IMAGE ||
         page->type == UI_READING_DETAIL_PAGE_IMAGE_TEXT)
     {
         uint16_t text_top = 0U;
 
-        if (ui_image_page_enter_requires_full(!s_reading_detail_first_render_done,
-                                              s_reading_detail_image_transition_refresh_pending))
+        if (!pending_refresh_consumed &&
+            ui_image_page_enter_requires_full(!s_reading_detail_first_render_done, false))
         {
-            rt_kprintf("reading_detail: image full refresh consume first=%d pending=%d page=%u\n",
-                       s_reading_detail_first_render_done ? 0 : 1,
-                       s_reading_detail_image_transition_refresh_pending ? 1 : 0,
-                       (unsigned int)(s_reading_detail_current_page + 1U));
+            UI_EPD_REFRESH_LOG("reading_detail: image full refresh consume first=%d pending=0 page=%u\n",
+                               s_reading_detail_first_render_done ? 0 : 1,
+                               (unsigned int)(s_reading_detail_current_page + 1U));
             lcd_request_epd_force_full_refresh_once();
         }
-        s_reading_detail_image_transition_refresh_pending = false;
 
         ui_reading_detail_release_current_image();
+        ui_reading_detail_release_text_bitmap_buffer();
         if (!reading_epub_decode_image(s_reading_detail_request_path,
                                        s_reading_detail_epub_images[page->image_index].internal_path,
                                        (uint16_t)image_max_width,
@@ -2461,11 +2541,11 @@ static bool ui_reading_detail_render_page(void)
             lv_obj_set_pos(s_reading_detail_refs.content_image,
                            0,
                            0);
-            rt_kprintf("reading_detail: image render decoded=%dx%d target_h=%d page_type=%d\n",
-                       (int)s_reading_detail_current_image_dsc.header.w,
-                       (int)s_reading_detail_current_image_dsc.header.h,
-                       (int)target_image_height,
-                       (int)page->type);
+            UI_EPD_REFRESH_LOG("reading_detail: image render decoded=%dx%d target_h=%d page_type=%d\n",
+                               (int)s_reading_detail_current_image_dsc.header.w,
+                               (int)s_reading_detail_current_image_dsc.header.h,
+                               (int)target_image_height,
+                               (int)page->type);
             lv_obj_clear_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
 
             if (page->type == UI_READING_DETAIL_PAGE_IMAGE_TEXT)
@@ -2501,7 +2581,6 @@ static bool ui_reading_detail_render_page(void)
     }
     else
     {
-        s_reading_detail_image_transition_refresh_pending = false;
         ui_reading_detail_release_current_image();
         lv_obj_set_pos(s_reading_detail_refs.content_label,
                        ui_reading_detail_get_text_offset_x(),
@@ -2535,11 +2614,11 @@ static bool ui_reading_detail_render_page(void)
     }
     ui_reading_detail_refresh_page_label();
     ui_reading_detail_refresh_nav_buttons();
-    rt_kprintf("reading_detail: render page=%u ready_pages=%u kind=%u render_ms=%lu\n",
-               (unsigned int)(s_reading_detail_current_page + 1U),
-               (unsigned int)page_count,
-               (unsigned int)page->type,
-               (unsigned long)(ui_reading_detail_now_ms() - render_start_ms));
+    UI_EPD_REFRESH_LOG("reading_detail: render page=%u ready_pages=%u kind=%u render_ms=%lu\n",
+                       (unsigned int)(s_reading_detail_current_page + 1U),
+                       (unsigned int)page_count,
+                       (unsigned int)page->type,
+                       (unsigned long)(ui_reading_detail_now_ms() - render_start_ms));
     render_ok = true;
 
 done:
@@ -2603,12 +2682,12 @@ static void ui_reading_detail_prev_page(void)
 
     ui_reading_detail_arm_navigation_lock(UI_READING_DETAIL_NAV_LOCK_MS);
     app_watchdog_pet();
-    ui_reading_detail_release_current_image();
 
     if (s_reading_detail_current_page == 0U)
     {
         if (s_reading_detail_epub_lazy_mode && s_reading_detail_epub_current_chapter > 0U)
         {
+            ui_reading_detail_release_current_image();
             if (ui_reading_detail_load_epub_chapter((uint16_t)(s_reading_detail_epub_current_chapter - 1U)))
             {
                 page_count = ui_reading_detail_snapshot_page_count(NULL);
@@ -2628,6 +2707,7 @@ static void ui_reading_detail_prev_page(void)
     }
 
     ui_reading_detail_prepare_page_transition_refresh((uint16_t)(s_reading_detail_current_page - 1U));
+    ui_reading_detail_release_current_image();
     --s_reading_detail_current_page;
     (void)ui_reading_detail_render_page();
 }
@@ -2651,12 +2731,12 @@ static void ui_reading_detail_next_page(void)
 
     ui_reading_detail_arm_navigation_lock(UI_READING_DETAIL_NAV_LOCK_MS);
     app_watchdog_pet();
-    ui_reading_detail_release_current_image();
 
     page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
     if ((uint16_t)(s_reading_detail_current_page + 1U) < page_count)
     {
         ui_reading_detail_prepare_page_transition_refresh((uint16_t)(s_reading_detail_current_page + 1U));
+        ui_reading_detail_release_current_image();
         ++s_reading_detail_current_page;
         (void)ui_reading_detail_render_page();
         return;
@@ -2665,6 +2745,7 @@ static void ui_reading_detail_next_page(void)
     if (s_reading_detail_epub_lazy_mode &&
         (uint16_t)(s_reading_detail_epub_current_chapter + 1U) < s_reading_detail_epub_spine_count)
     {
+        ui_reading_detail_release_current_image();
         if (ui_reading_detail_load_epub_chapter((uint16_t)(s_reading_detail_epub_current_chapter + 1U)))
         {
             s_reading_detail_current_page = 0U;
@@ -2680,6 +2761,8 @@ static void ui_reading_detail_next_page(void)
 
     if (has_last_page)
     {
+        ui_reading_detail_prepare_page_transition_refresh(0U);
+        ui_reading_detail_release_current_image();
         s_reading_detail_current_page = 0U;
         (void)ui_reading_detail_render_page();
     }
@@ -3133,26 +3216,27 @@ void ui_Reading_Detail_screen_destroy(void)
 
     lcd_request_epd_force_full_refresh_once();
 
+    ui_reading_detail_release_current_image();
+    ui_reading_detail_release_text_bitmap_buffer();
+
     if (ui_Reading_Detail != NULL)
     {
         lv_obj_delete(ui_Reading_Detail);
         ui_Reading_Detail = NULL;
     }
 
-    if (s_reading_detail_bitmap_buffer != NULL)
-    {
-        audio_mem_free(s_reading_detail_bitmap_buffer);
-        s_reading_detail_bitmap_buffer = NULL;
-    }
     if (s_reading_detail_external_font_data != NULL)
     {
         audio_mem_free(s_reading_detail_external_font_data);
         s_reading_detail_external_font_data = NULL;
         s_reading_detail_external_font_size = 0U;
     }
-    ui_reading_detail_release_current_image();
-    memset(&s_reading_detail_bitmap_dsc, 0, sizeof(s_reading_detail_bitmap_dsc));
-    s_reading_detail_bitmap_inited = false;
+    s_reading_detail_stb_ready = false;
+    s_reading_detail_width_cache_size = 0U;
+    s_reading_detail_stb_scale = 0.0f;
+    s_reading_detail_stb_ascent = 0;
+    s_reading_detail_stb_descent = 0;
+    s_reading_detail_stb_line_gap = 0;
 
     memset(&s_reading_detail_refs, 0, sizeof(s_reading_detail_refs));
     memset(&s_reading_detail_swipe_state, 0, sizeof(s_reading_detail_swipe_state));

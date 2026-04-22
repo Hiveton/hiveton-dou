@@ -42,6 +42,7 @@
 #include "xiaozhi_ui.h"
 #include "xiaozhi_websocket.h"
 #include "xiaozhi_audio.h"
+#include "network/network_mem.h"
 #include "log.h"
 
 #undef LOG_TAG
@@ -71,10 +72,58 @@
 
 /* Ringbuffer 缓冲区大小定义 */
 #define RB_VAD_CACHE_SIZE       (320 * VOICE_START_TIMES)
-#define RB_OPUS_ENCODE_SIZE     (XZ_MIC_FRAME_LEN * 2)
+#define RB_OPUS_ENCODE_SIZE     (XZ_MIC_FRAME_LEN * 6)
 #define XZ_SPK_WRITE_CACHE_SIZE 12000U
-#define XZ_AUDIO_PSRAM_HEAP_SIZE (768 * 1024)
+#define XZ_AUDIO_PSRAM_HEAP_SIZE (512 * 1024)
 #define XZ_AUDIO_PSRAM_THRESHOLD 1024U
+#define XZ_DOWNLINK_PACKET_HEADROOM 16U
+#define XZ_DOWNLINK_QUEUE_INITIAL_SIZE 256U
+#define XZ_DOWNLINK_QUEUE_GROW_ALIGN 512U
+#define XZ_AUDIO_WAIT_POLL_MS 10U
+#define XZ_SPK_CLOSE_DRAIN_TIMEOUT_MS 200U
+#define XZ_SPK_CLOSE_CACHE_WAIT_MAX_MS 250U
+#define XZ_SPK_CLOSE_CACHE_PAD_MS 20U
+#define XZ_AUDIO_THREAD_EVENT_WAIT_MS 100U
+#define XZ_AUDIO_THREAD_EXIT_TIMEOUT_MS 1000U
+
+#ifndef XZ_AUDIO_HOT_LOG_ENABLE
+#define XZ_AUDIO_HOT_LOG_ENABLE 0
+#endif
+
+#ifndef XZ_AUDIO_HOT_LOG_INTERVAL_MS
+#define XZ_AUDIO_HOT_LOG_INTERVAL_MS 1000U
+#endif
+
+#if XZ_AUDIO_HOT_LOG_ENABLE
+static rt_bool_t xz_audio_hot_log_allowed(void)
+{
+    static rt_tick_t last_tick = 0;
+    rt_tick_t now = rt_tick_get();
+    rt_tick_t interval = rt_tick_from_millisecond(XZ_AUDIO_HOT_LOG_INTERVAL_MS);
+
+    if (last_tick == 0 || now - last_tick >= interval)
+    {
+        last_tick = now;
+        return RT_TRUE;
+    }
+
+    return RT_FALSE;
+}
+
+#define XZ_AUDIO_HOT_LOG(...)                                                  \
+    do                                                                         \
+    {                                                                          \
+        if (xz_audio_hot_log_allowed())                                        \
+        {                                                                      \
+            LOG_I(__VA_ARGS__);                                                \
+        }                                                                      \
+    } while (0)
+#else
+#define XZ_AUDIO_HOT_LOG(...)                                                  \
+    do                                                                         \
+    {                                                                          \
+    } while (0)
+#endif
 
 /* 将 Ringbuffer 缓冲区放入 PSRAM，节省 L2 RAM (~8KB) */
 #if defined(__CC_ARM) || defined(__CLANG_ARM)
@@ -101,7 +150,7 @@ ALIGN(4) static uint8_t g_xz_audio_psram_heap_pool[XZ_AUDIO_PSRAM_HEAP_SIZE]
 #else
     #define XZ_DEVICE_STATE web_g_state
 #endif
-extern uint8_t vad_enable;
+extern uint8_t vad_is_enable(void);
 extern uint8_t Initiate_disconnection_flag;
 extern lv_obj_t *main_container;
 extern lv_obj_t *standby_screen;
@@ -113,6 +162,11 @@ static volatile rt_uint8_t g_speaker_target_on = 0;
 static struct rt_memheap g_xz_audio_psram_heap;
 static rt_bool_t g_xz_audio_psram_heap_ready = RT_FALSE;
 static rt_sem_t g_xz_mic_flush_sem = RT_NULL;
+static rt_sem_t g_xz_audio_thread_exit_sem = RT_NULL;
+static volatile uint32_t g_xz_downlink_drop_no_idle_count = 0;
+static volatile uint32_t g_xz_downlink_drop_close_count = 0;
+static volatile uint32_t g_xz_speaker_close_timeout_count = 0;
+static volatile uint32_t g_xz_audio_thread_exit_timeout_count = 0;
 
 #if defined(__CC_ARM) || defined(__CLANG_ARM)
 L2_RET_BSS_SECT_BEGIN(g_xz_opus_stack) //6000地址
@@ -212,6 +266,86 @@ void xz_audio_heap_free(void *ptr)
     rt_free(ptr);
 }
 
+static void *xz_tls_heap_malloc(rt_size_t size)
+{
+    void *ptr = RT_NULL;
+
+    if (size == 0U)
+    {
+        return RT_NULL;
+    }
+
+    if (g_xz_audio_psram_heap_ready)
+    {
+        ptr = rt_memheap_alloc(&g_xz_audio_psram_heap, size);
+        if (ptr != RT_NULL)
+        {
+            return ptr;
+        }
+    }
+
+    ptr = rt_malloc(size);
+    if (ptr == RT_NULL)
+    {
+        LOG_E("tls alloc failed size=%u", (unsigned int)size);
+    }
+
+    return ptr;
+}
+
+static void *xz_tls_heap_calloc(rt_size_t count, rt_size_t size)
+{
+    rt_size_t total;
+    void *ptr;
+
+    if (count == 0U || size == 0U)
+    {
+        return RT_NULL;
+    }
+
+    if (count > (((rt_size_t)-1) / size))
+    {
+        return RT_NULL;
+    }
+
+    total = count * size;
+    ptr = xz_tls_heap_malloc(total);
+    if (ptr != RT_NULL)
+    {
+        rt_memset(ptr, 0, total);
+    }
+
+    return ptr;
+}
+
+static void xz_tls_heap_free(void *ptr)
+{
+    xz_audio_heap_free(ptr);
+}
+
+void *hiveton_tls_malloc(size_t size)
+{
+    if (size > UINT32_MAX)
+    {
+        return RT_NULL;
+    }
+    return network_mem_malloc((uint32_t)size);
+}
+
+void *hiveton_tls_calloc(size_t count, size_t size)
+{
+    if (count > UINT32_MAX || size > UINT32_MAX)
+    {
+        return RT_NULL;
+    }
+    return network_mem_calloc((uint32_t)count, (uint32_t)size);
+}
+
+void hiveton_tls_free(void *ptr)
+{
+    network_mem_free(ptr);
+}
+
 void *opus_heap_malloc(uint32_t size)
 {
     return xz_audio_heap_malloc((rt_size_t)size);
@@ -244,10 +378,184 @@ static void xz_audio_safe_close(audio_client_t *client, const char *tag)
     audio_close(handle);
 }
 
+static void xz_audio_release_downlink_queues(xz_audio_t *thiz)
+{
+    if (thiz == RT_NULL)
+    {
+        return;
+    }
+
+    for (int i = 0; i < XZ_DOWNLINK_QUEUE_NUM; i++)
+    {
+        if (thiz->downlink_queue[i].data != RT_NULL)
+        {
+            opus_heap_free(thiz->downlink_queue[i].data);
+            thiz->downlink_queue[i].data = RT_NULL;
+        }
+        thiz->downlink_queue[i].size = 0;
+        thiz->downlink_queue[i].data_len = 0;
+    }
+}
+
+static uint32_t xz_audio_move_downlink_busy_to_idle(xz_audio_t *thiz)
+{
+    rt_slist_t *idle;
+    uint32_t count = 0;
+
+    if (thiz == RT_NULL)
+    {
+        return 0;
+    }
+
+    rt_enter_critical();
+    while (1)
+    {
+        idle = rt_slist_first(&thiz->downlink_decode_busy);
+        if (idle == RT_NULL)
+        {
+            break;
+        }
+        xz_decode_queue_t *queue = rt_container_of(idle, xz_decode_queue_t, node);
+        queue->data_len = 0;
+        rt_slist_remove(&thiz->downlink_decode_busy, idle);
+        rt_slist_append(&thiz->downlink_decode_idle, idle);
+        count++;
+    }
+    rt_exit_critical();
+
+    return count;
+}
+
+static rt_bool_t xz_audio_downlink_busy_empty(xz_audio_t *thiz)
+{
+    rt_bool_t empty;
+
+    if (thiz == RT_NULL)
+    {
+        return RT_TRUE;
+    }
+
+    rt_enter_critical();
+    empty = (rt_slist_first(&thiz->downlink_decode_busy) == RT_NULL);
+    rt_exit_critical();
+
+    return empty;
+}
+
+static rt_bool_t xz_audio_wait_downlink_drain(xz_audio_t *thiz,
+                                              uint32_t timeout_ms)
+{
+    uint32_t waited_ms = 0;
+
+    while (!xz_audio_downlink_busy_empty(thiz))
+    {
+        uint32_t delay_ms;
+
+        if (waited_ms >= timeout_ms)
+        {
+            return RT_FALSE;
+        }
+
+        if (thiz != RT_NULL && thiz->event != RT_NULL && thiz->is_tx_enable)
+        {
+            rt_event_send(thiz->event, XZ_EVENT_DOWNLINK);
+        }
+
+        delay_ms = timeout_ms - waited_ms;
+        if (delay_ms > XZ_AUDIO_WAIT_POLL_MS)
+        {
+            delay_ms = XZ_AUDIO_WAIT_POLL_MS;
+        }
+        rt_thread_mdelay(delay_ms);
+        waited_ms += delay_ms;
+    }
+
+    return RT_TRUE;
+}
+
+static void xz_audio_sem_drain(rt_sem_t sem)
+{
+    if (sem == RT_NULL)
+    {
+        return;
+    }
+
+    while (rt_sem_take(sem, 0) == RT_EOK)
+    {
+    }
+}
+
+static void xz_audio_open_cleanup(xz_audio_t *thiz)
+{
+    audio_client_t mic_handle;
+    audio_client_t speaker_handle;
+    bool shared_handle;
+
+    if (thiz == RT_NULL)
+    {
+        return;
+    }
+
+    thiz->is_rx_enable = 0;
+    thiz->is_tx_enable = 0;
+    thiz->is_exit = 1;
+    thiz->inited = 0;
+
+    if (thiz->event != RT_NULL)
+    {
+        rt_event_delete(thiz->event);
+        thiz->event = RT_NULL;
+    }
+
+    if (thiz->rb_opus_encode_input != RT_NULL)
+    {
+        rt_free(thiz->rb_opus_encode_input);
+        thiz->rb_opus_encode_input = RT_NULL;
+    }
+
+#if PKG_XIAOZHI_USING_AEC
+    if (thiz->rb_vad_cache != RT_NULL)
+    {
+        rt_free(thiz->rb_vad_cache);
+        thiz->rb_vad_cache = RT_NULL;
+    }
+    if (thiz->resample != RT_NULL)
+    {
+        sifli_resample_close(thiz->resample);
+        thiz->resample = RT_NULL;
+    }
+    if (thiz->handle != RT_NULL)
+    {
+        WebRtcVad_Free(thiz->handle);
+        thiz->handle = RT_NULL;
+    }
+#endif
+
+    xz_audio_release_downlink_queues(thiz);
+
+    mic_handle = thiz->mic;
+    speaker_handle = thiz->speaker;
+    shared_handle = (speaker_handle == mic_handle);
+    thiz->mic = RT_NULL;
+    thiz->speaker = RT_NULL;
+    xz_audio_safe_close(&mic_handle, "mic");
+    if (!shared_handle)
+    {
+        xz_audio_safe_close(&speaker_handle, "speaker");
+    }
+}
+
 void xz_audio_send(uint8_t *data, int len)
 {
     uint32_t nonce[4];
     uint8_t *p_nonce = (uint8_t *)&(nonce[0]);
+
+    if (data == RT_NULL || len <= 0 || udp_pcb == RT_NULL || g_xz_context.port == 0)
+    {
+        XZ_AUDIO_HOT_LOG("drop uplink audio len=%d pcb=%p port=%u", len, udp_pcb,
+                         g_xz_context.port);
+        return;
+    }
 
     memcpy(p_nonce, &(g_xz_context.nonce[0]), sizeof(nonce));
     *(uint16_t *)(p_nonce + 2) = htons(len);
@@ -257,7 +565,13 @@ void xz_audio_send(uint8_t *data, int len)
                  (uint32_t *)&(nonce[0]), AES_MODE_CTR);
     struct pbuf *pbuf =
         pbuf_alloc(PBUF_TRANSPORT, len + sizeof(nonce) + 32, PBUF_RAM);
-    if (pbuf && g_xz_context.port)
+    if (pbuf == RT_NULL)
+    {
+        XZ_AUDIO_HOT_LOG("drop uplink audio: pbuf alloc failed len=%d", len);
+        return;
+    }
+
+    if (g_xz_context.port)
     {
         uint8_t *payload = (uint8_t *)pbuf->payload;
         memcpy(payload, nonce, sizeof(nonce));
@@ -266,60 +580,72 @@ void xz_audio_send(uint8_t *data, int len)
         LOCK_TCPIP_CORE();
         udp_sendto(udp_pcb, pbuf, &(g_xz_context.udp_addr), g_xz_context.port);
         UNLOCK_TCPIP_CORE();
-        pbuf_free(pbuf);
     }
+    pbuf_free(pbuf);
 }
 
 void xz_udp_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
                  const ip_addr_t *addr, u16_t port)
 {
-    if (memcmp(addr, &(g_xz_context.udp_addr), sizeof(ip_addr_t)) == 0 &&
-        port == g_xz_context.port)
-    {
-        uint8_t *data = (uint8_t *)p->payload;
-        uint32_t nonce[4];
-        uint32_t size = 0;
-        uint32_t sequence = ntohl(*(uint32_t *)&data[12]);
+    uint8_t *data;
+    uint32_t nonce[4];
+    uint32_t size;
+    uint32_t sequence;
 
-        if (p->len < sizeof(nonce))
-        {
-            rt_kprintf("Invalid audio packet size: %u\n", p->len);
-            goto end;
-        }
-        if (data[0] != 0x01)
-        {
-            rt_kprintf("Invalid audio packet type: %x", data[0]);
-            goto end;
-        }
-        if (sequence < g_xz_context.remote_sequence)
-        {
-            rt_kprintf(
-                "Received audio packet with old sequence: %lu, expected: %lu\n",
-                sequence, g_xz_context.remote_sequence);
-            goto end;
-        }
-        if (sequence != g_xz_context.remote_sequence + 1)
-        {
-            rt_kprintf("Received audio packet with wrong sequence: %lu, "
-                       "expected: %lu\n",
-                       sequence, g_xz_context.remote_sequence + 1);
-            g_xz_context.remote_sequence = sequence;
-        }
-        else
-        {
-            g_xz_context.remote_sequence = sequence;
-        }
-        memcpy(&(nonce[0]), data, sizeof(nonce));
-        data += sizeof(nonce);
-        size = p->len - sizeof(nonce);
-        xz_audio_downlink(data, size, &nonce[0], 1);
-    end:
-        pbuf_free(p);
+    if (p == RT_NULL)
+    {
+        XZ_AUDIO_HOT_LOG("drop null audio pbuf");
+        return;
+    }
+
+    if (addr == RT_NULL ||
+        memcmp(addr, &(g_xz_context.udp_addr), sizeof(ip_addr_t)) != 0 ||
+        port != g_xz_context.port)
+    {
+        XZ_AUDIO_HOT_LOG("drop unexpected udp audio packet");
+        goto end;
+    }
+
+    if (p->payload == RT_NULL || p->len < sizeof(nonce))
+    {
+        XZ_AUDIO_HOT_LOG("drop short audio packet len=%u", p->len);
+        goto end;
+    }
+
+    data = (uint8_t *)p->payload;
+    memcpy(&(nonce[0]), data, sizeof(nonce));
+    sequence = ntohl(nonce[3]);
+
+    if (data[0] != 0x01)
+    {
+        XZ_AUDIO_HOT_LOG("drop invalid audio packet type=%x", data[0]);
+        goto end;
+    }
+
+    if (sequence < g_xz_context.remote_sequence)
+    {
+        XZ_AUDIO_HOT_LOG("drop old audio packet seq=%lu expected=%lu",
+                         sequence, g_xz_context.remote_sequence);
+        goto end;
+    }
+
+    if (sequence != g_xz_context.remote_sequence + 1)
+    {
+        XZ_AUDIO_HOT_LOG("audio sequence jump seq=%lu expected=%lu", sequence,
+                         g_xz_context.remote_sequence + 1);
+        g_xz_context.remote_sequence = sequence;
     }
     else
     {
-        rt_kprintf("invalid udp\n");
+        g_xz_context.remote_sequence = sequence;
     }
+
+    data += sizeof(nonce);
+    size = p->len - sizeof(nonce);
+    xz_audio_downlink(data, size, &nonce[0], 1);
+
+end:
+    pbuf_free(p);
 }
 #ifdef XIAOZHI_USING_MQT
 void simulate_button_pressed()
@@ -359,11 +685,27 @@ static int mic_callback(audio_server_callback_cmt_t cmd,
     {
         // data lengh is 320 bytes, which is 10ms for 16k samplerate
         audio_server_coming_data_t *p = (audio_server_coming_data_t *)reserved;
+        if (!thiz->inited || p == RT_NULL || p->data == RT_NULL ||
+            p->data_len == 0 || thiz->rb_opus_encode_input == RT_NULL)
+        {
+            XZ_AUDIO_HOT_LOG("drop mic frame: audio not ready");
+            return 0;
+        }
 #ifdef PKG_XIAOZHI_USING_AEC
     if (thiz->vad_enabled) 
     {
+        if (thiz->handle == RT_NULL || thiz->rb_vad_cache == RT_NULL)
+        {
+            XZ_AUDIO_HOT_LOG("drop mic frame: vad not ready");
+            return 0;
+        }
         int ret = WebRtcVad_Process(thiz->handle, 16000, (int16_t *)p->data,p->data_len / 2); //检测是否是人声 返回1是人声
-        if(vad_enable) //如果开起了不打断功能 1是不打断
+        if (ret < 0)
+        {
+            XZ_AUDIO_HOT_LOG("drop mic frame: vad ret=%d", ret);
+            return 0;
+        }
+        if(vad_is_enable()) //如果开起了不打断功能 1是不打断
         { 
             if (XZ_DEVICE_STATE != kDeviceStateIdle) 
             {
@@ -387,7 +729,7 @@ static int mic_callback(audio_server_callback_cmt_t cmd,
         }
         else if (VOICE_STATE_WAIT_SPEAKING == thiz->voice_state)
         {
-            if(vad_enable) //如果开起了不打断功能 1是不打断   
+            if(vad_is_enable()) //如果开起了不打断功能 1是不打断   
             {         
                 if (XZ_DEVICE_STATE == kDeviceStateSpeaking)
                 {
@@ -438,16 +780,17 @@ static int mic_callback(audio_server_callback_cmt_t cmd,
         {
             if (ret == 1)
             {
-                LOG_I("speaking");
+                XZ_AUDIO_HOT_LOG("vad speaking");
                 thiz->voice_stop_times = 0;
             }
             else
             {
-                LOG_I("not voice");
+                XZ_AUDIO_HOT_LOG("vad not voice");
                 if (thiz->voice_stop_times < VOICE_STOP_TIMES)
                 {
                     thiz->voice_stop_times++;
-                    LOG_I("wait no voice times=%d", thiz->voice_stop_times);
+                    XZ_AUDIO_HOT_LOG("wait no voice times=%d",
+                                     thiz->voice_stop_times);
                 }
                 if (thiz->voice_stop_times == VOICE_STOP_TIMES)
                 {
@@ -464,7 +807,12 @@ static int mic_callback(audio_server_callback_cmt_t cmd,
         }
         else
         {
-            RT_ASSERT(0);
+            XZ_AUDIO_HOT_LOG("reset invalid voice state=%d", thiz->voice_state);
+            thiz->voice_start_times = 0;
+            thiz->voice_stop_times = 0;
+            thiz->voice_state = VOICE_STATE_IDLE;
+            rt_ringbuffer_reset(thiz->rb_vad_cache);
+            return 0;
         }
     }
 #endif
@@ -587,24 +935,84 @@ void xz_audio_init()
         udp_remove(udp_pcb);
         udp_pcb = NULL;
     }
-    audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC, 6);
+    {
+        int volume = audio_server_get_private_volume(AUDIO_TYPE_LOCAL_MUSIC);
+        if (volume < 12)
+        {
+            audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC, 12);
+        }
+    }
     xz_audio_decoder_encoder_open(0);
+    if (!xz_audio.inited)
+    {
+        LOG_E("xz audio open failed");
+        return;
+    }
 
     xz_mqtt_button_init();
     udp_pcb = udp_new();
+    if (udp_pcb == RT_NULL)
+    {
+        LOG_E("udp_new failed");
+        return;
+    }
     g_xz_context.local_sequence = 0;
     g_xz_context.remote_sequence = 0;
     udp_recv(udp_pcb, xz_udp_recv, NULL);
 }
+
 #endif
+
+#ifndef XIAOZHI_USING_MQTT
+void xz_audio_init(void)
+{
+    rt_kprintf("xz_audio_init\n");
+    {
+        int volume = audio_server_get_private_volume(AUDIO_TYPE_LOCAL_MUSIC);
+        if (volume < 12)
+        {
+            audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC, 12);
+        }
+    }
+    xz_audio_decoder_encoder_open(0);
+    if (!xz_audio.inited)
+    {
+        LOG_E("xz audio open failed");
+        return;
+    }
+}
+#endif
+
+bool xz_audio_is_inited(void)
+{
+    return xz_audio.inited != 0;
+}
 static void audio_write_and_wait(xz_audio_t *thiz, uint8_t *data,
                                  uint32_t data_len)
 {
     int ret;
 #if PKG_XIAOZHI_USING_AEC
     uint32_t bytes;
+    if (thiz == RT_NULL || thiz->speaker == RT_NULL || thiz->resample == RT_NULL ||
+        data == RT_NULL || data_len == 0)
+    {
+        XZ_AUDIO_HOT_LOG("drop speaker frame: audio not ready");
+        return;
+    }
     bytes =
         sifli_resample_process(thiz->resample, (int16_t *)data, data_len, 0);
+    if (bytes == 0)
+    {
+        XZ_AUDIO_HOT_LOG("drop speaker frame: resample empty");
+        return;
+    }
+#else
+    if (thiz == RT_NULL || thiz->speaker == RT_NULL || data == RT_NULL ||
+        data_len == 0)
+    {
+        XZ_AUDIO_HOT_LOG("drop speaker frame: audio not ready");
+        return;
+    }
 #endif
     int try_times = 0;
     while (!thiz->is_exit)
@@ -624,8 +1032,8 @@ static void audio_write_and_wait(xz_audio_t *thiz, uint8_t *data,
         try_times++;
         if (try_times > 10)
         {
-            LOG_I("speaker write failed len=%d\n", data_len);
-            LOG_I("speaker busy, tx=%d\r\n", thiz->is_tx_enable);
+            XZ_AUDIO_HOT_LOG("speaker write failed len=%u tx=%d", data_len,
+                             thiz->is_tx_enable);
             break;
         }
     }
@@ -655,8 +1063,10 @@ static void xz_audio_encode_and_send_pcm(xz_audio_t *thiz, uint32_t pcm_bytes,
 {
     opus_int32 len;
 
-    if (thiz == RT_NULL || pcm_bytes == 0 || pcm_bytes > XZ_MIC_FRAME_LEN)
+    if (thiz == RT_NULL || thiz->encoder == RT_NULL || pcm_bytes == 0 ||
+        pcm_bytes > XZ_MIC_FRAME_LEN)
     {
+        XZ_AUDIO_HOT_LOG("drop mic frame: encoder not ready bytes=%u", pcm_bytes);
         return;
     }
 
@@ -669,8 +1079,9 @@ static void xz_audio_encode_and_send_pcm(xz_audio_t *thiz, uint32_t pcm_bytes,
                       XZ_MIC_FRAME_LEN / 2, thiz->encode_out, XZ_MIC_FRAME_LEN);
     if (len < 0 || len > XZ_MIC_FRAME_LEN)
     {
-        LOG_I("opus_encode len=%d samrate=%d", len, g_xz_context.sample_rate);
-        RT_ASSERT(0);
+        XZ_AUDIO_HOT_LOG("drop mic frame: opus_encode ret=%d samplerate=%d", len,
+                         g_xz_context.sample_rate);
+        return;
     }
 #ifdef XIAOZHI_USING_MQTT
     xz_audio_send(thiz->encode_out, len);
@@ -684,16 +1095,26 @@ static void xz_opus_thread_entry(void *p)
     int err;
     xz_audio_t *thiz = &xz_audio;
     thiz->decoder = opus_decoder_create(24000, 1, &err);
-    RT_ASSERT(thiz->decoder);
+    if (thiz->decoder == RT_NULL)
+    {
+        LOG_E("opus_decoder_create failed err=%d", err);
+        xz_audio_open_cleanup(thiz);
+        goto exit;
+    }
 
     thiz->encoder = opus_encoder_create(16000, 1, OPUS_APPLICATION_VOIP, &err);
-    RT_ASSERT(thiz->encoder);
+    if (thiz->encoder == RT_NULL)
+    {
+        LOG_E("opus_encoder_create failed err=%d", err);
+        xz_audio_open_cleanup(thiz);
+        goto exit;
+    }
     opus_encoder_ctl(thiz->encoder,
                      OPUS_SET_EXPERT_FRAME_DURATION(OPUS_FRAMESIZE_60_MS));
     opus_encoder_ctl(thiz->encoder, OPUS_SET_VBR(1));
     opus_encoder_ctl(thiz->encoder, OPUS_SET_VBR_CONSTRAINT(1));
 
-    opus_encoder_ctl(thiz->encoder, OPUS_SET_BITRATE(16000));
+    opus_encoder_ctl(thiz->encoder, OPUS_SET_BITRATE(8000));
     opus_encoder_ctl(thiz->encoder, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     opus_encoder_ctl(thiz->encoder, OPUS_SET_COMPLEXITY(0));
     opus_encoder_ctl(thiz->encoder, OPUS_SET_LSB_DEPTH(16));
@@ -713,7 +1134,12 @@ static void xz_opus_thread_entry(void *p)
         rt_uint32_t evt = 0;
         rt_event_recv(thiz->event, XZ_EVENT_ALL,
                       RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
-                      RT_WAITING_FOREVER, &evt);
+                      rt_tick_from_millisecond(XZ_AUDIO_THREAD_EVENT_WAIT_MS),
+                      &evt);
+        if (thiz->is_exit)
+        {
+            break;
+        }
         if (evt & XZ_EVENT_EXIT)
         {
             break;
@@ -781,7 +1207,11 @@ static void xz_opus_thread_entry(void *p)
             rt_enter_critical();
             decode = rt_slist_first(&thiz->downlink_decode_busy);
             rt_exit_critical();
-            RT_ASSERT(decode);
+            if (decode == RT_NULL)
+            {
+                XZ_AUDIO_HOT_LOG("drop stale downlink event");
+                continue;
+            }
             xz_decode_queue_t *queue =
                 rt_container_of(decode, xz_decode_queue_t, node);
             opus_int32 res = opus_decode(
@@ -791,8 +1221,7 @@ static void xz_opus_thread_entry(void *p)
 
             if (res != XZ_SPK_FRAME_LEN / 2)
             {
-                LOG_I("decode out samples=%d\n", res);
-                //RT_ASSERT(0);
+                XZ_AUDIO_HOT_LOG("decode out samples=%d", res);
             }
             if(res > 0)
             {
@@ -814,12 +1243,23 @@ static void xz_opus_thread_entry(void *p)
                 rt_event_send(thiz->event, XZ_EVENT_DOWNLINK);
         }
     }
+exit:
     if (thiz->encoder)
+    {
         opus_encoder_destroy(thiz->encoder);
+        thiz->encoder = RT_NULL;
+    }
     if (thiz->decoder)
+    {
         opus_decoder_destroy(thiz->decoder);
+        thiz->decoder = RT_NULL;
+    }
 
     rt_kprintf("---xz thread exit---\r\n");
+    if (g_xz_audio_thread_exit_sem != RT_NULL)
+    {
+        rt_sem_release(g_xz_audio_thread_exit_sem);
+    }
 }
 
 void xz_aec_mic_open(xz_audio_t *thiz)
@@ -829,6 +1269,11 @@ void xz_aec_mic_open(xz_audio_t *thiz)
     if (!thiz->mic)
     {
         LOG_I("mic on,thiz->inited=%d", thiz->inited);
+        if (!thiz->inited || thiz->rb_opus_encode_input == RT_NULL)
+        {
+            LOG_E("aec mic open skipped: audio not ready");
+            return;
+        }
         // if (thiz->inited != 2)
         // {
         //     return;
@@ -857,7 +1302,14 @@ void xz_aec_mic_open(xz_audio_t *thiz)
         pa.is_need_3a = 1;
         thiz->mic = audio_open(AUDIO_TYPE_LOCAL_MUSIC, AUDIO_TXRX, &pa,
                                mic_callback, NULL);
-        RT_ASSERT(thiz->mic);
+        if (thiz->mic == RT_NULL)
+        {
+            LOG_E("aec mic open failed");
+            thiz->speaker = RT_NULL;
+            thiz->is_rx_enable = 0;
+            thiz->is_tx_enable = 0;
+            return;
+        }
         thiz->speaker = thiz->mic;
         thiz->is_rx_enable = 1;   //麦克风常开
         thiz->is_tx_enable = 1;
@@ -872,6 +1324,11 @@ void xz_mic_open(xz_audio_t *thiz)
     if (!thiz->mic)
     {
         LOG_I("mic on");
+        if (!thiz->inited || thiz->rb_opus_encode_input == RT_NULL)
+        {
+            LOG_E("mic open skipped: audio not ready");
+            return;
+        }
         while (1)
         {
             uint8_t buf[128];
@@ -894,7 +1351,12 @@ void xz_mic_open(xz_audio_t *thiz)
         pa.write_cache_size = 0;
         thiz->mic = audio_open(AUDIO_TYPE_LOCAL_RECORD, AUDIO_RX, &pa,
                                mic_callback, NULL);
-        RT_ASSERT(thiz->mic);
+        if (thiz->mic == RT_NULL)
+        {
+            LOG_E("mic open failed");
+            thiz->is_rx_enable = 0;
+            return;
+        }
         thiz->is_rx_enable = 1;
     }
 #endif
@@ -971,6 +1433,12 @@ void xz_speaker_open(xz_audio_t *thiz)
 
 #if PKG_XIAOZHI_USING_AEC
     #if STOP_SPEAKER_WHEN_DETECTED_MIC_VOICE
+        if (thiz->speaker == RT_NULL)
+        {
+            LOG_E("speaker on skipped: audio not ready");
+            thiz->is_tx_enable = 0;
+            return;
+        }
         LOG_I("speaker on");
         xiaozhi_ui_chat_status("\u8bb2\u8bdd\u4e2d...");
         thiz->is_tx_enable = 1;
@@ -998,7 +1466,13 @@ void xz_speaker_open(xz_audio_t *thiz)
         thiz->speaker =
             audio_open2(AUDIO_TYPE_LOCAL_MUSIC, AUDIO_TX, &pa, NULL, NULL,
                         AUDIO_DEVICE_SPEAKER);
-        RT_ASSERT(thiz->speaker);
+        if (thiz->speaker == RT_NULL)
+        {
+            LOG_E("speaker open failed");
+            thiz->is_tx_enable = 0;
+            g_speaker_target_on = 0U;
+            return;
+        }
         thiz->is_tx_enable = 1;
     }
     xz_audio_kick_downlink_decode(thiz);
@@ -1012,83 +1486,51 @@ void xz_speaker_close(xz_audio_t *thiz)
     #if STOP_SPEAKER_WHEN_DETECTED_MIC_VOICE
     LOG_I("speaker off");
     xiaozhi_ui_chat_status("\u5f85\u547d\u4e2d...");
-        rt_slist_t *idle;
         thiz->is_tx_enable = 0;
-        rt_enter_critical();
-        while (1)
-        {
-            idle = rt_slist_first(&thiz->downlink_decode_busy);
-            if (idle)
-            {
-                rt_slist_remove(&thiz->downlink_decode_busy, idle);
-                rt_slist_append(&thiz->downlink_decode_idle, idle);
-            }
-            else
-            {
-                break;
-            }
-        }
-        rt_exit_critical();
+        g_xz_downlink_drop_close_count +=
+            xz_audio_move_downlink_busy_to_idle(thiz);
     #endif
 #else
 
     if (thiz->speaker)
     {
-        for (int i = 0; i < 1000; i++)
+        if (!xz_audio_wait_downlink_drain(thiz,
+                                          XZ_SPK_CLOSE_DRAIN_TIMEOUT_MS))
         {
-            if (!rt_slist_first(&thiz->downlink_decode_busy))
-            {
-                break;
-            }
-            rt_thread_mdelay(10);
+            g_xz_speaker_close_timeout_count++;
+            XZ_AUDIO_HOT_LOG("speaker close drain timeout count=%u",
+                             g_xz_speaker_close_timeout_count);
         }
         uint32_t cache_time_ms = 150;
         audio_ioctl(thiz->speaker, 1, &cache_time_ms);
-        rt_thread_mdelay(cache_time_ms + 20);
+        if (cache_time_ms > XZ_SPK_CLOSE_CACHE_WAIT_MAX_MS)
+        {
+            XZ_AUDIO_HOT_LOG("speaker cache wait clamp %u->%u",
+                             cache_time_ms, XZ_SPK_CLOSE_CACHE_WAIT_MAX_MS);
+            cache_time_ms = XZ_SPK_CLOSE_CACHE_WAIT_MAX_MS;
+        }
+        rt_thread_mdelay(cache_time_ms + XZ_SPK_CLOSE_CACHE_PAD_MS);
         xz_audio_safe_close(&thiz->speaker, "speaker");
         thiz->is_tx_enable = 0;
-        rt_slist_t *idle;
-        rt_enter_critical();
-        while (1)
+        uint32_t dropped = xz_audio_move_downlink_busy_to_idle(thiz);
+        if (dropped > 0)
         {
-            idle = rt_slist_first(&thiz->downlink_decode_busy);
-            if (idle)
-            {
-                rt_slist_remove(&thiz->downlink_decode_busy, idle);
-                rt_slist_append(&thiz->downlink_decode_idle, idle);
-            }
-            else
-            {
-                break;
-            }
+            g_xz_downlink_drop_close_count += dropped;
+            XZ_AUDIO_HOT_LOG("drop %u downlink packets on speaker close total=%u",
+                             dropped, g_xz_downlink_drop_close_count);
         }
-        rt_exit_critical();
     }
 #endif
 }
 
 void xz_speaker_abort(xz_audio_t *thiz)
 {
-    rt_slist_t *idle;
-
     thiz = xz_audio_resolve(thiz);
     g_speaker_target_on = 0U;
     LOG_I("speaker abort");
 
     thiz->is_tx_enable = 0;
-
-    rt_enter_critical();
-    while (1)
-    {
-        idle = rt_slist_first(&thiz->downlink_decode_busy);
-        if (idle == RT_NULL)
-        {
-            break;
-        }
-        rt_slist_remove(&thiz->downlink_decode_busy, idle);
-        rt_slist_append(&thiz->downlink_decode_idle, idle);
-    }
-    rt_exit_critical();
+    g_xz_downlink_drop_close_count += xz_audio_move_downlink_busy_to_idle(thiz);
 
     if (thiz->speaker)
     {
@@ -1097,6 +1539,81 @@ void xz_speaker_abort(xz_audio_t *thiz)
         audio_ioctl(thiz->speaker, 1, &cache_time_ms);
         xz_audio_safe_close(&thiz->speaker, "speaker_abort");
     }
+}
+
+static uint32_t xz_downlink_queue_alloc_size(uint32_t packet_size)
+{
+    uint32_t required;
+    uint32_t remainder;
+
+    if (packet_size > UINT32_MAX - XZ_DOWNLINK_PACKET_HEADROOM)
+    {
+        return 0;
+    }
+
+    required = packet_size + XZ_DOWNLINK_PACKET_HEADROOM;
+    if (required < XZ_DOWNLINK_QUEUE_INITIAL_SIZE)
+    {
+        required = XZ_DOWNLINK_QUEUE_INITIAL_SIZE;
+    }
+
+    remainder = required % XZ_DOWNLINK_QUEUE_GROW_ALIGN;
+    if (remainder != 0)
+    {
+        uint32_t add = XZ_DOWNLINK_QUEUE_GROW_ALIGN - remainder;
+
+        if (required <= UINT32_MAX - add)
+        {
+            required += add;
+        }
+    }
+
+    return required;
+}
+
+static rt_err_t xz_downlink_queue_ensure_capacity(xz_decode_queue_t *queue,
+                                                  uint32_t packet_size)
+{
+    uint32_t new_size;
+    uint8_t *new_data;
+    uint8_t *old_data;
+
+    if (queue == RT_NULL ||
+        packet_size > UINT32_MAX - XZ_DOWNLINK_PACKET_HEADROOM)
+    {
+        return -RT_ERROR;
+    }
+
+    if (queue->data != RT_NULL &&
+        queue->size >= packet_size + XZ_DOWNLINK_PACKET_HEADROOM)
+    {
+        return RT_EOK;
+    }
+
+    new_size = xz_downlink_queue_alloc_size(packet_size);
+    if (new_size == 0)
+    {
+        return -RT_ERROR;
+    }
+
+    new_data = opus_heap_malloc(new_size);
+    if (new_data == RT_NULL)
+    {
+        LOG_E("drop downlink packet: alloc %u bytes failed, keep %u bytes",
+              new_size, queue->size);
+        return -RT_ENOMEM;
+    }
+
+    old_data = queue->data;
+    queue->data = new_data;
+    queue->size = new_size;
+
+    if (old_data != RT_NULL)
+    {
+        opus_heap_free(old_data);
+    }
+
+    return RT_EOK;
 }
 
 /**
@@ -1134,21 +1651,44 @@ void xz_audio_decoder_encoder_open(uint8_t is_websocket)
         pa.disable_uplink_agc = 1;
         thiz->mic = audio_open(AUDIO_TYPE_LOCAL_MUSIC, AUDIO_TXRX, &pa,
                                mic_callback, NULL);
-        RT_ASSERT(thiz->mic);
+        if (thiz->mic == RT_NULL)
+        {
+            LOG_E("aec audio open failed");
+            xz_audio_open_cleanup(thiz);
+            return;
+        }
 
         mic_gain_decrease(4);
 
         thiz->speaker = thiz->mic;
-        thiz->is_rx_enable = 1;   //麦克风常开
-        thiz->is_tx_enable = 1;
         thiz->resample = sifli_resample_open(1, 24000, 16000);
-        RT_ASSERT(thiz->resample);
+        if (thiz->resample == RT_NULL)
+        {
+            LOG_E("resample open failed");
+            xz_audio_open_cleanup(thiz);
+            return;
+        }
         ret = WebRtcVad_Create(&thiz->handle);
-        RT_ASSERT(!ret);
+        if (ret != 0 || thiz->handle == RT_NULL)
+        {
+            LOG_E("vad create failed ret=%d", ret);
+            xz_audio_open_cleanup(thiz);
+            return;
+        }
         ret = WebRtcVad_Init(thiz->handle);
-        RT_ASSERT(!ret);
+        if (ret != 0)
+        {
+            LOG_E("vad init failed ret=%d", ret);
+            xz_audio_open_cleanup(thiz);
+            return;
+        }
         ret = WebRtcVad_set_mode(thiz->handle, 3); // 0 ~ 3
-        RT_ASSERT(!ret);
+        if (ret != 0)
+        {
+            LOG_E("vad set mode failed ret=%d", ret);
+            xz_audio_open_cleanup(thiz);
+            return;
+        }
 
 #endif
         // 根据参数设置是否使用WebSocket
@@ -1156,12 +1696,34 @@ void xz_audio_decoder_encoder_open(uint8_t is_websocket)
 
         // 创建事件，用于音频处理中的同步
         thiz->event = rt_event_create("xzaudio", RT_IPC_FLAG_FIFO);
-        RT_ASSERT(thiz->event);
+        if (thiz->event == RT_NULL)
+        {
+            LOG_E("create xzaudio event failed");
+            xz_audio_open_cleanup(thiz);
+            return;
+        }
         if (g_xz_mic_flush_sem == RT_NULL)
         {
             g_xz_mic_flush_sem = rt_sem_create("xzmicf", 0, RT_IPC_FLAG_FIFO);
-            RT_ASSERT(g_xz_mic_flush_sem);
+            if (g_xz_mic_flush_sem == RT_NULL)
+            {
+                LOG_E("create xzmicf sem failed");
+                xz_audio_open_cleanup(thiz);
+                return;
+            }
         }
+        if (g_xz_audio_thread_exit_sem == RT_NULL)
+        {
+            g_xz_audio_thread_exit_sem =
+                rt_sem_create("xzthx", 0, RT_IPC_FLAG_FIFO);
+            if (g_xz_audio_thread_exit_sem == RT_NULL)
+            {
+                LOG_E("create xzthx sem failed");
+                xz_audio_open_cleanup(thiz);
+                return;
+            }
+        }
+        xz_audio_sem_drain(g_xz_audio_thread_exit_sem);
 
         // 初始化空闲和忙状态的解码队列
         rt_slist_init(&thiz->downlink_decode_idle);
@@ -1170,10 +1732,15 @@ void xz_audio_decoder_encoder_open(uint8_t is_websocket)
         // 为下行链路解码队列分配内存
         for (int i = 0; i < XZ_DOWNLINK_QUEUE_NUM; i++)
         {
-            thiz->downlink_queue[i].size = 256;
+            thiz->downlink_queue[i].size = XZ_DOWNLINK_QUEUE_INITIAL_SIZE;
             thiz->downlink_queue[i].data =
                 opus_heap_malloc(thiz->downlink_queue[i].size);
-            RT_ASSERT(thiz->downlink_queue[i].data);
+            if (thiz->downlink_queue[i].data == RT_NULL)
+            {
+                LOG_E("alloc downlink queue[%d] failed: %u bytes", i,
+                      thiz->downlink_queue[i].size);
+                thiz->downlink_queue[i].size = 0;
+            }
 
             // 将新分配的队列节点添加到空闲队列中
             rt_slist_append(&thiz->downlink_decode_idle,
@@ -1183,15 +1750,31 @@ void xz_audio_decoder_encoder_open(uint8_t is_websocket)
 #if PKG_XIAOZHI_USING_AEC
         // 使用 PSRAM 中的静态缓冲区创建 ringbuffer
         thiz->rb_vad_cache = (struct rt_ringbuffer *)rt_malloc(sizeof(struct rt_ringbuffer));
+        if (thiz->rb_vad_cache == RT_NULL)
+        {
+            LOG_E("alloc vad ringbuffer failed");
+            xz_audio_open_cleanup(thiz);
+            return;
+        }
         rt_ringbuffer_init(thiz->rb_vad_cache, g_rb_vad_cache_buf, RB_VAD_CACHE_SIZE);
         thiz->rb_opus_encode_input = (struct rt_ringbuffer *)rt_malloc(sizeof(struct rt_ringbuffer));
+        if (thiz->rb_opus_encode_input == RT_NULL)
+        {
+            LOG_E("alloc opus ringbuffer failed");
+            xz_audio_open_cleanup(thiz);
+            return;
+        }
         rt_ringbuffer_init(thiz->rb_opus_encode_input, g_rb_opus_encode_buf, RB_OPUS_ENCODE_SIZE);
-        RT_ASSERT(thiz->rb_opus_encode_input);
 #else
         // 创建用于编码输入的环形缓冲区，使用 PSRAM 静态缓冲区
         thiz->rb_opus_encode_input = (struct rt_ringbuffer *)rt_malloc(sizeof(struct rt_ringbuffer));
+        if (thiz->rb_opus_encode_input == RT_NULL)
+        {
+            LOG_E("alloc opus ringbuffer failed");
+            xz_audio_open_cleanup(thiz);
+            return;
+        }
         rt_ringbuffer_init(thiz->rb_opus_encode_input, g_rb_opus_encode_buf, RB_OPUS_ENCODE_SIZE);
-        RT_ASSERT(thiz->rb_opus_encode_input);
 #endif
         // 初始化音频处理线程
         rt_err_t err;
@@ -1201,12 +1784,35 @@ void xz_audio_decoder_encoder_open(uint8_t is_websocket)
                              RT_THREAD_PRIORITY_MIDDLE +
                                  RT_THREAD_PRIORITY_HIGHER,
                              RT_THREAD_TICK_DEFAULT);
+        if (err != RT_EOK)
+        {
+            LOG_E("init opus thread failed err=%d", err);
+            xz_audio_open_cleanup(thiz);
+            return;
+        }
 
         // 启动音频处理线程
-        rt_thread_startup(&thiz->thread);
+        thiz->inited = 1;
+        err = rt_thread_startup(&thiz->thread);
+        if (err != RT_EOK)
+        {
+            LOG_E("start opus thread failed err=%d", err);
+            thiz->inited = 0;
+            rt_thread_detach(&thiz->thread);
+            xz_audio_open_cleanup(thiz);
+            return;
+        }
 
         // 标记模块已初始化
-        thiz->inited = 1;
+        if (!thiz->inited || thiz->is_exit)
+        {
+            LOG_E("opus thread init failed");
+            return;
+        }
+#if PKG_XIAOZHI_USING_AEC
+        thiz->is_rx_enable = 1;   //麦克风常开
+        thiz->is_tx_enable = 1;
+#endif
         
         rt_kprintf("xz_audio_decoder_encoder open ok\n");
     }
@@ -1228,26 +1834,30 @@ void xz_audio_decoder_encoder_close(void)
     }
     
     thiz->is_exit = 1;
-    rt_event_send(thiz->event, XZ_EVENT_EXIT);
-    while (rt_thread_find(XZ_THREAD_NAME))
+    if (thiz->event != RT_NULL)
     {
-        LOG_I("wait thread %s exit", XZ_THREAD_NAME);
-        os_delay(100);
+        rt_event_send(thiz->event, XZ_EVENT_EXIT);
+    }
+    if (g_xz_audio_thread_exit_sem != RT_NULL &&
+        rt_sem_take(g_xz_audio_thread_exit_sem,
+                    rt_tick_from_millisecond(XZ_AUDIO_THREAD_EXIT_TIMEOUT_MS)) !=
+            RT_EOK)
+    {
+        g_xz_audio_thread_exit_timeout_count++;
+        LOG_E("wait thread %s exit timeout total=%u", XZ_THREAD_NAME,
+              g_xz_audio_thread_exit_timeout_count);
     }
 
     // 释放 ringbuffer 结构体（缓冲区在 PSRAM 中静态分配，不需要释放）
     rt_free(thiz->rb_opus_encode_input);
     thiz->rb_opus_encode_input = NULL;
-    rt_event_delete(thiz->event);
-
-    for (int i = 0; i < XZ_DOWNLINK_QUEUE_NUM; i++)
+    if (thiz->event != RT_NULL)
     {
-        if (thiz->downlink_queue[i].data)
-        {
-            opus_heap_free(thiz->downlink_queue[i].data);
-            thiz->downlink_queue[i].data = NULL;
-        }
+        rt_event_delete(thiz->event);
+        thiz->event = RT_NULL;
     }
+
+    xz_audio_release_downlink_queues(thiz);
 #if PKG_XIAOZHI_USING_AEC
     // 释放 ringbuffer 结构体（缓冲区在 PSRAM 中静态分配，不需要释放）
     rt_free(thiz->rb_vad_cache);
@@ -1295,6 +1905,11 @@ void reinit_audio()
     xz_audio_decoder_encoder_close();
     // 重新打开音频解码器和编码器
     xz_audio_decoder_encoder_open(1); 
+    if (!thiz->inited)
+    {
+        LOG_E("reinit audio failed");
+        return;
+    }
     xz_aec_mic_open(thiz);
     xz_speaker_open(thiz);
 }
@@ -1302,17 +1917,20 @@ void reinit_audio()
 void xz_audio_downlink(uint8_t *data, uint32_t size, uint32_t *aes_value,
                        uint8_t need_aes)
 {
-    int try_times = 0;
     xz_audio_t *thiz = &xz_audio;
     rt_slist_t *idle;
-    if (!thiz->inited)
+    if (!thiz->inited || thiz->event == RT_NULL)
     {
-        LOG_I("%s invalid\r\n", __FUNCTION__);
+        XZ_AUDIO_HOT_LOG("%s invalid", __FUNCTION__);
+        return;
+    }
+    if (data == RT_NULL || size == 0)
+    {
+        XZ_AUDIO_HOT_LOG("drop empty downlink packet size=%u", size);
         return;
     }
     // LOG_I("%s tx=%d inited=%d\r\n", __FUNCTION__, thiz->is_tx_enable,
     // thiz->inited);
-wait_speaker:
     rt_enter_critical();
     idle = rt_slist_first(&thiz->downlink_decode_idle);
     rt_exit_critical();
@@ -1320,13 +1938,11 @@ wait_speaker:
     {
         xz_decode_queue_t *queue =
             rt_container_of(idle, xz_decode_queue_t, node);
-        if (queue->size < size + 16)
+        if (xz_downlink_queue_ensure_capacity(queue, size) != RT_EOK)
         {
-            opus_heap_free(queue->data);
-            queue->size = size + 16;
-            queue->data = opus_heap_malloc(queue->size);
-            RT_ASSERT(queue->data);
+            return;
         }
+
         queue->data_len = size;
         if (need_aes)
         {
@@ -1347,15 +1963,12 @@ wait_speaker:
     }
     else
     {
-        LOG_I("speaker busy\r\n");
-        LOG_I("speaker busy mic=%d\r\n", (uint32_t)thiz->mic);
-        LOG_I("speaker busy speaker=%d\r\n", (uint32_t)thiz->speaker);
-        try_times++;
-        if (try_times < 20)
-        {
-            rt_thread_mdelay(10);
-            goto wait_speaker;
-        }
+        g_xz_downlink_drop_no_idle_count++;
+        XZ_AUDIO_HOT_LOG("drop downlink no idle total=%u mic=%u speaker=%u",
+                         g_xz_downlink_drop_no_idle_count,
+                         (uint32_t)(uintptr_t)thiz->mic,
+                         (uint32_t)(uintptr_t)thiz->speaker);
+        rt_event_send(thiz->event, XZ_EVENT_DOWNLINK);
     }
 }
 

@@ -41,6 +41,9 @@
 #define UI_STATUS_BAR_REFRESH_THREAD_STACK_SIZE 1024
 #define UI_STATUS_BAR_REFRESH_THREAD_PRIORITY 22
 #define UI_STATUS_BAR_REFRESH_THREAD_TICK 10
+#ifndef UI_EXTERNAL_TTF_DATA_FALLBACK_MAX_BYTES
+#define UI_EXTERNAL_TTF_DATA_FALLBACK_MAX_BYTES (2U * 1024U * 1024U)
+#endif
 
 typedef enum
 {
@@ -155,15 +158,26 @@ typedef struct
     uint8_t aw_fault_status;
     int bt_visual_state;
     int network_visual_state;
+    net_manager_mode_t desired_mode;
     net_manager_link_t active_link;
     bool bt_enabled;
     bool net_4g_enabled;
     char network_detail[16];
 } ui_status_bar_snapshot_t;
 
+typedef struct
+{
+    bool used;
+    char path[UI_FONT_MANAGER_PATH_MAX];
+    char reason[24];
+} ui_font_failure_log_entry_t;
+
 static ui_font_cache_entry_t s_builtin_font_cache[20];
 static ui_font_cache_entry_t s_file_font_cache[20];
 static char s_file_font_cache_path[UI_FONT_MANAGER_PATH_MAX];
+static void *s_file_font_shared_data = NULL;
+static size_t s_file_font_shared_data_size = 0U;
+static ui_font_failure_log_entry_t s_file_font_failure_logs[8];
 static ui_screen_refs_entry_t s_screen_refs[UI_SCREEN_COUNT];
 static bool s_ui_helpers_initialized = false;
 static lv_coord_t s_screen_width = UI_FIGMA_WIDTH;
@@ -223,6 +237,62 @@ static bool ui_status_snapshot_equal(const ui_status_bar_snapshot_t *lhs,
 static void ui_status_panel_toggle_event_cb(lv_event_t *e);
 static bool ui_font_cache_make_lvgl_fs_path(const char *font_path, char *buffer, size_t buffer_size);
 
+static bool ui_font_cache_should_log_failure(const char *path, const char *reason)
+{
+    size_t i;
+
+    if (path == NULL || reason == NULL)
+    {
+        return false;
+    }
+
+    for (i = 0; i < sizeof(s_file_font_failure_logs) / sizeof(s_file_font_failure_logs[0]); ++i)
+    {
+        if (s_file_font_failure_logs[i].used &&
+            strcmp(s_file_font_failure_logs[i].path, path) == 0 &&
+            strcmp(s_file_font_failure_logs[i].reason, reason) == 0)
+        {
+            return false;
+        }
+    }
+
+    for (i = 0; i < sizeof(s_file_font_failure_logs) / sizeof(s_file_font_failure_logs[0]); ++i)
+    {
+        if (!s_file_font_failure_logs[i].used)
+        {
+            s_file_font_failure_logs[i].used = true;
+            rt_strncpy(s_file_font_failure_logs[i].path,
+                       path,
+                       sizeof(s_file_font_failure_logs[i].path) - 1U);
+            s_file_font_failure_logs[i].path[sizeof(s_file_font_failure_logs[i].path) - 1U] = '\0';
+            rt_strncpy(s_file_font_failure_logs[i].reason,
+                       reason,
+                       sizeof(s_file_font_failure_logs[i].reason) - 1U);
+            s_file_font_failure_logs[i].reason[sizeof(s_file_font_failure_logs[i].reason) - 1U] = '\0';
+            return true;
+        }
+    }
+
+    s_file_font_failure_logs[0].used = true;
+    rt_strncpy(s_file_font_failure_logs[0].path,
+               path,
+               sizeof(s_file_font_failure_logs[0].path) - 1U);
+    s_file_font_failure_logs[0].path[sizeof(s_file_font_failure_logs[0].path) - 1U] = '\0';
+    rt_strncpy(s_file_font_failure_logs[0].reason,
+               reason,
+               sizeof(s_file_font_failure_logs[0].reason) - 1U);
+    s_file_font_failure_logs[0].reason[sizeof(s_file_font_failure_logs[0].reason) - 1U] = '\0';
+    return true;
+}
+
+static void ui_font_cache_log_failure_once(const char *path, const char *reason)
+{
+    if (ui_font_cache_should_log_failure(path, reason))
+    {
+        rt_kprintf("font_mgr: file font failed %s reason=%s\n", path, reason);
+    }
+}
+
 static void ui_status_panel_toggle_event_bridge(lv_event_t *e)
 {
     ui_status_panel_toggle_event_cb(e);
@@ -230,17 +300,18 @@ static void ui_status_panel_toggle_event_bridge(lv_event_t *e)
 
 static bool ui_bt_connection_active(void)
 {
-    return net_manager_bt_connected();
-}
+    net_manager_snapshot_t snapshot;
 
-static bool ui_bt_pairing_enabled(void)
-{
-    return false;
+    net_manager_get_snapshot(&snapshot);
+    return snapshot.active_link == NET_MANAGER_LINK_BT_PAN;
 }
 
 static bool ui_bt_network_ready(void)
 {
-    return net_manager_network_ready();
+    net_manager_snapshot_t snapshot;
+
+    net_manager_get_snapshot(&snapshot);
+    return snapshot.active_link == NET_MANAGER_LINK_4G_CAT1;
 }
 
 static uint32_t ui_status_bar_next_refresh_delay_ms(void)
@@ -552,6 +623,17 @@ static void ui_font_cache_destroy_entry(ui_font_cache_entry_t *entry)
     entry->is_freetype = false;
 }
 
+static void ui_font_cache_release_shared_file_data(void)
+{
+    if (s_file_font_shared_data != NULL)
+    {
+        audio_mem_free(s_file_font_shared_data);
+        s_file_font_shared_data = NULL;
+    }
+
+    s_file_font_shared_data_size = 0U;
+}
+
 static bool ui_font_cache_load_file(const char *path, void **buffer, size_t *size)
 {
     int fd;
@@ -585,6 +667,20 @@ static bool ui_font_cache_load_file(const char *path, void **buffer, size_t *siz
         return false;
     }
 
+    if ((uint64_t)file_size > (uint64_t)UINT32_MAX)
+    {
+        close(fd);
+        ui_font_cache_log_failure_once(path, "too_large");
+        return false;
+    }
+
+    if ((uint64_t)file_size > (uint64_t)UI_EXTERNAL_TTF_DATA_FALLBACK_MAX_BYTES)
+    {
+        close(fd);
+        ui_font_cache_log_failure_once(path, "data_too_large");
+        return false;
+    }
+
     if (lseek(fd, 0, SEEK_SET) < 0)
     {
         close(fd);
@@ -595,9 +691,7 @@ static bool ui_font_cache_load_file(const char *path, void **buffer, size_t *siz
     if (data == NULL)
     {
         close(fd);
-        rt_kprintf("font_mgr: file font alloc failed %s size=%ld\n",
-                   path,
-                   (long)file_size);
+        ui_font_cache_log_failure_once(path, "alloc");
         return false;
     }
 
@@ -606,16 +700,45 @@ static bool ui_font_cache_load_file(const char *path, void **buffer, size_t *siz
     if (read_size != file_size)
     {
         audio_mem_free(data);
-        rt_kprintf("font_mgr: file font read failed %s read=%ld size=%ld\n",
-                   path,
-                   (long)read_size,
-                   (long)file_size);
+        ui_font_cache_log_failure_once(path, "read");
         return false;
     }
 
     *buffer = data;
     *size = (size_t)file_size;
     return true;
+}
+
+static bool ui_font_cache_get_shared_file_data(const char *path, void **buffer, size_t *size)
+{
+    void *data = NULL;
+    size_t data_size = 0U;
+
+    if (buffer == NULL || size == NULL)
+    {
+        return false;
+    }
+
+    *buffer = NULL;
+    *size = 0U;
+
+    if (s_file_font_shared_data == NULL)
+    {
+        if (!ui_font_cache_load_file(path, &data, &data_size))
+        {
+            return false;
+        }
+
+        s_file_font_shared_data = data;
+        s_file_font_shared_data_size = data_size;
+        rt_kprintf("font_mgr: file font data cached %s bytes=%lu\n",
+                   path,
+                   (unsigned long)s_file_font_shared_data_size);
+    }
+
+    *buffer = s_file_font_shared_data;
+    *size = s_file_font_shared_data_size;
+    return *buffer != NULL && *size > 0U;
 }
 
 static lv_font_t *ui_font_cache_get_file(ui_font_cache_entry_t *cache,
@@ -639,6 +762,7 @@ static lv_font_t *ui_font_cache_get_file(ui_font_cache_entry_t *cache,
         {
             ui_font_cache_destroy_entry(&s_file_font_cache[i]);
         }
+        ui_font_cache_release_shared_file_data();
         rt_strncpy(s_file_font_cache_path, font_path, sizeof(s_file_font_cache_path) - 1U);
         s_file_font_cache_path[sizeof(s_file_font_cache_path) - 1U] = '\0';
     }
@@ -675,11 +799,9 @@ static lv_font_t *ui_font_cache_get_file(ui_font_cache_entry_t *cache,
                 }
             }
 
-            if (!ui_font_cache_load_file(font_path, &font_data, &font_data_size))
+            if (!ui_font_cache_get_shared_file_data(font_path, &font_data, &font_data_size))
             {
-                rt_kprintf("font_mgr: file font load failed %s size=%u\n",
-                           font_path,
-                           actual_size);
+                ui_font_cache_log_failure_once(font_path, "load");
                 break;
             }
 
@@ -693,20 +815,14 @@ static lv_font_t *ui_font_cache_get_file(ui_font_cache_entry_t *cache,
 
             if (cache[i].font != NULL)
             {
-                cache[i].font_data = font_data;
-                cache[i].font_data_size = font_data_size;
-                rt_kprintf("font_mgr: file font active %s size=%u backend=data\n",
+                cache[i].font_data = NULL;
+                cache[i].font_data_size = 0U;
+                rt_kprintf("font_mgr: file font active %s size=%u backend=data-shared\n",
                            font_path,
                            actual_size);
                 return cache[i].font;
             }
-            rt_kprintf("font_mgr: file font create failed %s size=%u\n",
-                       font_path,
-                       actual_size);
-            if (font_data != NULL)
-            {
-                audio_mem_free(font_data);
-            }
+            ui_font_cache_log_failure_once(font_path, "create");
             break;
         }
     }
@@ -1148,6 +1264,7 @@ static void ui_status_capture_snapshot(ui_status_bar_snapshot_t *snapshot)
     }
 
     snapshot->bt_visual_state = (int)ui_status_get_bluetooth_state();
+    snapshot->desired_mode = net_manager_get_desired_mode();
     snapshot->active_link = net_manager_get_active_link();
     snapshot->bt_enabled = net_manager_bt_enabled();
     snapshot->net_4g_enabled = net_manager_4g_enabled();
@@ -1157,9 +1274,23 @@ static void ui_status_capture_snapshot(ui_status_bar_snapshot_t *snapshot)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "在线");
     }
-    else if (snapshot->net_4g_enabled)
+    else if (snapshot->active_link == NET_MANAGER_LINK_4G_CAT1)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s", cat1_detail);
+    }
+    else if (snapshot->desired_mode == NET_MANAGER_MODE_BT)
+    {
+        rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s",
+                    snapshot->bt_enabled ? "蓝牙" : "蓝牙关闭");
+    }
+    else if (snapshot->desired_mode == NET_MANAGER_MODE_4G)
+    {
+        rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s",
+                    snapshot->net_4g_enabled ? cat1_detail : "4G关闭");
+    }
+    else if (snapshot->desired_mode == NET_MANAGER_MODE_SLEEP)
+    {
+        rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "睡眠");
     }
     else
     {
@@ -1190,6 +1321,7 @@ static bool ui_status_snapshot_equal(const ui_status_bar_snapshot_t *lhs,
            lhs->aw_fault_status == rhs->aw_fault_status &&
            lhs->bt_visual_state == rhs->bt_visual_state &&
            lhs->network_visual_state == rhs->network_visual_state &&
+           lhs->desired_mode == rhs->desired_mode &&
            lhs->active_link == rhs->active_link &&
            lhs->bt_enabled == rhs->bt_enabled &&
            lhs->net_4g_enabled == rhs->net_4g_enabled &&
@@ -1198,27 +1330,12 @@ static bool ui_status_snapshot_equal(const ui_status_bar_snapshot_t *lhs,
 
 static void ui_status_refresh_connection_icons(bool force)
 {
-    net_manager_link_t active_link = net_manager_get_active_link();
-    bool bt_enabled = net_manager_bt_enabled();
-    bool net_4g_enabled = net_manager_4g_enabled();
-    char cat1_detail[16];
-    const char *network_text = NULL;
+    const ui_status_bar_snapshot_t *snapshot = &s_status_bar_snapshot;
+    net_manager_link_t active_link = snapshot->active_link;
+    bool bt_enabled = snapshot->bt_enabled;
+    bool net_4g_enabled = snapshot->net_4g_enabled;
+    const char *network_text = snapshot->network_detail;
     size_t i;
-
-    ui_status_get_cat1_visual_state(cat1_detail, sizeof(cat1_detail));
-
-    if (active_link == NET_MANAGER_LINK_BT_PAN)
-    {
-        network_text = "在线";
-    }
-    else if (net_4g_enabled)
-    {
-        network_text = cat1_detail;
-    }
-    else
-    {
-        network_text = "关闭";
-    }
 
     if (!force &&
         s_status_last_bt_icon_state == (bt_enabled ? 1 : 0) &&
@@ -1257,7 +1374,8 @@ static void ui_status_refresh_connection_icons(bool force)
             ui_img_set_src(refs->network_icon, &network_icon_img);
             ui_status_set_object_hidden(refs->network_icon, false);
             lv_obj_set_style_opa(refs->network_icon,
-                                 (active_link == NET_MANAGER_LINK_BT_PAN || net_4g_enabled) ? LV_OPA_COVER : LV_OPA_50,
+                                 (active_link == NET_MANAGER_LINK_BT_PAN ||
+                                  active_link == NET_MANAGER_LINK_4G_CAT1) ? LV_OPA_COVER : LV_OPA_50,
                                  0);
         }
 
@@ -1473,28 +1591,30 @@ static bool ui_status_accept_interaction(void)
 static void ui_status_update_panel_visuals(void)
 {
     char value_text[16];
-    ui_status_bluetooth_state_t bt_state = ui_status_get_bluetooth_state();
-    bool bt_pairing_enabled = ui_bt_pairing_enabled();
+    const ui_status_bar_snapshot_t *snapshot = &s_status_bar_snapshot;
+    ui_status_bluetooth_state_t bt_state = (ui_status_bluetooth_state_t)snapshot->bt_visual_state;
     bool network_ready = ui_bt_network_ready();
-    bool bt_enabled = net_manager_bt_enabled();
-    bool net_4g_enabled = net_manager_4g_enabled();
+    bool bt_enabled = snapshot->bt_enabled;
+    bool net_4g_enabled = snapshot->net_4g_enabled;
+    bool bt_switch_on = (snapshot->desired_mode == NET_MANAGER_MODE_BT);
+    bool network_switch_on = (snapshot->desired_mode == NET_MANAGER_MODE_4G);
     const char *bt_subtitle;
     const char *network_subtitle;
 
     if (!s_status_panel.bluetooth_toggle_initialized)
     {
-        s_status_panel.bluetooth_enabled = bt_enabled;
+        s_status_panel.bluetooth_enabled = bt_switch_on;
         s_status_panel.bluetooth_toggle_initialized = true;
     }
 
     if (!s_status_panel.network_toggle_initialized)
     {
-        s_status_panel.network_enabled = net_4g_enabled;
+        s_status_panel.network_enabled = network_switch_on;
         s_status_panel.network_toggle_initialized = true;
     }
 
-    s_status_panel.bluetooth_enabled = bt_enabled;
-    s_status_panel.network_enabled = net_4g_enabled;
+    s_status_panel.bluetooth_enabled = bt_switch_on;
+    s_status_panel.network_enabled = network_switch_on;
 
     if (s_status_panel.brightness_value_label != NULL)
     {
@@ -1531,16 +1651,18 @@ static void ui_status_update_panel_visuals(void)
         }
         if (s_status_panel.bluetooth_subtitle_label != NULL)
         {
-            switch (bt_state)
+            if (snapshot->active_link == NET_MANAGER_LINK_BT_PAN)
+            {
+                bt_subtitle = ui_i18n_pick("已连接", "Connected");
+            }
+            else switch (bt_state)
             {
             case UI_STATUS_BLUETOOTH_CONNECTED:
-                bt_subtitle = ui_i18n_pick("已连接", "Connected");
-                break;
             case UI_STATUS_BLUETOOTH_WAITING:
                 bt_subtitle = ui_i18n_pick("连接中", "Connecting");
                 break;
             default:
-                bt_subtitle = bt_enabled ? (bt_pairing_enabled ? ui_i18n_pick("已开启", "Enabled") : ui_i18n_pick("待连接", "Idle")) : ui_i18n_pick("未开启", "Disabled");
+                bt_subtitle = bt_enabled ? ui_i18n_pick("待连接", "Idle") : ui_i18n_pick("未开启", "Disabled");
                 break;
             }
             lv_label_set_text(s_status_panel.bluetooth_subtitle_label, bt_subtitle);
@@ -1562,13 +1684,47 @@ static void ui_status_update_panel_visuals(void)
         }
         if (s_status_panel.network_subtitle_label != NULL)
         {
-            if (!net_4g_enabled)
+            if (snapshot->desired_mode == NET_MANAGER_MODE_BT)
+            {
+                if (snapshot->active_link == NET_MANAGER_LINK_BT_PAN)
+                {
+                    network_subtitle = ui_i18n_pick("蓝牙已连接", "Bluetooth connected");
+                }
+                else if (bt_enabled)
+                {
+                    network_subtitle = ui_i18n_pick("等待网络共享", "Waiting for PAN");
+                }
+                else
+                {
+                    network_subtitle = ui_i18n_pick("蓝牙未开启", "Bluetooth off");
+                }
+            }
+            else if (snapshot->desired_mode == NET_MANAGER_MODE_4G)
+            {
+                if (network_ready)
+                {
+                    network_subtitle = ui_i18n_pick("已联网", "Online");
+                }
+                else if (net_4g_enabled)
+                {
+                    network_subtitle = ui_i18n_pick("4G启动中", "Starting 4G");
+                }
+                else
+                {
+                    network_subtitle = ui_i18n_pick("4G未开启", "Disabled");
+                }
+            }
+            else if (snapshot->desired_mode == NET_MANAGER_MODE_SLEEP)
+            {
+                network_subtitle = ui_i18n_pick("休眠中", "Sleeping");
+            }
+            else if (!net_4g_enabled)
             {
                 network_subtitle = ui_i18n_pick("未开启", "Disabled");
             }
             else
             {
-                network_subtitle = network_ready ? ui_i18n_pick("已联网", "Online") : ui_i18n_pick("未联网", "Offline");
+                network_subtitle = ui_i18n_pick("未启用", "Disabled");
             }
             lv_label_set_text(s_status_panel.network_subtitle_label, network_subtitle);
         }
@@ -1791,6 +1947,8 @@ static void ui_status_detail_reload_async_cb(void *user_data)
 static void ui_status_toggle_card_event_cb(lv_event_t *e)
 {
     ui_status_toggle_kind_t kind = (ui_status_toggle_kind_t)(uintptr_t)lv_event_get_user_data(e);
+    net_manager_mode_t current_mode;
+    net_manager_mode_t target_mode;
 
     if (lv_event_get_code(e) != LV_EVENT_RELEASED)
     {
@@ -1801,39 +1959,57 @@ static void ui_status_toggle_card_event_cb(lv_event_t *e)
         return;
     }
 
+    current_mode = net_manager_get_desired_mode();
     if (kind == UI_STATUS_TOGGLE_BLUETOOTH)
     {
-        if (net_manager_bt_enabled())
-        {
-            net_manager_request_4g_mode();
-        }
-        else
-        {
-            net_manager_request_bt_mode();
-        }
-        s_status_panel.bluetooth_enabled = net_manager_bt_enabled();
-        s_status_panel.network_enabled = net_manager_4g_enabled();
-        s_status_panel.bluetooth_toggle_initialized = true;
-        s_status_panel.network_toggle_initialized = true;
+        target_mode = (current_mode == NET_MANAGER_MODE_BT) ?
+                      NET_MANAGER_MODE_4G :
+                      NET_MANAGER_MODE_BT;
     }
     else
     {
-        if (net_manager_4g_enabled())
-        {
-            net_manager_request_bt_mode();
-        }
-        else
-        {
-            net_manager_request_4g_mode();
-        }
-        s_status_panel.bluetooth_enabled = net_manager_bt_enabled();
-        s_status_panel.network_enabled = net_manager_4g_enabled();
-        s_status_panel.bluetooth_toggle_initialized = true;
-        s_status_panel.network_toggle_initialized = true;
+        target_mode = (current_mode == NET_MANAGER_MODE_4G) ?
+                      NET_MANAGER_MODE_BT :
+                      NET_MANAGER_MODE_4G;
     }
 
-    ui_status_update_panel_visuals();
+    if (target_mode == NET_MANAGER_MODE_BT)
+    {
+        net_manager_request_bt_mode();
+    }
+    else
+    {
+        net_manager_request_4g_mode();
+    }
+
+    s_status_panel.bluetooth_enabled = (target_mode == NET_MANAGER_MODE_BT);
+    s_status_panel.network_enabled = (target_mode == NET_MANAGER_MODE_4G);
+    s_status_panel.bluetooth_toggle_initialized = true;
+    s_status_panel.network_toggle_initialized = true;
+
+    if (s_status_panel.bluetooth_value_label != NULL)
+    {
+        lv_label_set_text(s_status_panel.bluetooth_value_label,
+                          s_status_panel.bluetooth_enabled ? ui_i18n_pick("开", "On") : ui_i18n_pick("关", "Off"));
+    }
+    if (s_status_panel.network_value_label != NULL)
+    {
+        lv_label_set_text(s_status_panel.network_value_label,
+                          s_status_panel.network_enabled ? ui_i18n_pick("开", "On") : ui_i18n_pick("关", "Off"));
+    }
+    if (s_status_panel.bluetooth_subtitle_label != NULL)
+    {
+        lv_label_set_text(s_status_panel.bluetooth_subtitle_label,
+                          s_status_panel.bluetooth_enabled ? ui_i18n_pick("切换中", "Switching") : ui_i18n_pick("未开启", "Disabled"));
+    }
+    if (s_status_panel.network_subtitle_label != NULL)
+    {
+        lv_label_set_text(s_status_panel.network_subtitle_label,
+                          s_status_panel.network_enabled ? ui_i18n_pick("切换中", "Switching") : ui_i18n_pick("未开启", "Disabled"));
+    }
+
     ui_status_refresh_connection_icons(true);
+    ui_dispatch_request_status_refresh();
 }
 
 static lv_obj_t *ui_status_create_touch_zone(lv_obj_t *parent,
@@ -2604,8 +2780,10 @@ void ui_helpers_reset_font_cache(void)
     {
         ui_font_cache_destroy_entry(&s_file_font_cache[i]);
     }
+    ui_font_cache_release_shared_file_data();
 
     s_file_font_cache_path[0] = '\0';
+    memset(s_file_font_failure_logs, 0, sizeof(s_file_font_failure_logs));
 }
 
 lv_coord_t ui_px_x(int32_t value)

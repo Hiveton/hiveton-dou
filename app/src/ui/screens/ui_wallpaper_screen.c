@@ -32,6 +32,16 @@ lv_obj_t *ui_Wallpaper = NULL;
 #define UI_WALLPAPER_MAX_WIDTH  528U
 #define UI_WALLPAPER_MAX_HEIGHT 792U
 
+#ifndef UI_EPD_REFRESH_LOG_ENABLED
+#define UI_EPD_REFRESH_LOG_ENABLED 0
+#endif
+
+#if UI_EPD_REFRESH_LOG_ENABLED
+#define UI_EPD_REFRESH_LOG(...) rt_kprintf(__VA_ARGS__)
+#else
+#define UI_EPD_REFRESH_LOG(...) do { } while (0)
+#endif
+
 typedef struct
 {
     lv_obj_t *image_card;
@@ -93,9 +103,23 @@ static void ui_wallpaper_queue_full_refresh_on_input(const char *source)
     if (!s_wallpaper_force_full_refresh_pending)
     {
         s_wallpaper_force_full_refresh_pending = true;
-        rt_kprintf("wallpaper: full refresh queued by input source=%s\n",
-                   source != NULL ? source : "?");
+        UI_EPD_REFRESH_LOG("wallpaper: full refresh queued by input source=%s\n",
+                           source != NULL ? source : "?");
     }
+}
+
+static bool ui_wallpaper_consume_pending_full_refresh(const char *reason)
+{
+    if (!s_wallpaper_force_full_refresh_pending)
+    {
+        return false;
+    }
+
+    UI_EPD_REFRESH_LOG("wallpaper: full refresh consume reason=%s\n",
+                       reason != NULL ? reason : "?");
+    lcd_request_epd_force_full_refresh_once();
+    s_wallpaper_force_full_refresh_pending = false;
+    return true;
 }
 
 static void ui_wallpaper_input_event_cb(lv_event_t *e)
@@ -1140,6 +1164,7 @@ static void ui_wallpaper_render(void)
 
     if (!ui_wallpaper_build_pic_dir(pic_dir, sizeof(pic_dir)))
     {
+        (void)ui_wallpaper_consume_pending_full_refresh("no_pic_dir");
         ui_wallpaper_set_status_overview("未找到",
                                          "",
                                          "失败",
@@ -1150,6 +1175,7 @@ static void ui_wallpaper_render(void)
     dir = opendir(pic_dir);
     if (dir == NULL)
     {
+        (void)ui_wallpaper_consume_pending_full_refresh("open_pic_dir_failed");
         ui_wallpaper_set_status_overview(pic_dir,
                                          "",
                                          "失败",
@@ -1181,6 +1207,7 @@ static void ui_wallpaper_render(void)
 
     if (s_wallpaper_image_dsc.data == NULL)
     {
+        (void)ui_wallpaper_consume_pending_full_refresh("image_load_failed");
         ui_wallpaper_set_status_overview(pic_dir,
                                          s_wallpaper_image_path,
                                          "失败",
@@ -1192,12 +1219,7 @@ static void ui_wallpaper_render(void)
         return;
     }
 
-    if (s_wallpaper_force_full_refresh_pending)
-    {
-        rt_kprintf("wallpaper: full refresh consume before image present\n");
-        lcd_request_epd_force_full_refresh_once();
-        s_wallpaper_force_full_refresh_pending = false;
-    }
+    (void)ui_wallpaper_consume_pending_full_refresh("image_present");
     lcd_set_epd_image_refresh_hint(RT_TRUE);
     s_wallpaper_refs.image = lv_img_create(s_wallpaper_refs.image_card);
     lv_obj_set_style_bg_opa(s_wallpaper_refs.image, LV_OPA_TRANSP, 0);
@@ -1223,7 +1245,7 @@ void ui_Wallpaper_screen_init(void)
     memset(s_wallpaper_status_text, 0, sizeof(s_wallpaper_status_text));
     memset(&s_wallpaper_image_dsc, 0, sizeof(s_wallpaper_image_dsc));
     s_wallpaper_force_full_refresh_pending = true;
-    rt_kprintf("wallpaper: full refresh queued on enter\n");
+    UI_EPD_REFRESH_LOG("wallpaper: full refresh queued on enter\n");
 
     ui_Wallpaper = ui_create_screen_base();
     s_wallpaper_refs.image_card = ui_create_card(ui_Wallpaper, 0, 0, 528, 792, UI_SCREEN_NONE, false, 0);
@@ -1276,7 +1298,7 @@ void ui_Wallpaper_screen_destroy(void)
     }
 
     s_wallpaper_force_full_refresh_pending = false;
-    rt_kprintf("wallpaper: full refresh request on exit\n");
+    UI_EPD_REFRESH_LOG("wallpaper: full refresh request on exit\n");
     lcd_request_epd_force_full_refresh_once();
 
     memset(&s_wallpaper_refs, 0, sizeof(s_wallpaper_refs));

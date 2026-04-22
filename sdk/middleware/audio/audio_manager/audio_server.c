@@ -124,6 +124,9 @@ static uint8_t current_play_status;
 static uint8_t g_tws_volume = AUDIO_MAX_VOLUME;
 static uint8_t g_tws_volume_relative;
 #define g_hardware_mix_enable    0 //mix is left + right, make big volume
+#ifndef MIX_STEREO_TO_MONO
+#define MIX_STEREO_TO_MONO       1
+#endif
 
 enum
 {
@@ -3858,7 +3861,8 @@ put_raw:
     }
 #if MIX_STEREO_TO_MONO
     /*mix left & right channel for single speaker*/
-    if (handle->parameter.write_channnel_num == 2)
+    if (handle->device_using == AUDIO_DEVICE_SPEAKER &&
+            handle->parameter.write_channnel_num == 2)
     {
         int16_t *p = (int16_t *)data;
         int16_t left, right;

@@ -8,6 +8,7 @@
 #include <rtthread.h>
 #include <rtdevice.h>
 #include <string.h>
+#include <stdint.h>
 #include "board.h"
 #include "drv_config.h"
 #include "stdlib.h"
@@ -22,6 +23,33 @@
 __WEAK uint8_t get_factory_mode_status(void)
 {
     return 0;
+}
+
+__WEAK void *audio_mem_calloc(uint32_t count, uint32_t size)
+{
+    return rt_calloc(count, size);
+}
+
+__WEAK void audio_mem_free(void *ptr)
+{
+    rt_free(ptr);
+}
+
+static void *audprc_buf_calloc(rt_size_t size)
+{
+    /*
+     * AUDPRC channel buffers are consumed directly by audio DMA/hardware.
+     * Do not route these buffers to the application PSRAM audio heap: cached
+     * PSRAM can produce corrupted playback data on continuous TX, which shows
+     * up as severe noise. Keep only these low-level DMA buffers on the normal
+     * RT heap; higher-level decoder/cache buffers may still use audio_mem_*.
+     */
+    return rt_calloc(1U, size);
+}
+
+static void audprc_buf_free(void *ptr)
+{
+    rt_free(ptr);
 }
 #define AUDPRC_ADC_VOLUME       (0)
 #define AUDPRC_MIN_VOLUME       (-18)
@@ -844,7 +872,7 @@ static rt_err_t bf0_audio_configure(struct rt_audio_device *audio, struct rt_aud
 #ifdef BSP_AUDPRC_TX_OUT0_DMA
             if (haudprc->buf[HAL_AUDPRC_TX_OUT_CH0] == NULL)
             {
-                haudprc->buf[HAL_AUDPRC_TX_OUT_CH0] = calloc(1, haudprc->bufRxSize);
+                haudprc->buf[HAL_AUDPRC_TX_OUT_CH0] = audprc_buf_calloc(haudprc->bufRxSize);
                 RT_ASSERT(haudprc->buf[HAL_AUDPRC_TX_OUT_CH0]);
                 if (haudprc->buf[HAL_AUDPRC_TX_OUT_CH0] == NULL)
                     return RT_ERROR_MEMFAULT;
@@ -870,7 +898,7 @@ static rt_err_t bf0_audio_configure(struct rt_audio_device *audio, struct rt_aud
 #ifdef BSP_AUDPRC_TX_OUT1_DMA
             if (haudprc->buf[HAL_AUDPRC_TX_OUT_CH1] == NULL)
             {
-                haudprc->buf[HAL_AUDPRC_TX_OUT_CH1] = calloc(1, haudprc->bufRxSize);
+                haudprc->buf[HAL_AUDPRC_TX_OUT_CH1] = audprc_buf_calloc(haudprc->bufRxSize);
                 RT_ASSERT(haudprc->buf[HAL_AUDPRC_TX_OUT_CH1]);
                 if (haudprc->buf[HAL_AUDPRC_TX_OUT_CH1] == NULL)
                     return RT_ERROR_MEMFAULT;
@@ -910,10 +938,10 @@ static rt_err_t bf0_audio_configure(struct rt_audio_device *audio, struct rt_aud
 #ifdef BSP_AUDPRC_TX0_DMA
             if (haudprc->buf[HAL_AUDPRC_TX_CH0])
             {
-                free(haudprc->buf[HAL_AUDPRC_TX_CH0]);
+                audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH0]);
             }
 
-            haudprc->buf[HAL_AUDPRC_TX_CH0] = calloc(1, haudprc->bufTxSize);
+            haudprc->buf[HAL_AUDPRC_TX_CH0] = audprc_buf_calloc(haudprc->bufTxSize);
             RT_ASSERT(haudprc->buf[HAL_AUDPRC_TX_CH0]);
             if (haudprc->buf[HAL_AUDPRC_TX_CH0] == NULL)
                 return RT_ERROR_MEMFAULT;
@@ -938,10 +966,10 @@ static rt_err_t bf0_audio_configure(struct rt_audio_device *audio, struct rt_aud
 #ifdef BSP_AUDPRC_TX1_DMA
             if (haudprc->buf[HAL_AUDPRC_TX_CH1])
             {
-                free(haudprc->buf[HAL_AUDPRC_TX_CH1]);
+                audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH1]);
             }
 
-            haudprc->buf[HAL_AUDPRC_TX_CH1] = calloc(1, haudprc->bufTxSize);
+            haudprc->buf[HAL_AUDPRC_TX_CH1] = audprc_buf_calloc(haudprc->bufTxSize);
             RT_ASSERT(haudprc->buf[HAL_AUDPRC_TX_CH1]);
             if (haudprc->buf[HAL_AUDPRC_TX_CH1] == NULL)
                 return RT_ERROR_MEMFAULT;
@@ -967,10 +995,10 @@ static rt_err_t bf0_audio_configure(struct rt_audio_device *audio, struct rt_aud
 #ifdef BSP_AUDPRC_TX2_DMA
             if (haudprc->buf[HAL_AUDPRC_TX_CH2])
             {
-                free(haudprc->buf[HAL_AUDPRC_TX_CH2]);
+                audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH2]);
             }
 
-            haudprc->buf[HAL_AUDPRC_TX_CH2] = calloc(1, haudprc->bufTxSize);
+            haudprc->buf[HAL_AUDPRC_TX_CH2] = audprc_buf_calloc(haudprc->bufTxSize);
             RT_ASSERT(haudprc->buf[HAL_AUDPRC_TX_CH2]);
             if (haudprc->buf[HAL_AUDPRC_TX_CH2] == NULL)
                 return RT_ERROR_MEMFAULT;
@@ -996,10 +1024,10 @@ static rt_err_t bf0_audio_configure(struct rt_audio_device *audio, struct rt_aud
 #ifdef BSP_AUDPRC_TX3_DMA
             if (haudprc->buf[HAL_AUDPRC_TX_CH3])
             {
-                free(haudprc->buf[HAL_AUDPRC_TX_CH3]);
+                audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH3]);
             }
 
-            haudprc->buf[HAL_AUDPRC_TX_CH3] = calloc(1, haudprc->bufTxSize);
+            haudprc->buf[HAL_AUDPRC_TX_CH3] = audprc_buf_calloc(haudprc->bufTxSize);
             RT_ASSERT(haudprc->buf[HAL_AUDPRC_TX_CH3]);
             if (haudprc->buf[HAL_AUDPRC_TX_CH3] == NULL)
                 return RT_ERROR_MEMFAULT;
@@ -1248,7 +1276,7 @@ static rt_err_t bf0_audio_shutdown(struct rt_audio_device *audio)
 #ifdef BSP_AUDPRC_TX0_DMA
     if (haudprc->buf[HAL_AUDPRC_TX_CH0] != NULL)
     {
-        free(haudprc->buf[HAL_AUDPRC_TX_CH0]);
+        audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH0]);
         haudprc->buf[HAL_AUDPRC_TX_CH0] = NULL;
     }
 #endif
@@ -1256,14 +1284,14 @@ static rt_err_t bf0_audio_shutdown(struct rt_audio_device *audio)
 #ifdef BSP_AUDPRC_TX1_DMA
     if (haudprc->buf[HAL_AUDPRC_TX_CH1] != NULL)
     {
-        free(haudprc->buf[HAL_AUDPRC_TX_CH1]);
+        audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH1]);
         haudprc->buf[HAL_AUDPRC_TX_CH1] = NULL;
     }
 #endif
 #ifdef BSP_AUDPRC_TX2_DMA
     if (haudprc->buf[HAL_AUDPRC_TX_CH2] != NULL)
     {
-        free(haudprc->buf[HAL_AUDPRC_TX_CH2]);
+        audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH2]);
         haudprc->buf[HAL_AUDPRC_TX_CH2] = NULL;
     }
 #endif
@@ -1271,7 +1299,7 @@ static rt_err_t bf0_audio_shutdown(struct rt_audio_device *audio)
 #ifdef BSP_AUDPRC_TX3_DMA
     if (haudprc->buf[HAL_AUDPRC_TX_CH3] != NULL)
     {
-        free(haudprc->buf[HAL_AUDPRC_TX_CH3]);
+        audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH3]);
         haudprc->buf[HAL_AUDPRC_TX_CH3] = NULL;
     }
 #endif
@@ -1279,7 +1307,7 @@ static rt_err_t bf0_audio_shutdown(struct rt_audio_device *audio)
 #ifdef BSP_AUDPRC_RX0_DMA
     if (haudprc->buf[HAL_AUDPRC_RX_CH0] != NULL)
     {
-        free(haudprc->buf[HAL_AUDPRC_RX_CH0]);
+        audprc_buf_free(haudprc->buf[HAL_AUDPRC_RX_CH0]);
         haudprc->buf[HAL_AUDPRC_RX_CH0] = NULL;
     }
 #endif
@@ -1287,7 +1315,7 @@ static rt_err_t bf0_audio_shutdown(struct rt_audio_device *audio)
 #ifdef BSP_AUDPRC_RX1_DMA
     if (haudprc->buf[HAL_AUDPRC_RX_CH1] != NULL)
     {
-        free(haudprc->buf[HAL_AUDPRC_RX_CH1]);
+        audprc_buf_free(haudprc->buf[HAL_AUDPRC_RX_CH1]);
         haudprc->buf[HAL_AUDPRC_RX_CH1] = NULL;
     }
 #endif
@@ -1295,7 +1323,7 @@ static rt_err_t bf0_audio_shutdown(struct rt_audio_device *audio)
 #ifdef BSP_AUDPRC_TX_OUT0_DMA
     if (haudprc->buf[HAL_AUDPRC_TX_OUT_CH0] != NULL)
     {
-        free(haudprc->buf[HAL_AUDPRC_TX_OUT_CH0]);
+        audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_OUT_CH0]);
         haudprc->buf[HAL_AUDPRC_TX_OUT_CH0] = NULL;
     }
 #endif
@@ -1303,7 +1331,7 @@ static rt_err_t bf0_audio_shutdown(struct rt_audio_device *audio)
 #ifdef BSP_AUDPRC_TX_OUT1_DMA
     if (haudprc->buf[HAL_AUDPRC_TX_OUT_CH1] != NULL)
     {
-        free(haudprc->buf[HAL_AUDPRC_TX_OUT_CH1]);
+        audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_OUT_CH1]);
         haudprc->buf[HAL_AUDPRC_TX_OUT_CH1] = NULL;
     }
 #endif
@@ -1559,7 +1587,7 @@ static rt_err_t bf0_audio_stop(struct rt_audio_device *audio, int stream)
             haudprc->channel_ref &= ~(1 << HAL_AUDPRC_TX_CH0);
             if (haudprc->buf[HAL_AUDPRC_TX_CH0])
             {
-                free(haudprc->buf[HAL_AUDPRC_TX_CH0]);
+                audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH0]);
                 haudprc->buf[HAL_AUDPRC_TX_CH0] = NULL;
             }
         }
@@ -1574,7 +1602,7 @@ static rt_err_t bf0_audio_stop(struct rt_audio_device *audio, int stream)
             haudprc->channel_ref &= ~(1 << HAL_AUDPRC_TX_CH1);
             if (haudprc->buf[HAL_AUDPRC_TX_CH1])
             {
-                free(haudprc->buf[HAL_AUDPRC_TX_CH1]);
+                audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH1]);
                 haudprc->buf[HAL_AUDPRC_TX_CH1] = NULL;
             }
         }
@@ -1589,7 +1617,7 @@ static rt_err_t bf0_audio_stop(struct rt_audio_device *audio, int stream)
             haudprc->channel_ref &= ~(1 << HAL_AUDPRC_TX_CH2);
             if (haudprc->buf[HAL_AUDPRC_TX_CH2])
             {
-                free(haudprc->buf[HAL_AUDPRC_TX_CH2]);
+                audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH2]);
                 haudprc->buf[HAL_AUDPRC_TX_CH2] = NULL;
             }
         }
@@ -1604,7 +1632,7 @@ static rt_err_t bf0_audio_stop(struct rt_audio_device *audio, int stream)
             haudprc->channel_ref &= ~(1 << HAL_AUDPRC_TX_CH3);
             if (haudprc->buf[HAL_AUDPRC_TX_CH3])
             {
-                free(haudprc->buf[HAL_AUDPRC_TX_CH3]);
+                audprc_buf_free(haudprc->buf[HAL_AUDPRC_TX_CH3]);
                 haudprc->buf[HAL_AUDPRC_TX_CH3] = NULL;
             }
         }

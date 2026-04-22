@@ -44,6 +44,7 @@ typedef struct
     uint8_t aw_fault_status;
     int bt_visual_state;
     int network_visual_state;
+    net_manager_mode_t desired_mode;
     net_manager_link_t active_link;
     bool bt_enabled;
     bool net_4g_enabled;
@@ -349,6 +350,7 @@ static void ui_status_bar_capture_snapshot(ui_status_bar_snapshot_t *snapshot)
     }
 
     snapshot->bt_visual_state = (int)ui_status_bar_get_bluetooth_state();
+    snapshot->desired_mode = net_manager_get_desired_mode();
     snapshot->active_link = net_manager_get_active_link();
     snapshot->bt_enabled = net_manager_bt_enabled();
     snapshot->net_4g_enabled = net_manager_4g_enabled();
@@ -358,9 +360,23 @@ static void ui_status_bar_capture_snapshot(ui_status_bar_snapshot_t *snapshot)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "在线");
     }
-    else if (snapshot->net_4g_enabled)
+    else if (snapshot->active_link == NET_MANAGER_LINK_4G_CAT1)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s", cat1_detail);
+    }
+    else if (snapshot->desired_mode == NET_MANAGER_MODE_BT)
+    {
+        rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s",
+                    snapshot->bt_enabled ? "蓝牙" : "蓝牙关闭");
+    }
+    else if (snapshot->desired_mode == NET_MANAGER_MODE_4G)
+    {
+        rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s",
+                    snapshot->net_4g_enabled ? cat1_detail : "4G关闭");
+    }
+    else if (snapshot->desired_mode == NET_MANAGER_MODE_SLEEP)
+    {
+        rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "睡眠");
     }
     else
     {
@@ -391,6 +407,7 @@ static bool ui_status_bar_snapshot_equal(const ui_status_bar_snapshot_t *lhs,
            lhs->aw_fault_status == rhs->aw_fault_status &&
            lhs->bt_visual_state == rhs->bt_visual_state &&
            lhs->network_visual_state == rhs->network_visual_state &&
+           lhs->desired_mode == rhs->desired_mode &&
            lhs->active_link == rhs->active_link &&
            lhs->bt_enabled == rhs->bt_enabled &&
            lhs->net_4g_enabled == rhs->net_4g_enabled &&
@@ -507,27 +524,12 @@ static void ui_status_bar_refresh_datetime(void)
 
 static void ui_status_bar_refresh_connection_icons(bool force)
 {
-    net_manager_link_t active_link = net_manager_get_active_link();
-    bool bt_enabled = net_manager_bt_enabled();
-    bool net_4g_enabled = net_manager_4g_enabled();
-    char cat1_detail[16];
-    const char *network_text = NULL;
+    const ui_status_bar_snapshot_t *snapshot = &s_status_bar_snapshot;
+    net_manager_link_t active_link = snapshot->active_link;
+    bool bt_enabled = snapshot->bt_enabled;
+    bool net_4g_enabled = snapshot->net_4g_enabled;
+    const char *network_text = snapshot->network_detail;
     size_t i;
-
-    ui_status_bar_get_cat1_visual_state(cat1_detail, sizeof(cat1_detail));
-
-    if (active_link == NET_MANAGER_LINK_BT_PAN)
-    {
-        network_text = "在线";
-    }
-    else if (net_4g_enabled)
-    {
-        network_text = cat1_detail;
-    }
-    else
-    {
-        network_text = "关闭";
-    }
 
     if (!force &&
         s_status_last_bt_icon_state == (bt_enabled ? 1 : 0) &&
@@ -566,7 +568,8 @@ static void ui_status_bar_refresh_connection_icons(bool force)
             ui_img_set_src(refs->network_icon, &network_icon_img);
             ui_status_bar_set_object_hidden(refs->network_icon, false);
             lv_obj_set_style_opa(refs->network_icon,
-                                 (active_link == NET_MANAGER_LINK_BT_PAN || net_4g_enabled) ? LV_OPA_COVER : LV_OPA_50,
+                                 (active_link == NET_MANAGER_LINK_BT_PAN ||
+                                  active_link == NET_MANAGER_LINK_4G_CAT1) ? LV_OPA_COVER : LV_OPA_50,
                                  0);
         }
 
@@ -1052,7 +1055,8 @@ void ui_status_bar_component_update_charge(uint8_t is_charging)
 {
     int pending = is_charging ? 1 : 0;
 
-    if (s_status_pending_charge == pending)
+    if (s_status_pending_charge == pending ||
+        (s_status_pending_charge < 0 && s_status_applied_charge == pending))
     {
         return;
     }
@@ -1068,7 +1072,9 @@ void ui_status_bar_component_update_battery_percent(uint8_t percent)
         percent = 100U;
     }
 
-    if (s_status_pending_battery_percent == (int)percent)
+    if (s_status_pending_battery_percent == (int)percent ||
+        (s_status_pending_battery_percent < 0 &&
+         s_status_applied_battery_percent == (int)percent))
     {
         return;
     }

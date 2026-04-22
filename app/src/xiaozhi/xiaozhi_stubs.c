@@ -62,7 +62,7 @@ void xiaozhi_ui_tts_output(const char* text)
     }
 }
 void xiaozhi_ui_reinit_audio(void) {}
-void xiaozhi_ui_update_confirm_button_event(int event) { (void)event; }
+void xiaozhi_ui_update_confirm_button_event(_Bool event) { (void)event; }
 void xiaozhi_ui_update_ble(const char* status) { (void)status; }
 void xiaozhi_ui_update_latest_version(char *version)
 {

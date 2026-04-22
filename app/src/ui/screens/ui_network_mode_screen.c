@@ -72,14 +72,14 @@ static const char *ui_network_mode_status_text(const net_manager_snapshot_t *sna
 
     if (snapshot->desired_mode == NET_MANAGER_MODE_BT)
     {
-        if (!snapshot->bt_enabled || snapshot->net_4g_enabled)
-        {
-            return ui_i18n_pick("切换中", "Switching");
-        }
-
         if (snapshot->active_link == NET_MANAGER_LINK_BT_PAN)
         {
             return ui_i18n_pick("蓝牙网络已连接", "Bluetooth connected");
+        }
+
+        if (!snapshot->bt_enabled)
+        {
+            return ui_i18n_pick("切换中", "Switching");
         }
 
         if (snapshot->bt_connected)
@@ -92,15 +92,14 @@ static const char *ui_network_mode_status_text(const net_manager_snapshot_t *sna
 
     if (snapshot->desired_mode == NET_MANAGER_MODE_4G)
     {
-        if (!snapshot->net_4g_enabled || snapshot->bt_enabled)
-        {
-            return ui_i18n_pick("切换中", "Switching");
-        }
-
-        if (snapshot->active_link == NET_MANAGER_LINK_4G_CAT1 ||
-            snapshot->network_ready)
+        if (snapshot->active_link == NET_MANAGER_LINK_4G_CAT1)
         {
             return ui_i18n_pick("4G已联网", "4G online");
+        }
+
+        if (!snapshot->net_4g_enabled)
+        {
+            return ui_i18n_pick("切换中", "Switching");
         }
 
         return ui_i18n_pick("4G启动中", "Starting 4G");

@@ -53,10 +53,13 @@ void net_manager_request_4g_mode(void);
 void net_manager_request_none_mode(void);
 void net_manager_suspend_for_sleep(void);
 void net_manager_resume_after_wake(void);
+void net_manager_notify_bt_event(rt_uint16_t type, rt_uint16_t event_id,
+                                 rt_uint8_t *data, rt_uint16_t data_len);
 void net_manager_notify_bt_stack_ready(bool ready);
 void net_manager_notify_bt_acl(bool connected);
 void net_manager_notify_pan_ready(bool ready);
 void net_manager_notify_cat1_ready(bool ready);
+void net_manager_handle_bt_mailbox_event(rt_uint32_t bt_event);
 
 bool net_manager_bt_enabled(void);
 bool net_manager_bt_connected(void);

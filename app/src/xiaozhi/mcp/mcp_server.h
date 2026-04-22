@@ -2,6 +2,7 @@
 #define MCP_SERVER_H
 
 #include <rtthread.h>
+#include <string>
 #include <string.h>
 #include <vector>
 #include <map>
@@ -10,10 +11,32 @@
 #include <optional>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <cJSON.h>
 
 // 添加类型别名
 using ReturnValue = std::variant<bool, int, std::string>;
+
+inline std::string& McpCallErrorMessage() {
+    static std::string error;
+    return error;
+}
+
+inline void McpClearCallError() {
+    McpCallErrorMessage().clear();
+}
+
+inline void McpSetCallError(const std::string& error) {
+    if (!error.empty()) {
+        McpCallErrorMessage() = error;
+    }
+}
+
+inline std::string McpTakeCallError() {
+    std::string error = McpCallErrorMessage();
+    McpClearCallError();
+    return error;
+}
 
 enum PropertyType {
     kPropertyTypeBoolean,
@@ -29,6 +52,22 @@ private:
     bool has_default_value_;
     std::optional<int> min_value_;  // 新增：整数最小值
     std::optional<int> max_value_;  // 新增：整数最大值
+
+    static const char* ErrorPrefix() {
+        return "__mcp_internal_error__:";
+    }
+
+    static bool StartsWith(const std::string& value, const char* prefix) {
+        const std::string prefix_str(prefix);
+        return value.compare(0, prefix_str.size(), prefix_str) == 0;
+    }
+
+    bool SetTypeError(const char* expected_type) {
+        std::string message = "Property " + name_ + " does not accept " + expected_type;
+        rt_kprintf("%s", message.c_str());
+        SetError(message);
+        return false;
+    }
 
 public:
     // Required field constructor
@@ -46,7 +85,12 @@ public:
         : name_(name), type_(type), has_default_value_(false), min_value_(min_value), max_value_(max_value) {
         if (type != kPropertyTypeInteger) {
             rt_kprintf("Error: Range limits only apply to integer properties");
-            RT_ASSERT(0); 
+            min_value_.reset();
+            max_value_.reset();
+        } else if (min_value > max_value) {
+            rt_kprintf("Error: Invalid integer property range");
+            min_value_ = max_value;
+            max_value_ = min_value;
         }
     }
 
@@ -54,11 +98,25 @@ public:
         : name_(name), type_(type), has_default_value_(true), min_value_(min_value), max_value_(max_value) {
         if (type != kPropertyTypeInteger) {
             rt_kprintf("Range limits only apply to integer properties");
-            RT_ASSERT(0); 
+            has_default_value_ = false;
+            min_value_.reset();
+            max_value_.reset();
+            return;
         }
-        if (default_value < min_value || default_value > max_value) {
+        if (min_value > max_value) {
+            rt_kprintf("Invalid integer property range");
+            min_value_ = max_value;
+            max_value_ = min_value;
+        }
+        if (default_value < min_value_.value()) {
             rt_kprintf("Default value must be within the specified range");
-            RT_ASSERT(0); 
+            value_ = min_value_.value();
+            return;
+        }
+        if (default_value > max_value_.value()) {
+            rt_kprintf("Default value must be within the specified range");
+            value_ = max_value_.value();
+            return;
         }
         value_ = default_value;
     }
@@ -71,25 +129,77 @@ public:
     inline int min_value() const { return min_value_.value_or(0); }
     inline int max_value() const { return max_value_.value_or(0); }
 
+    inline void SetError(const std::string& message) {
+        value_ = std::string(ErrorPrefix()) + message;
+    }
+
+    inline bool has_error() const {
+        if (!std::holds_alternative<std::string>(value_)) {
+            return false;
+        }
+        const std::string& value = std::get<std::string>(value_);
+        return StartsWith(value, ErrorPrefix());
+    }
+
+    inline std::string error_message() const {
+        if (!has_error()) {
+            return "";
+        }
+        const std::string& value = std::get<std::string>(value_);
+        return value.substr(std::string(ErrorPrefix()).size());
+    }
+
     template<typename T>
     inline T value() const {
-        return std::get<T>(value_);
+        if (has_error()) {
+            McpSetCallError(error_message());
+            return T();
+        }
+        if (const auto* typed_value = std::get_if<T>(&value_)) {
+            return *typed_value;
+        }
+        std::string message = "Property " + name_ + " has invalid value type";
+        rt_kprintf("%s", message.c_str());
+        McpSetCallError(message);
+        return T();
+    }
+
+    template<typename T>
+    inline bool TrySetValue(const T& value) {
+        if constexpr (std::is_same_v<T, bool>) {
+            if (type_ != kPropertyTypeBoolean) {
+                return SetTypeError("boolean");
+            }
+        } else if constexpr (std::is_same_v<T, int>) {
+            if (type_ != kPropertyTypeInteger) {
+                return SetTypeError("integer");
+            }
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            if (type_ != kPropertyTypeString) {
+                return SetTypeError("string");
+            }
+        }
+        if constexpr (std::is_same_v<T, int>) {
+            if (min_value_.has_value() && value < min_value_.value()) {
+                std::string message = "Property " + name_ + " is below minimum allowed: " + std::to_string(min_value_.value());
+                rt_kprintf("%s", message.c_str());
+                SetError(message);
+                return false;
+            }
+            if (max_value_.has_value() && value > max_value_.value()) {
+                std::string message = "Property " + name_ + " exceeds maximum allowed: " + std::to_string(max_value_.value());
+                rt_kprintf("%s", message.c_str());
+                SetError(message);
+                return false;
+            }
+        }
+        value_ = value;
+        return true;
     }
 
     template<typename T>
     inline void set_value(const T& value) {
-        // 添加对设置的整数值进行范围检查
-        if constexpr (std::is_same_v<T, int>) {
-            if (min_value_.has_value() && value < min_value_.value()) {
-                rt_kprintf("Value is below minimum allowed: %d", min_value_.value());
-                RT_ASSERT(0); 
-            }
-            if (max_value_.has_value() && value > max_value_.value()) {
-                rt_kprintf("Value exceeds maximum allowed: %d" ,max_value_.value());
-                RT_ASSERT(0); 
-            }
-        }
-        value_ = value;
+        (void)TrySetValue<T>(value);
     }
 
     std::string to_json() const {
@@ -144,14 +254,25 @@ public:
                 return property;
             }
         }
-        rt_kprintf("Property not found: %s", name.c_str());
-        RT_ASSERT(0);
-        static Property empty("", kPropertyTypeString);
-        return empty; // 返回一个空的 Property 对象, 实际不会走到这里, 被assert拦住了 
+        std::string message = "Property not found: " + name;
+        rt_kprintf("%s", message.c_str());
+        McpSetCallError(message);
+        static Property empty("__mcp_error__", kPropertyTypeString);
+        empty.SetError(message);
+        return empty;
     }
 
     auto begin() { return properties_.begin(); }
     auto end() { return properties_.end(); }
+
+    std::string GetErrorMessage() const {
+        for (const auto& property : properties_) {
+            if (property.has_error()) {
+                return property.error_message();
+            }
+        }
+        return "";
+    }
 
     std::vector<std::string> GetRequired() const {
         std::vector<std::string> required;
@@ -186,6 +307,34 @@ private:
     std::string description_;
     PropertyList properties_;
     std::function<ReturnValue(const PropertyList&)> callback_;
+
+    static std::string ReturnValueToText(const ReturnValue& return_value) {
+        if (std::holds_alternative<std::string>(return_value)) {
+            return std::get<std::string>(return_value);
+        } else if (std::holds_alternative<bool>(return_value)) {
+            return std::get<bool>(return_value) ? "true" : "false";
+        } else if (std::holds_alternative<int>(return_value)) {
+            return std::to_string(std::get<int>(return_value));
+        }
+        return "";
+    }
+
+    static std::string MakeCallResult(const std::string& text_value, bool is_error) {
+        cJSON* result = cJSON_CreateObject();
+        cJSON* content = cJSON_CreateArray();
+        cJSON* text = cJSON_CreateObject();
+        cJSON_AddStringToObject(text, "type", "text");
+        cJSON_AddStringToObject(text, "text", text_value.c_str());
+        cJSON_AddItemToArray(content, text);
+        cJSON_AddItemToObject(result, "content", content);
+        cJSON_AddBoolToObject(result, "isError", is_error);
+
+        auto json_str = cJSON_PrintUnformatted(result);
+        std::string result_str(json_str);
+        cJSON_free(json_str);
+        cJSON_Delete(result);
+        return result_str;
+    }
 
 public:
     McpTool(const std::string& name, 
@@ -233,28 +382,18 @@ public:
     }
 
     std::string Call(const PropertyList& properties) {
-        ReturnValue return_value = callback_(properties);
-        // 返回结果
-        cJSON* result = cJSON_CreateObject();
-        cJSON* content = cJSON_CreateArray();
-        cJSON* text = cJSON_CreateObject();
-        cJSON_AddStringToObject(text, "type", "text");
-        if (std::holds_alternative<std::string>(return_value)) {
-            cJSON_AddStringToObject(text, "text", std::get<std::string>(return_value).c_str());
-        } else if (std::holds_alternative<bool>(return_value)) {
-            cJSON_AddStringToObject(text, "text", std::get<bool>(return_value) ? "true" : "false");
-        } else if (std::holds_alternative<int>(return_value)) {
-            cJSON_AddStringToObject(text, "text", std::to_string(std::get<int>(return_value)).c_str());
+        std::string validation_error = properties.GetErrorMessage();
+        if (!validation_error.empty()) {
+            return MakeCallResult(validation_error, true);
         }
-        cJSON_AddItemToArray(content, text);
-        cJSON_AddItemToObject(result, "content", content);
-        cJSON_AddBoolToObject(result, "isError", false);
 
-        auto json_str = cJSON_PrintUnformatted(result);
-        std::string result_str(json_str);
-        cJSON_free(json_str);
-        cJSON_Delete(result);
-        return result_str;
+        McpClearCallError();
+        ReturnValue return_value = callback_(properties);
+        std::string call_error = McpTakeCallError();
+        if (!call_error.empty()) {
+            return MakeCallResult(call_error, true);
+        }
+        return MakeCallResult(ReturnValueToText(return_value), false);
     }
 };
 

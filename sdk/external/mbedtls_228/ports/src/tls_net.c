@@ -132,6 +132,11 @@ static int wsa_init_done = 0;
 #include "lwip/sockets.h"
 #endif
 
+#define HIVETON_NET_CONNECT_TIMEOUT_MS 10000
+
+int net_set_block(int fd);
+int net_set_nonblock(int fd);
+
 /*
  * Prepare for using the sockets interface
  */
@@ -196,14 +201,53 @@ int mbedtls_net_connect( mbedtls_net_context *ctx, const char *host, const char 
             continue;
         }
 
-        if( connect( ctx->fd, cur->ai_addr, MSVC_INT_CAST cur->ai_addrlen ) == 0 )
+        if( proto == MBEDTLS_NET_PROTO_TCP )
+            net_set_nonblock( ctx->fd );
+
+        ret = connect( ctx->fd, cur->ai_addr, MSVC_INT_CAST cur->ai_addrlen );
+        if( ret == 0 )
         {
+            if( proto == MBEDTLS_NET_PROTO_TCP )
+                net_set_block( ctx->fd );
             ret = 0;
             break;
         }
 
+        if( proto == MBEDTLS_NET_PROTO_TCP &&
+            ( errno == EINPROGRESS || errno == EWOULDBLOCK || errno == EALREADY ) )
+        {
+            fd_set write_fds;
+            struct timeval tv;
+            int err = 0;
+            socklen_t err_len = sizeof( err );
+
+            FD_ZERO( &write_fds );
+            FD_SET( ctx->fd, &write_fds );
+            tv.tv_sec = HIVETON_NET_CONNECT_TIMEOUT_MS / 1000;
+            tv.tv_usec = ( HIVETON_NET_CONNECT_TIMEOUT_MS % 1000 ) * 1000;
+
+            ret = select( ctx->fd + 1, NULL, &write_fds, NULL, &tv );
+            if( ret > 0 &&
+                getsockopt( ctx->fd, SOL_SOCKET, SO_ERROR,
+                            (void *) &err, &err_len ) == 0 &&
+                err == 0 )
+            {
+                net_set_block( ctx->fd );
+                ret = 0;
+                break;
+            }
+
+            if( ret == 0 )
+                ret = MBEDTLS_ERR_SSL_TIMEOUT;
+            else
+                ret = MBEDTLS_ERR_NET_CONNECT_FAILED;
+        }
+        else
+        {
+            ret = MBEDTLS_ERR_NET_CONNECT_FAILED;
+        }
+
         closesocket( ctx->fd );
-        ret = MBEDTLS_ERR_NET_CONNECT_FAILED;
     }
 
     freeaddrinfo( addr_list );
@@ -664,5 +708,4 @@ void mbedtls_net_free( mbedtls_net_context *ctx )
     closesocket( ctx->fd );
     ctx->fd = -1;
 }
-
 

@@ -33,15 +33,32 @@ static struct rt_color rgb_color_arry[] =
 // RGB LED控制类
 class RGBLEDController {
 public:
-    RGBLEDController() {
+    RGBLEDController() : rgbled_device_(RT_NULL) {
         Init();
     }
 
-    void SetColor(uint32_t color) {
+    bool IsAvailable() const {
+        return rgbled_device_ != RT_NULL;
+    }
+
+    bool TrySetColor(uint32_t color) {
+        if (!IsAvailable()) {
+            rt_kprintf("RGB LED unavailable: device %s not found\n", RGBLED_NAME);
+            return false;
+        }
         struct rt_rgbled_configuration configuration;
         configuration.color_rgb = color;
         rt_kprintf("Setting RGB LED color: 0x%06X\n", color);
-        rt_device_control(rgbled_device_, PWM_CMD_SET_COLOR, &configuration);
+        rt_err_t result = rt_device_control(rgbled_device_, PWM_CMD_SET_COLOR, &configuration);
+        if (result != RT_EOK) {
+            rt_kprintf("RGB LED set color failed: %d\n", result);
+            return false;
+        }
+        return true;
+    }
+
+    void SetColor(uint32_t color) {
+        (void)TrySetColor(color);
     }
 
 private:
@@ -61,10 +78,13 @@ private:
 #endif
         rgbled_device_ = rt_device_find(RGBLED_NAME); //find rgb
         if (!rgbled_device_) {
-            RT_ASSERT(0);
+            rt_kprintf("RGB LED device %s not found, RGB LED MCP tool unavailable\n", RGBLED_NAME);
+            return;
         }
     }
 };
+
+RGBLEDController& GetRGBLEDController();
 
 class RGBLEDTool {
 public:
@@ -72,6 +92,11 @@ public:
     static bool is_color_cycling_;
     static void ColorCycleThreadEntry(void* param);
     static bool IsLightOn();  //灯光状态
+    static bool IsAvailable() { return GetRGBLEDController().IsAvailable(); }
+    static ReturnValue UnavailableReturnValue() {
+        McpSetCallError("rgbled device not found");
+        return std::string("rgbled device not found");
+    }
 };
 
 RGBLEDController& GetRGBLEDController();

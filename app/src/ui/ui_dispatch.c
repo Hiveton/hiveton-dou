@@ -1,5 +1,7 @@
 #include "ui_dispatch.h"
 
+#include <stdbool.h>
+
 #include "rtthread.h"
 #include "bf0_hal.h"
 #include "lvgl.h"
@@ -28,6 +30,7 @@
 static rt_event_t s_ui_dispatch_event = RT_NULL;
 static volatile ui_screen_id_t s_ui_active_screen = UI_SCREEN_NONE;
 static lv_obj_t *s_ui_poweroff_popup = NULL;
+static volatile bool s_ui_status_refresh_pending = false;
 
 static void ui_dispatch_poweroff_popup_close(void)
 {
@@ -209,6 +212,7 @@ void ui_dispatch_process_pending(void)
 
         if ((events & UI_DISPATCH_EVT_STATUS_REFRESH) != 0U)
         {
+            s_ui_status_refresh_pending = false;
             ui_refresh_global_status_bar();
         }
 
@@ -257,6 +261,17 @@ void ui_dispatch_request_activity(void)
 
 void ui_dispatch_request_status_refresh(void)
 {
+    if (s_ui_dispatch_event == RT_NULL)
+    {
+        return;
+    }
+
+    if (s_ui_status_refresh_pending)
+    {
+        return;
+    }
+
+    s_ui_status_refresh_pending = true;
     ui_dispatch_send(UI_DISPATCH_EVT_STATUS_REFRESH);
 }
 

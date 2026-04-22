@@ -323,7 +323,10 @@ bool music_service_toggle_playback(void)
 void music_service_stop(void)
 {
     music_service_close_player_only();
-    audio_release(AUDIO_OWNER_MUSIC);
+    if (audio_get_current_owner() == AUDIO_OWNER_MUSIC)
+    {
+        audio_release(AUDIO_OWNER_MUSIC);
+    }
 }
 
 bool music_service_is_playing(void)

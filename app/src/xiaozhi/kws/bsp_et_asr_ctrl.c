@@ -1,6 +1,8 @@
 #if 1 //ET_WAKEUP_EN
 
 #include <rtthread.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -19,6 +21,29 @@
 #include "xiaozhi_client_public.h"
 extern void  simulate_button_pressed();
 
+#ifndef ET_KWS_CTRL_LOG_EN
+#define ET_KWS_CTRL_LOG_EN 0
+#endif
+
+#ifndef ET_KWS_HOT_LOG_EN
+#define ET_KWS_HOT_LOG_EN 0
+#endif
+
+#ifndef ET_KWS_ERROR_LOG_EN
+#define ET_KWS_ERROR_LOG_EN 1
+#endif
+
+#ifndef ET_KWS_ERROR_LOG_INTERVAL_MS
+#define ET_KWS_ERROR_LOG_INTERVAL_MS 1000U
+#endif
+
+#define ET_KWS_CTRL_LOG(...) \
+    do { \
+        if (ET_KWS_CTRL_LOG_EN) { \
+            printf(__VA_ARGS__); \
+        } \
+    } while (0)
+
 #if 0
 extern void *et_res_file_open(char * path, int *length);
 extern int et_res_file_close(void *addr);
@@ -26,17 +51,37 @@ extern int et_res_file_close(void *addr);
 
 void et_kws_log_ext(const char *format, ...)
 {
+#if ET_KWS_HOT_LOG_EN
     va_list args;
     va_start(args, format);
     vprintf(format, args);
     va_end(args);
+#else
+    (void)format;
+#endif
+}
+
+static void et_kws_error_log_invalid_event(int event)
+{
+#if ET_KWS_ERROR_LOG_EN
+    static unsigned int s_last_log_ms = 0;
+    unsigned int now_ms = rt_tick_get_millisecond();
+
+    if (s_last_log_ms == 0 ||
+        (unsigned int)(now_ms - s_last_log_ms) >= ET_KWS_ERROR_LOG_INTERVAL_MS) {
+        s_last_log_ms = now_ms;
+        rt_kprintf("unknow event:%d\n", event);
+    }
+#else
+    (void)event;
+#endif
 }
 
 void et_func_kws_event(int event)
 {
     #if 1
     if(event <=0 || event >=255) {
-        rt_kprintf("unknow event:%d\n", event);
+        et_kws_error_log_invalid_event(event);
         return;
     }
     #else
@@ -44,10 +89,8 @@ void et_func_kws_event(int event)
         return;
     }
     #endif // 0
-    #if 1//ET_LOG_OPEN
-    printf("ctrl event:%d\n", event);
+    ET_KWS_CTRL_LOG("ctrl event:%d\n", event);
     simulate_button_pressed();
-    #endif // ET_LOG_OPEN
 #if 0
     if(youjie_offline_using_type_get() == 2)
     {
@@ -135,8 +178,8 @@ et_asr_kws_cfg_t et_kws_cfg;
 //#define ET_BIN_ET_KEYWORD_PATH   "/preset_user/yj/et_keyword.bin"
 void et_bsp_ctrl_main_init()
 {
-    printf("-et_bsp_ctrl_main_init(),start-\n");
-    printf("base[v:%s]\n", ET_SDK_BASE_VERSION);
+    ET_KWS_CTRL_LOG("-et_bsp_ctrl_main_init(),start-\n");
+    ET_KWS_CTRL_LOG("base[v:%s]\n", ET_SDK_BASE_VERSION);
 //    printf("ui[name:%s, v:%s]\n", ET_UI_PROJ_NAME, ET_UI_VERSION);
     memset(&et_kws_cfg,0,sizeof(et_asr_kws_cfg_t));
 	
@@ -168,7 +211,7 @@ void et_bsp_ctrl_main_init()
 #endif //ET_ASR_UI_VAD_TYPE
     
 	int ret = et_asr_wakeup_first_init(&et_kws_cfg, et_func_kws_event);
-	printf("init ret:%d\n", ret);
+	ET_KWS_CTRL_LOG("init ret:%d\n", ret);
 	
     //extern int clk_set(const char *name, int clk);
     if(is_et_soft_vad_en())
@@ -186,21 +229,21 @@ void et_bsp_ctrl_main_init()
     extern int yj_ui_get_mac(char *str, int len);
     char cj_mac_str[24] = {0};
     yj_ui_get_mac(cj_mac_str, sizeof(cj_mac_str));
-	printf("cj_mac_str:%s\n", cj_mac_str);
+	ET_KWS_CTRL_LOG("cj_mac_str:%s\n", cj_mac_str);
 #endif
-    printf("-et_bsp_ctrl_main_init(),end-\n");
+    ET_KWS_CTRL_LOG("-et_bsp_ctrl_main_init(),end-\n");
     //et_asr_file_test();
 }
 
 void et_bsp_ctrl_exit()
 {
-    printf("-et_bsp_ctrl_exit(),start-\n");
+    ET_KWS_CTRL_LOG("-et_bsp_ctrl_exit(),start-\n");
     et_stop_asr();
     et_asr_wakeup_exit();
 
 
 //    et_res_file_close(et_kws_cfg.keyFile);
-    printf("-et_bsp_ctrl_exit(),end-\n");
+    ET_KWS_CTRL_LOG("-et_bsp_ctrl_exit(),end-\n");
 }
 
 void *et_asr_sys_malloc(int size)

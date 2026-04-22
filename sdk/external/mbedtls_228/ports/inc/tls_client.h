@@ -26,6 +26,11 @@
 #include "mbedtls/entropy.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/certs.h"
+#include <stddef.h>
+
+void *hiveton_tls_malloc(size_t size);
+void *hiveton_tls_calloc(size_t count, size_t size);
+void hiveton_tls_free(void *ptr);
 
 typedef struct MbedTLSSession
 {

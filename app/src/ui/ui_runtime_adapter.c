@@ -57,9 +57,30 @@ static bool s_ui_runtime_back_suppress = false;
 #define UI_RUNTIME_VOLUME_MIN      0
 #define UI_RUNTIME_VOLUME_MAX      15
 
+#ifndef UI_RUNTIME_HEAP_LOG_VERBOSE
+#define UI_RUNTIME_HEAP_LOG_VERBOSE 0
+#endif
+
+#if UI_RUNTIME_HEAP_LOG_VERBOSE
+#define UI_RUNTIME_HEAP_LOG(...) rt_kprintf(__VA_ARGS__)
+#else
+#define UI_RUNTIME_HEAP_LOG(...) do { } while (0)
+#endif
+
+#ifndef UI_EPD_REFRESH_LOG_ENABLED
+#define UI_EPD_REFRESH_LOG_ENABLED 0
+#endif
+
+#if UI_EPD_REFRESH_LOG_ENABLED
+#define UI_EPD_REFRESH_LOG(...) rt_kprintf(__VA_ARGS__)
+#else
+#define UI_EPD_REFRESH_LOG(...) do { } while (0)
+#endif
+
 extern void xiaozhi_ui_update_volume(int volume);
 extern void ui_reading_detail_hardware_prev_page(void);
 extern void ui_reading_detail_hardware_next_page(void);
+extern void ui_reading_detail_request_leave_refresh(void);
 extern void ui_reading_list_hardware_prev_page(void);
 extern void ui_reading_list_hardware_next_page(void);
 extern void ui_record_list_hardware_prev_page(void);
@@ -82,19 +103,25 @@ static void ui_runtime_log_heap(const char *tag,
                                 ui_screen_id_t active_id,
                                 ui_screen_id_t target_id)
 {
+#if UI_RUNTIME_HEAP_LOG_VERBOSE
     rt_uint32_t total = 0U;
     rt_uint32_t used = 0U;
     rt_uint32_t max_used = 0U;
 
     rt_memory_info(&total, &used, &max_used);
-    rt_kprintf("ui_heap[%s]: active=%d target=%d total=%lu used=%lu free=%lu max=%lu\n",
-               tag != NULL ? tag : "na",
-               active_id,
-               target_id,
-               (unsigned long)total,
-               (unsigned long)used,
-               (unsigned long)(total >= used ? (total - used) : 0U),
-               (unsigned long)max_used);
+    UI_RUNTIME_HEAP_LOG("ui_heap[%s]: active=%d target=%d total=%lu used=%lu free=%lu max=%lu\n",
+                        tag != NULL ? tag : "na",
+                        active_id,
+                        target_id,
+                        (unsigned long)total,
+                        (unsigned long)used,
+                        (unsigned long)(total >= used ? (total - used) : 0U),
+                        (unsigned long)max_used);
+#else
+    (void)tag;
+    (void)active_id;
+    (void)target_id;
+#endif
 }
 
 static const ui_runtime_screen_entry_t *ui_runtime_find_entry_by_screen(lv_obj_t *screen)
@@ -139,6 +166,14 @@ static void ui_runtime_attach_delete_hook(lv_obj_t **screen_ref)
                         ui_runtime_screen_delete_event_cb,
                         LV_EVENT_DELETE,
                         screen_ref);
+}
+
+static void ui_runtime_notify_screen_leave(ui_screen_id_t active_id, ui_screen_id_t target_id)
+{
+    if (active_id == UI_SCREEN_READING_DETAIL && target_id != UI_SCREEN_READING_DETAIL)
+    {
+        ui_reading_detail_request_leave_refresh();
+    }
 }
 
 static const ui_runtime_screen_entry_t *ui_runtime_find_entry_by_id(ui_screen_id_t id)
@@ -418,7 +453,7 @@ void ui_runtime_switch_to(ui_screen_id_t target)
     {
         if (!s_ui_runtime_first_present_done)
         {
-            rt_kprintf("ui_switch: refreshing already-active first screen target=%d\n", entry->id);
+            UI_EPD_REFRESH_LOG("ui_switch: refreshing already-active first screen target=%d\n", entry->id);
             lv_obj_update_layout(*(entry->screen));
             lv_obj_invalidate(*(entry->screen));
             lv_refr_now(NULL);
@@ -438,12 +473,14 @@ void ui_runtime_switch_to(ui_screen_id_t target)
     LV_UNUSED(ui_screen_refs_get(target_screen));
     if (active_screen != target_screen)
     {
-        rt_kprintf("ui_switch: %d(%p) -> %d(%p) auto_del=%d\n",
-                   active_entry != NULL ? active_entry->id : UI_SCREEN_NONE,
-                   active_screen,
-                   entry->id,
-                   target_screen,
-                   0);
+        ui_runtime_notify_screen_leave(active_entry != NULL ? active_entry->id : UI_SCREEN_NONE,
+                                       entry->id);
+        UI_EPD_REFRESH_LOG("ui_switch: %d(%p) -> %d(%p) auto_del=%d\n",
+                           active_entry != NULL ? active_entry->id : UI_SCREEN_NONE,
+                           active_screen,
+                           entry->id,
+                           target_screen,
+                           0);
         lv_screen_load_anim(target_screen,
                             LV_SCR_LOAD_ANIM_NONE,
                             0,
@@ -465,7 +502,7 @@ void ui_runtime_switch_to(ui_screen_id_t target)
 
         if (!s_ui_runtime_first_present_done)
         {
-            rt_kprintf("ui_switch: forcing first screen refresh target=%d\n", entry->id);
+            UI_EPD_REFRESH_LOG("ui_switch: forcing first screen refresh target=%d\n", entry->id);
             lv_refr_now(NULL);
             s_ui_runtime_first_present_done = true;
         }
@@ -476,7 +513,7 @@ void ui_runtime_switch_to(ui_screen_id_t target)
     }
     else if (!s_ui_runtime_first_present_done)
     {
-        rt_kprintf("ui_switch: refreshing already-active first screen target=%d\n", entry->id);
+        UI_EPD_REFRESH_LOG("ui_switch: refreshing already-active first screen target=%d\n", entry->id);
         lv_obj_update_layout(target_screen);
         lv_obj_invalidate(target_screen);
         lv_refr_now(NULL);
@@ -525,11 +562,11 @@ void ui_runtime_reload(ui_screen_id_t target)
         return;
     }
 
-    rt_kprintf("ui_reload: %d(%p) -> %d(%p)\n",
-               active_entry->id,
-               active_screen,
-               entry->id,
-               target_screen);
+    UI_EPD_REFRESH_LOG("ui_reload: %d(%p) -> %d(%p)\n",
+                       active_entry->id,
+                       active_screen,
+                       entry->id,
+                       target_screen);
     lv_screen_load_anim(target_screen,
                         LV_SCR_LOAD_ANIM_NONE,
                         0,
@@ -565,7 +602,7 @@ void ui_runtime_go_back(void)
         target = UI_SCREEN_HOME;
     }
 
-    rt_kprintf("ui_back: active=%d target=%d\n", (int)active, (int)target);
+    UI_EPD_REFRESH_LOG("ui_back: active=%d target=%d\n", (int)active, (int)target);
     s_ui_runtime_back_suppress = true;
     ui_runtime_switch_to(target);
 }

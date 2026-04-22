@@ -136,6 +136,8 @@ struct webclient_session
 #ifdef WEBCLIENT_USING_MBED_TLS
     MbedTLSSession *tls_session;        /* mbedtls connect session */
 #endif
+    int timeout_ms;                     /* receive/send timeout in milliseconds */
+    rt_bool_t timeout_is_set;           /* custom timeout configured */
 };
 
 /* create webclient session and set header response size */

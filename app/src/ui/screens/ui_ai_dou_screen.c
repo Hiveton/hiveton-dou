@@ -130,6 +130,30 @@ static const char *ai_ui_network_status_text(net_manager_service_state_t net_sta
     return ai_ui_network_state_text(net_state);
 }
 
+static const char *ai_ui_network_wait_text(void)
+{
+    net_manager_service_state_t net_state = net_manager_get_service_state();
+
+    switch (net_state)
+    {
+    case NET_MANAGER_SERVICE_OFFLINE:
+        return ui_i18n_pick("4G正在重新联网，网络恢复后会自动连接小智。",
+                            "4G is reconnecting. Xiaozhi will connect automatically when the network recovers.");
+    case NET_MANAGER_SERVICE_RADIO_READY:
+        return ui_i18n_pick("4G模组已就绪，正在等待链路和DNS完成。",
+                            "4G modem is ready. Waiting for link and DNS.");
+    case NET_MANAGER_SERVICE_LINK_READY:
+        return ui_i18n_pick("4G链路已连接，正在等待DNS和互联网检测。",
+                            "4G link is connected. Waiting for DNS and internet check.");
+    case NET_MANAGER_SERVICE_DNS_READY:
+        return ui_i18n_pick("DNS已就绪，正在完成小智网络连接。",
+                            "DNS is ready. Finishing Xiaozhi network connection.");
+    default:
+        return ui_i18n_pick("网络正在准备，小智会在网络恢复后自动连接。",
+                            "Network is preparing. Xiaozhi will connect when it recovers.");
+    }
+}
+
 static void ai_set_label_if_changed(lv_obj_t *label,
                                     char *cache,
                                     size_t cache_size,
@@ -517,11 +541,22 @@ static void ai_talk_button_event_cb(lv_event_t *e)
     }
 
     s_stop_pending = false;
-    xiaozhi_service_start_listening();
+    if (xiaozhi_service_start_listening() != 0)
+    {
+        ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
+                                sizeof(s_ai_copy_cache),
+                                ui_i18n_pick("开始录音失败，正在重新连接小智...",
+                                             "Failed to start recording. Reconnecting Xiaozhi..."));
+        update_network_status();
+        return;
+    }
+
+    update_talk_button_text(XZ_SERVICE_LISTENING);
+    ai_set_label_if_changed(s_ai_mouth_label, s_ai_mouth_cache,
+                            sizeof(s_ai_mouth_cache), ui_i18n_pick("正在聆听", "Listening"));
+
     if (state == XZ_SERVICE_SPEAKING)
     {
-        ai_set_label_if_changed(s_ai_mouth_label, s_ai_mouth_cache,
-                                sizeof(s_ai_mouth_cache), ui_i18n_pick("正在聆听", "Listening"));
         ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
                                 sizeof(s_ai_copy_cache),
                                 ui_i18n_pick("已打断当前回答，开始重新录音...", "Current reply interrupted. Recording again..."));

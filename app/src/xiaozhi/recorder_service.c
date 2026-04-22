@@ -29,11 +29,18 @@
 #define RECORDER_MAX_PATH             192U
 #define RECORDER_PLAY_CHUNK_BYTES     960U
 #define RECORDER_THREAD_STACK_SIZE    4096U
+#define RECORDER_WRITE_THREAD_STACK_SIZE 4096U
 #define RECORDER_GAIN_SHIFT           3U
 #define RECORDER_GAIN_CHUNK_SAMPLES   256U
+#define RECORDER_RECORD_BUFFER_BYTES  (32U * 1024U)
+#define RECORDER_RECORD_WRITE_CHUNK_BYTES 960U
+#define RECORDER_RECORD_FLUSH_TIMEOUT_MS 2000U
 
 #define RECORDER_EVT_PLAY_REQUEST     (1U << 0)
 #define RECORDER_EVT_EXIT             (1U << 1)
+
+#define RECORDER_WRITE_EVT_DATA       (1U << 0)
+#define RECORDER_WRITE_EVT_EXIT       (1U << 1)
 
 typedef struct
 {
@@ -58,11 +65,16 @@ typedef struct
     int record_fd;
     rt_mutex_t lock;
     rt_event_t event;
+    rt_event_t record_event;
     bool service_inited;
     bool record_active;
     bool record_stop_requested;
+    bool record_writer_active;
+    bool record_write_failed;
+    bool record_pending_close;
     bool playback_active;
     bool playback_stop_requested;
+    int record_pending_close_fd;
     char record_dir[RECORDER_MAX_PATH];
     char record_file_path[RECORDER_MAX_PATH];
     char recording_file_name[RECORDER_MAX_FILE_NAME];
@@ -71,14 +83,33 @@ typedef struct
     char status_text[96];
     uint32_t record_start_tick;
     uint32_t record_bytes;
+    uint32_t record_write_generation;
+    uint32_t record_pending_close_generation;
+    uint32_t record_pending_close_data_size;
+    uint32_t record_buffer_head;
+    uint32_t record_buffer_tail;
+    uint32_t record_buffer_used;
+    uint32_t record_dropped_bytes;
+    uint32_t record_drop_events;
+    uint32_t record_busy_drop_events;
+    uint32_t record_write_errors;
 } recorder_service_t;
 
 static recorder_service_t s_recorder;
+static struct rt_thread s_record_writer_thread;
 static struct rt_thread s_playback_thread;
+static uint32_t s_record_writer_thread_stack[RECORDER_WRITE_THREAD_STACK_SIZE / sizeof(uint32_t)];
 static uint32_t s_playback_thread_stack[RECORDER_THREAD_STACK_SIZE / sizeof(uint32_t)];
+static uint8_t s_record_buffer[RECORDER_RECORD_BUFFER_BYTES];
 static const char *const s_record_device_candidates[] = {"sd0", "sd1", "sd2", "sdio0"};
 
+static void recorder_service_record_writer_thread_entry(void *parameter);
 static void recorder_service_playback_thread_entry(void *parameter);
+
+static uint32_t recorder_service_min_u32(uint32_t lhs, uint32_t rhs)
+{
+    return lhs < rhs ? lhs : rhs;
+}
 
 static void recorder_service_set_status_locked(const char *text)
 {
@@ -367,6 +398,245 @@ static uint32_t recorder_service_write_gain_pcm(int fd, const uint8_t *data, uin
     return total_written;
 }
 
+static void recorder_service_reset_record_buffer_locked(void)
+{
+    s_recorder.record_buffer_head = 0U;
+    s_recorder.record_buffer_tail = 0U;
+    s_recorder.record_buffer_used = 0U;
+    s_recorder.record_dropped_bytes = 0U;
+    s_recorder.record_drop_events = 0U;
+    s_recorder.record_busy_drop_events = 0U;
+    s_recorder.record_write_errors = 0U;
+    s_recorder.record_writer_active = false;
+    s_recorder.record_write_failed = false;
+}
+
+static bool recorder_service_enqueue_record_data_locked(const uint8_t *data, uint32_t data_len)
+{
+    uint32_t available;
+    uint32_t first;
+
+    if (data == NULL || data_len == 0U)
+    {
+        return false;
+    }
+
+    available = RECORDER_RECORD_BUFFER_BYTES - s_recorder.record_buffer_used;
+    if (data_len > available)
+    {
+        s_recorder.record_dropped_bytes += data_len;
+        s_recorder.record_drop_events++;
+        return false;
+    }
+
+    first = recorder_service_min_u32(data_len, RECORDER_RECORD_BUFFER_BYTES - s_recorder.record_buffer_tail);
+    memcpy(&s_record_buffer[s_recorder.record_buffer_tail], data, first);
+    if (first < data_len)
+    {
+        memcpy(&s_record_buffer[0], data + first, data_len - first);
+    }
+
+    s_recorder.record_buffer_tail =
+        (s_recorder.record_buffer_tail + data_len) % RECORDER_RECORD_BUFFER_BYTES;
+    s_recorder.record_buffer_used += data_len;
+    return true;
+}
+
+static uint32_t recorder_service_dequeue_record_data(uint8_t *buffer,
+                                                     uint32_t buffer_size,
+                                                     int *fd,
+                                                     uint32_t *generation)
+{
+    uint32_t data_len;
+    uint32_t first;
+
+    if (buffer == NULL || buffer_size == 0U || fd == NULL || generation == NULL ||
+        !s_recorder.service_inited)
+    {
+        return 0U;
+    }
+
+    if (rt_mutex_take(s_recorder.lock, RT_WAITING_FOREVER) != RT_EOK)
+    {
+        return 0U;
+    }
+
+    if (s_recorder.record_fd < 0 || s_recorder.record_buffer_used == 0U)
+    {
+        rt_mutex_release(s_recorder.lock);
+        return 0U;
+    }
+
+    data_len = recorder_service_min_u32(buffer_size, s_recorder.record_buffer_used);
+    first = recorder_service_min_u32(data_len, RECORDER_RECORD_BUFFER_BYTES - s_recorder.record_buffer_head);
+    memcpy(buffer, &s_record_buffer[s_recorder.record_buffer_head], first);
+    if (first < data_len)
+    {
+        memcpy(buffer + first, &s_record_buffer[0], data_len - first);
+    }
+
+    s_recorder.record_buffer_head =
+        (s_recorder.record_buffer_head + data_len) % RECORDER_RECORD_BUFFER_BYTES;
+    s_recorder.record_buffer_used -= data_len;
+    s_recorder.record_writer_active = true;
+    *fd = s_recorder.record_fd;
+    *generation = s_recorder.record_write_generation;
+    rt_mutex_release(s_recorder.lock);
+    return data_len;
+}
+
+static void recorder_service_record_write_complete(int fd,
+                                                   uint32_t generation,
+                                                   uint32_t requested,
+                                                   uint32_t written)
+{
+    bool need_more = false;
+    int close_fd = -1;
+    uint32_t close_data_size = 0U;
+
+    if (!s_recorder.service_inited)
+    {
+        return;
+    }
+
+    if (rt_mutex_take(s_recorder.lock, RT_WAITING_FOREVER) != RT_EOK)
+    {
+        return;
+    }
+
+    if (fd == s_recorder.record_fd && generation == s_recorder.record_write_generation)
+    {
+        if (written > 0U)
+        {
+            s_recorder.record_bytes += written;
+        }
+        if (written != requested)
+        {
+            s_recorder.record_write_errors++;
+            s_recorder.record_write_failed = true;
+        }
+    }
+    else if (s_recorder.record_pending_close &&
+             fd == s_recorder.record_pending_close_fd &&
+             generation == s_recorder.record_pending_close_generation)
+    {
+        if (written > 0U)
+        {
+            s_recorder.record_pending_close_data_size += written;
+        }
+        close_fd = s_recorder.record_pending_close_fd;
+        close_data_size = s_recorder.record_pending_close_data_size;
+        s_recorder.record_pending_close = false;
+        s_recorder.record_pending_close_fd = -1;
+        s_recorder.record_pending_close_generation = 0U;
+        s_recorder.record_pending_close_data_size = 0U;
+    }
+
+    s_recorder.record_writer_active = false;
+    need_more = s_recorder.record_buffer_used > 0U;
+    rt_mutex_release(s_recorder.lock);
+
+    if (close_fd >= 0)
+    {
+        recorder_service_fix_wav_header(close_fd, close_data_size);
+        close(close_fd);
+    }
+
+    if (need_more && s_recorder.record_event != RT_NULL)
+    {
+        rt_event_send(s_recorder.record_event, RECORDER_WRITE_EVT_DATA);
+    }
+}
+
+static void recorder_service_drain_record_buffer(void)
+{
+    uint8_t buffer[RECORDER_RECORD_WRITE_CHUNK_BYTES];
+
+    while (1)
+    {
+        int fd = -1;
+        uint32_t generation = 0U;
+        uint32_t data_len = recorder_service_dequeue_record_data(buffer,
+                                                                 sizeof(buffer),
+                                                                 &fd,
+                                                                 &generation);
+        uint32_t written;
+
+        if (data_len == 0U)
+        {
+            break;
+        }
+
+        written = recorder_service_write_gain_pcm(fd, buffer, data_len);
+        recorder_service_record_write_complete(fd, generation, data_len, written);
+    }
+}
+
+static bool recorder_service_wait_record_buffer_empty(uint32_t timeout_ms)
+{
+    rt_tick_t start_tick = rt_tick_get();
+    rt_tick_t timeout_tick = rt_tick_from_millisecond(timeout_ms);
+
+    while (1)
+    {
+        bool done = false;
+
+        if (rt_mutex_take(s_recorder.lock, rt_tick_from_millisecond(200)) == RT_EOK)
+        {
+            done = (s_recorder.record_buffer_used == 0U) && !s_recorder.record_writer_active;
+            rt_mutex_release(s_recorder.lock);
+        }
+
+        if (done)
+        {
+            return true;
+        }
+
+        if ((rt_tick_get() - start_tick) >= timeout_tick)
+        {
+            return false;
+        }
+
+        if (s_recorder.record_event != RT_NULL)
+        {
+            rt_event_send(s_recorder.record_event, RECORDER_WRITE_EVT_DATA);
+        }
+        rt_thread_mdelay(10);
+    }
+}
+
+static void recorder_service_record_writer_thread_entry(void *parameter)
+{
+    (void)parameter;
+
+    while (1)
+    {
+        rt_uint32_t evt = 0U;
+
+        if (s_recorder.record_event == RT_NULL)
+        {
+            rt_thread_mdelay(100);
+            continue;
+        }
+
+        rt_event_recv(s_recorder.record_event,
+                      RECORDER_WRITE_EVT_DATA | RECORDER_WRITE_EVT_EXIT,
+                      RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
+                      RT_WAITING_FOREVER,
+                      &evt);
+
+        if (evt & RECORDER_WRITE_EVT_EXIT)
+        {
+            break;
+        }
+
+        if (evt & RECORDER_WRITE_EVT_DATA)
+        {
+            recorder_service_drain_record_buffer();
+        }
+    }
+}
+
 static bool recorder_service_ensure_inited(void)
 {
     if (s_recorder.service_inited)
@@ -376,6 +646,7 @@ static bool recorder_service_ensure_inited(void)
 
     memset(&s_recorder, 0, sizeof(s_recorder));
     s_recorder.record_fd = -1;
+    s_recorder.record_pending_close_fd = -1;
     s_recorder.lock = rt_mutex_create("rsvc", RT_IPC_FLAG_PRIO);
     if (s_recorder.lock == RT_NULL)
     {
@@ -384,6 +655,33 @@ static bool recorder_service_ensure_inited(void)
     s_recorder.event = rt_event_create("rsv", RT_IPC_FLAG_FIFO);
     if (s_recorder.event == RT_NULL)
     {
+        rt_mutex_delete(s_recorder.lock);
+        s_recorder.lock = RT_NULL;
+        return false;
+    }
+    s_recorder.record_event = rt_event_create("rwr", RT_IPC_FLAG_FIFO);
+    if (s_recorder.record_event == RT_NULL)
+    {
+        rt_event_delete(s_recorder.event);
+        s_recorder.event = RT_NULL;
+        rt_mutex_delete(s_recorder.lock);
+        s_recorder.lock = RT_NULL;
+        return false;
+    }
+
+    if (rt_thread_init(&s_record_writer_thread,
+                       "rwrite",
+                       recorder_service_record_writer_thread_entry,
+                       RT_NULL,
+                       &s_record_writer_thread_stack[0],
+                       sizeof(s_record_writer_thread_stack),
+                       RT_THREAD_PRIORITY_LOW,
+                       RT_THREAD_TICK_DEFAULT) != RT_EOK)
+    {
+        rt_event_delete(s_recorder.record_event);
+        s_recorder.record_event = RT_NULL;
+        rt_event_delete(s_recorder.event);
+        s_recorder.event = RT_NULL;
         rt_mutex_delete(s_recorder.lock);
         s_recorder.lock = RT_NULL;
         return false;
@@ -398,13 +696,17 @@ static bool recorder_service_ensure_inited(void)
                        RT_THREAD_PRIORITY_LOW,
                        RT_THREAD_TICK_DEFAULT) != RT_EOK)
     {
+        rt_event_send(s_recorder.record_event, RECORDER_WRITE_EVT_EXIT);
         rt_event_delete(s_recorder.event);
         s_recorder.event = RT_NULL;
+        rt_event_delete(s_recorder.record_event);
+        s_recorder.record_event = RT_NULL;
         rt_mutex_delete(s_recorder.lock);
         s_recorder.lock = RT_NULL;
         return false;
     }
 
+    rt_thread_startup(&s_record_writer_thread);
     rt_thread_startup(&s_playback_thread);
     s_recorder.service_inited = true;
     recorder_service_set_status_locked("待机");
@@ -413,8 +715,8 @@ static bool recorder_service_ensure_inited(void)
 
 static int recorder_service_record_callback(audio_server_callback_cmt_t cmd, void *callback_userdata, uint32_t reserved)
 {
-    int fd;
     audio_server_coming_data_t *data;
+    bool queued = false;
 
     (void)callback_userdata;
 
@@ -436,19 +738,20 @@ static int recorder_service_record_callback(audio_server_callback_cmt_t cmd, voi
 
     if (rt_mutex_take(s_recorder.lock, 0) != RT_EOK)
     {
+        s_recorder.record_busy_drop_events++;
         return 0;
     }
 
-    fd = s_recorder.record_fd;
-    if (fd >= 0)
+    if (s_recorder.record_active && !s_recorder.record_stop_requested && s_recorder.record_fd >= 0)
     {
-        uint32_t written = recorder_service_write_gain_pcm(fd, data->data, data->data_len);
-        if (written > 0U)
-        {
-            s_recorder.record_bytes += written;
-        }
+        queued = recorder_service_enqueue_record_data_locked(data->data, data->data_len);
     }
     rt_mutex_release(s_recorder.lock);
+
+    if (queued && s_recorder.record_event != RT_NULL)
+    {
+        rt_event_send(s_recorder.record_event, RECORDER_WRITE_EVT_DATA);
+    }
 
     return 0;
 }
@@ -522,8 +825,14 @@ static bool recorder_service_open_record_file(void)
     rt_snprintf(s_recorder.recording_file_name, sizeof(s_recorder.recording_file_name), "%s", file_name);
     s_recorder.record_fd = fd;
     s_recorder.record_bytes = 0U;
+    s_recorder.record_write_generation++;
+    if (s_recorder.record_write_generation == 0U)
+    {
+        s_recorder.record_write_generation = 1U;
+    }
     s_recorder.record_start_tick = rt_tick_get();
     s_recorder.record_stop_requested = false;
+    recorder_service_reset_record_buffer_locked();
     s_recorder.record_active = true;
     recorder_service_set_status_locked("录音中");
     rt_mutex_release(s_recorder.lock);
@@ -534,27 +843,67 @@ static void recorder_service_close_record_file(void)
 {
     int fd = -1;
     uint32_t data_size = 0U;
+    bool had_drop = false;
+    bool had_error = false;
+    bool flush_done = false;
+    bool defer_close = false;
+    uint32_t generation = 0U;
 
     if (!s_recorder.service_inited)
     {
         return;
     }
 
+    flush_done = recorder_service_wait_record_buffer_empty(RECORDER_RECORD_FLUSH_TIMEOUT_MS);
+
     if (rt_mutex_take(s_recorder.lock, rt_tick_from_millisecond(200)) != RT_EOK)
     {
         return;
     }
 
+    if (!flush_done)
+    {
+        if (s_recorder.record_buffer_used > 0U)
+        {
+            s_recorder.record_dropped_bytes += s_recorder.record_buffer_used;
+            s_recorder.record_drop_events++;
+            s_recorder.record_buffer_head = s_recorder.record_buffer_tail;
+            s_recorder.record_buffer_used = 0U;
+        }
+        s_recorder.record_write_errors++;
+        s_recorder.record_write_failed = true;
+    }
+
     fd = s_recorder.record_fd;
     s_recorder.record_fd = -1;
     data_size = s_recorder.record_bytes;
+    generation = s_recorder.record_write_generation;
+    had_drop = (s_recorder.record_dropped_bytes > 0U) ||
+               (s_recorder.record_drop_events > 0U) ||
+               (s_recorder.record_busy_drop_events > 0U);
+    had_error = s_recorder.record_write_failed || (s_recorder.record_write_errors > 0U);
+    if (!flush_done && s_recorder.record_writer_active && fd >= 0)
+    {
+        if (!s_recorder.record_pending_close)
+        {
+            s_recorder.record_pending_close = true;
+            s_recorder.record_pending_close_fd = fd;
+            s_recorder.record_pending_close_generation = generation;
+            s_recorder.record_pending_close_data_size = data_size;
+            defer_close = true;
+        }
+        else
+        {
+            defer_close = true;
+        }
+    }
     s_recorder.record_active = false;
     s_recorder.record_start_tick = 0U;
     s_recorder.record_bytes = 0U;
     recorder_service_set_status_locked("保存中");
     rt_mutex_release(s_recorder.lock);
 
-    if (fd >= 0)
+    if (fd >= 0 && !defer_close)
     {
         recorder_service_fix_wav_header(fd, data_size);
         close(fd);
@@ -562,7 +911,18 @@ static void recorder_service_close_record_file(void)
 
     if (rt_mutex_take(s_recorder.lock, rt_tick_from_millisecond(200)) == RT_EOK)
     {
-        recorder_service_set_status_locked("已保存");
+        if (had_error)
+        {
+            recorder_service_set_status_locked("保存异常");
+        }
+        else if (had_drop)
+        {
+            recorder_service_set_status_locked("已保存(有丢帧)");
+        }
+        else
+        {
+            recorder_service_set_status_locked("已保存");
+        }
         rt_mutex_release(s_recorder.lock);
     }
 }
@@ -783,7 +1143,6 @@ bool recorder_service_stop_record(void)
     }
 
     recorder_service_close_record_file();
-    recorder_service_set_status("已保存");
     return true;
 }
 

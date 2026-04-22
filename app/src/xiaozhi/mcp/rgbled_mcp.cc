@@ -34,9 +34,13 @@ void RGBLEDTool::RegisterRGBLEDTool(McpServer* server) {
         "turn on the light.",
         PropertyList(),
         [](const PropertyList&) -> ReturnValue {
+            if (!RGBLEDTool::IsAvailable()) return RGBLEDTool::UnavailableReturnValue();
             if (is_color_cycling_) return true;
+            if (!GetRGBLEDController().TrySetColor(0xffffff)) {
+                McpSetCallError("rgbled control failed");
+                return std::string("rgbled control failed");
+            }
             is_color_cycling_ = true;
-            // LED控制 - 占位符实现
             return true;
         }
     );
@@ -46,6 +50,11 @@ void RGBLEDTool::RegisterRGBLEDTool(McpServer* server) {
         "turn off the light.",
         PropertyList(),
         [](const PropertyList&) -> ReturnValue {
+            if (!RGBLEDTool::IsAvailable()) return RGBLEDTool::UnavailableReturnValue();
+            if (!GetRGBLEDController().TrySetColor(0x000000)) {
+                McpSetCallError("rgbled control failed");
+                return std::string("rgbled control failed");
+            }
             is_color_cycling_ = false;
             return true;
         }
@@ -56,6 +65,7 @@ void RGBLEDTool::RegisterRGBLEDTool(McpServer* server) {
         "Get the current status of the LED (on or off).",
         PropertyList(),
         [](const PropertyList&) -> ReturnValue {
+            if (!RGBLEDTool::IsAvailable()) return RGBLEDTool::UnavailableReturnValue();
             return RGBLEDTool::IsLightOn();
         }
     );

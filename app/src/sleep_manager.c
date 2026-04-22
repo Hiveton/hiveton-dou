@@ -11,7 +11,24 @@
 #include "ui/ui_dispatch.h"
 #include "gui_app_pm.h"
 
+/*
+ * EPD panels retain pixels while the system sleeps. Keep the app-layer default
+ * aligned with GUI PM so EPD sleep does not regress into a clear/blank path.
+ */
+#ifndef APP_KEEP_EPD_CONTENT_ON_SLEEP
+#if defined(BSP_LCDC_USING_EPD_8BIT)
+#define APP_KEEP_EPD_CONTENT_ON_SLEEP 1
+#else
+#define APP_KEEP_EPD_CONTENT_ON_SLEEP 0
+#endif
+#endif
+
+#if defined(BSP_LCDC_USING_EPD_8BIT) && !APP_KEEP_EPD_CONTENT_ON_SLEEP
+#error "EPD targets must keep display content on sleep; do not clear or blank the panel."
+#endif
+
 #define SLEEP_MANAGER_IDLE_TIMEOUT_MS 60000U
+#define SLEEP_MANAGER_NETWORK_SETUP_GRACE_MS 180000U
 
 static bool s_sleeping = false;
 static ui_screen_id_t s_last_source_screen = UI_SCREEN_HOME;
@@ -92,6 +109,7 @@ void sleep_manager_report_activity(void)
 bool sleep_manager_should_enter_standby(ui_screen_id_t active_id, uint32_t inactive_ms)
 {
     uint32_t report_idle_ms;
+    net_manager_snapshot_t net_snapshot;
 
     if (sleep_manager_is_idle_exempt_screen(active_id))
     {
@@ -99,6 +117,16 @@ bool sleep_manager_should_enter_standby(ui_screen_id_t active_id, uint32_t inact
     }
 
     report_idle_ms = sleep_manager_get_report_idle_ms();
+    net_manager_get_snapshot(&net_snapshot);
+    if (net_snapshot.desired_mode == NET_MANAGER_MODE_4G &&
+        net_snapshot.net_4g_enabled &&
+        !net_snapshot.cat1_ready &&
+        (inactive_ms < SLEEP_MANAGER_NETWORK_SETUP_GRACE_MS ||
+         report_idle_ms < SLEEP_MANAGER_NETWORK_SETUP_GRACE_MS))
+    {
+        return false;
+    }
+
     return inactive_ms >= SLEEP_MANAGER_IDLE_TIMEOUT_MS &&
            report_idle_ms >= SLEEP_MANAGER_IDLE_TIMEOUT_MS;
 }
@@ -127,6 +155,11 @@ void sleep_manager_on_enter_standby(ui_screen_id_t from_screen)
     net_manager_suspend_for_sleep();
     if (gui_pm_is_ready())
     {
+        /*
+         * On EPD targets APP_KEEP_EPD_CONTENT_ON_SLEEP is forced to 1 above:
+         * enter GUI PM sleep without adding an app-level clear/blank step. The
+         * GUI PM layer keeps the panel content visible instead of poweroff-clear.
+         */
         gui_pm_fsm(GUI_PM_ACTION_SLEEP);
     }
 }
