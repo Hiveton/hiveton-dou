@@ -15,12 +15,13 @@
 #define APP_BUTTON_T_PIN              44
 #define APP_BUTTON_ACTIVE_HIGH        1
 #define APP_BUTTON_LONG_PRESS_MS      1500U
+#define APP_BUTTON_SHORT_DEBOUNCE_MS  220U
 #define APP_BUTTON_THREAD_STACK_SIZE  2048U
 #define APP_BUTTON_THREAD_PRIORITY    3
 #define APP_BUTTON_HEAL_INTERVAL_MS   100U
 
 #ifndef APP_BUTTON_DEBUG_VERBOSE
-#define APP_BUTTON_DEBUG_VERBOSE 0
+#define APP_BUTTON_DEBUG_VERBOSE 1
 #endif
 
 #if APP_BUTTON_DEBUG_VERBOSE
@@ -48,6 +49,9 @@ typedef struct
     bool long_reported;
     bool enabled;
     bool error_reported;
+    bool level_valid;
+    int last_level;
+    rt_tick_t last_short_tick;
 } app_key_state_t;
 
 static app_key_state_t s_app_keys[APP_KEY_COUNT] = {
@@ -71,6 +75,16 @@ static bool s_app_buttons_module_error_reported = false;
 #define APP_BUTTON_EVT_PWR_LONG    (1UL << 2)
 #define APP_BUTTON_EVT_B_SHORT     (1UL << 3)
 #define APP_BUTTON_EVT_T_SHORT     (1UL << 4)
+
+static const char *app_buttons_key_name(app_key_id_t key_id)
+{
+    if (key_id >= 0 && key_id < APP_KEY_COUNT)
+    {
+        return s_app_keys[key_id].name;
+    }
+
+    return "unknown";
+}
 
 static void app_buttons_log_module_disabled(const char *reason, rt_err_t result)
 {
@@ -252,12 +266,12 @@ static void app_buttons_dispatch_short(app_key_id_t key_id)
         break;
     case APP_KEY_B:
         app_buttons_wakeup_only();
-        APP_BUTTON_LOG("app_buttons: b short\n");
+        APP_BUTTON_LOG("app_buttons: b short dispatch\n");
         ui_dispatch_request_hardkey_down();
         break;
     case APP_KEY_T:
         app_buttons_wakeup_only();
-        APP_BUTTON_LOG("app_buttons: t short\n");
+        APP_BUTTON_LOG("app_buttons: t short dispatch\n");
         ui_dispatch_request_hardkey_up();
         break;
     default:
@@ -311,6 +325,61 @@ static void app_buttons_set_pending(rt_uint32_t mask)
     (void)rt_sem_release(&s_button_irq_sem);
 }
 
+static bool app_buttons_short_debounce_allow(app_key_state_t *key)
+{
+    rt_tick_t now;
+    rt_tick_t debounce_ticks;
+
+    if (key == RT_NULL)
+    {
+        return false;
+    }
+
+    now = rt_tick_get();
+    debounce_ticks = rt_tick_from_millisecond(APP_BUTTON_SHORT_DEBOUNCE_MS);
+    if (key->last_short_tick != 0 &&
+        (rt_tick_t)(now - key->last_short_tick) < debounce_ticks)
+    {
+        return false;
+    }
+
+    key->last_short_tick = now;
+    return true;
+}
+
+static void app_buttons_handle_b_level(app_key_state_t *key, int level, const char *source)
+{
+    if (key == RT_NULL)
+    {
+        return;
+    }
+
+    if (!key->level_valid)
+    {
+        key->last_level = level;
+        key->level_valid = true;
+        key->pressed = false;
+        return;
+    }
+
+    if (level == key->last_level)
+    {
+        key->pressed = false;
+        return;
+    }
+
+    if (!key->pressed && app_buttons_short_debounce_allow(key))
+    {
+        key->pressed = true;
+        APP_BUTTON_LOG("app_buttons: b %s edge short pin=%ld idle=%d level=%d\n",
+                       source != RT_NULL ? source : "unknown",
+                       (long)key->pin,
+                       key->last_level,
+                       level);
+        app_buttons_set_pending(APP_BUTTON_EVT_B_SHORT);
+    }
+}
+
 static void app_buttons_pwr_long_timeout(void *parameter)
 {
     app_key_state_t *key = (app_key_state_t *)parameter;
@@ -341,8 +410,12 @@ static void app_buttons_irq_handler(void *args)
 
     if (key_id == APP_KEY_T)
     {
-        if (active)
+        bool was_pressed = key->pressed;
+
+        key->pressed = active;
+        if (active && !was_pressed)
         {
+            APP_BUTTON_LOG("app_buttons: %s irq short\n", app_buttons_key_name(key_id));
             app_buttons_set_pending(APP_BUTTON_EVT_T_SHORT);
         }
         return;
@@ -350,10 +423,7 @@ static void app_buttons_irq_handler(void *args)
 
     if (key_id == APP_KEY_B)
     {
-        if (active)
-        {
-            app_buttons_set_pending(APP_BUTTON_EVT_B_SHORT);
-        }
+        app_buttons_handle_b_level(key, level, "irq");
         return;
     }
 
@@ -377,6 +447,51 @@ static void app_buttons_irq_handler(void *args)
     }
 }
 
+static void app_buttons_poll_short_key(app_key_id_t key_id, rt_uint32_t event_mask)
+{
+    app_key_state_t *key;
+    int level;
+    bool active;
+    bool was_pressed;
+
+    if (key_id <= APP_KEY_PWR || key_id >= APP_KEY_COUNT)
+    {
+        return;
+    }
+
+    key = &s_app_keys[key_id];
+    if (!s_app_buttons_module_enabled || !key->enabled)
+    {
+        return;
+    }
+
+    level = rt_pin_read(key->pin);
+    if (key_id == APP_KEY_B)
+    {
+        app_buttons_handle_b_level(key, level, "poll");
+        return;
+    }
+
+    active = (level == key->active_level);
+    was_pressed = key->pressed;
+    key->pressed = active;
+
+    if (active && !was_pressed)
+    {
+        APP_BUTTON_LOG("app_buttons: %s poll short pin=%ld level=%d\n",
+                       key->name,
+                       (long)key->pin,
+                       level);
+        app_buttons_set_pending(event_mask);
+    }
+}
+
+static void app_buttons_poll_short_keys(void)
+{
+    app_buttons_poll_short_key(APP_KEY_T, APP_BUTTON_EVT_T_SHORT);
+    app_buttons_poll_short_key(APP_KEY_B, APP_BUTTON_EVT_B_SHORT);
+}
+
 static void app_buttons_thread_entry(void *parameter)
 {
     rt_uint32_t pending;
@@ -388,6 +503,7 @@ static void app_buttons_thread_entry(void *parameter)
         if (rt_sem_take(&s_button_irq_sem, rt_tick_from_millisecond(APP_BUTTON_HEAL_INTERVAL_MS)) != RT_EOK)
         {
             app_buttons_refresh_runtime_pinmux();
+            app_buttons_poll_short_keys();
             if (!s_app_buttons_module_enabled)
             {
                 return;
@@ -482,6 +598,9 @@ void app_buttons_init(void)
         s_app_keys[i].pressed = false;
         s_app_keys[i].long_reported = false;
         s_app_keys[i].enabled = false;
+        s_app_keys[i].last_level = rt_pin_read(s_app_keys[i].pin);
+        s_app_keys[i].level_valid = true;
+        s_app_keys[i].last_short_tick = 0;
 
         result = rt_pin_attach_irq(s_app_keys[i].pin,
                                    PIN_IRQ_MODE_RISING_FALLING,

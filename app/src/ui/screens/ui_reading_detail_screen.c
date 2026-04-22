@@ -80,6 +80,10 @@ typedef struct
     lv_obj_t *settings_panel;
     lv_obj_t *font_value_label;
     lv_obj_t *line_space_value_label;
+    lv_obj_t *font_dec_button;
+    lv_obj_t *font_inc_button;
+    lv_obj_t *line_space_dec_button;
+    lv_obj_t *line_space_inc_button;
     lv_obj_t *swipe_handle;
 } ui_reading_detail_refs_t;
 
@@ -369,6 +373,7 @@ static bool ui_reading_detail_render_text_bitmap(const char *formatted_text);
 static void ui_reading_detail_refresh_settings_panel(void);
 static void ui_reading_detail_set_settings_visible(bool visible);
 static bool ui_reading_detail_settings_visible(void);
+static void ui_reading_detail_apply_text_style(void);
 static void ui_reading_detail_rebuild_layout(void);
 static void ui_reading_detail_bottom_swipe_event_cb(lv_event_t *e);
 static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
@@ -434,6 +439,22 @@ static lv_coord_t ui_reading_detail_get_line_space(void)
 static const lv_font_t *ui_reading_detail_get_text_font(void)
 {
     return ui_font_get_actual(ui_reading_detail_get_actual_font_size());
+}
+
+static void ui_reading_detail_apply_text_style(void)
+{
+    if (s_reading_detail_refs.content_label == NULL)
+    {
+        return;
+    }
+
+    lv_obj_set_style_text_font(s_reading_detail_refs.content_label,
+                               ui_reading_detail_get_text_font(),
+                               0);
+    lv_obj_set_style_text_line_space(s_reading_detail_refs.content_label,
+                                     ui_reading_detail_get_line_space(),
+                                     0);
+    lv_obj_invalidate(s_reading_detail_refs.content_label);
 }
 
 static void ui_reading_detail_release_text_bitmap_buffer(void)
@@ -1298,7 +1319,7 @@ static bool ui_reading_detail_render_text_bitmap(const char *formatted_text)
         advance_px = (int)ui_reading_detail_get_glyph_width_fast(NULL,
                                                                  codepoint,
                                                                  next_codepoint,
-                                                                 (uint16_t)ui_px_x(UI_READING_DETAIL_TEXT_FONT));
+                                                                 (uint16_t)LV_MAX(ui_reading_detail_get_text_line_height_px() / 2, 1));
         stbtt_GetCodepointBitmapBox(&s_reading_detail_stb_info,
                                     (int)codepoint,
                                     s_reading_detail_stb_scale,
@@ -2042,6 +2063,15 @@ static void ui_reading_detail_refresh_settings_panel(void)
         rt_snprintf(value_text, sizeof(value_text), "%u", (unsigned int)s_reading_detail_line_space);
         ui_reading_detail_set_label_text(s_reading_detail_refs.line_space_value_label, value_text);
     }
+
+    ui_reading_detail_set_button_enabled(s_reading_detail_refs.font_dec_button,
+                                         s_reading_detail_font_size > UI_READING_DETAIL_TEXT_FONT_MIN);
+    ui_reading_detail_set_button_enabled(s_reading_detail_refs.font_inc_button,
+                                         s_reading_detail_font_size < UI_READING_DETAIL_TEXT_FONT_MAX);
+    ui_reading_detail_set_button_enabled(s_reading_detail_refs.line_space_dec_button,
+                                         s_reading_detail_line_space > UI_READING_DETAIL_TEXT_LINE_SPACE_MIN);
+    ui_reading_detail_set_button_enabled(s_reading_detail_refs.line_space_inc_button,
+                                         s_reading_detail_line_space < UI_READING_DETAIL_TEXT_LINE_SPACE_MAX);
 }
 
 static void ui_reading_detail_set_settings_visible(bool visible)
@@ -2069,9 +2099,32 @@ static void ui_reading_detail_set_settings_visible(bool visible)
 
 static void ui_reading_detail_rebuild_layout(void)
 {
+    bool preserve_text_anchor = false;
+    uint32_t text_anchor = 0U;
+    uint16_t fallback_page;
+    uint16_t old_page_count;
+    uint16_t new_page_count;
+    uint16_t target_page = 0U;
+
     if (s_reading_detail_load_state != UI_READING_DETAIL_LOAD_READY || ui_reading_detail_get_text_length() == 0U)
     {
+        ui_reading_detail_apply_text_style();
         return;
+    }
+
+    fallback_page = s_reading_detail_current_page;
+    old_page_count = ui_reading_detail_snapshot_page_count(NULL);
+    if (fallback_page < old_page_count)
+    {
+        const ui_reading_detail_page_entry_t *old_page = &s_reading_detail_pages[fallback_page];
+
+        if ((old_page->type == UI_READING_DETAIL_PAGE_TEXT ||
+             old_page->type == UI_READING_DETAIL_PAGE_IMAGE_TEXT) &&
+            old_page->end > old_page->start)
+        {
+            preserve_text_anchor = true;
+            text_anchor = old_page->start;
+        }
     }
 
     ui_reading_detail_release_current_image();
@@ -2102,7 +2155,48 @@ static void ui_reading_detail_rebuild_layout(void)
     }
 
     s_reading_detail_first_page_layout_ready = true;
-    s_reading_detail_current_page = 0U;
+    new_page_count = ui_reading_detail_snapshot_page_count(NULL);
+    if (new_page_count > 0U)
+    {
+        if (preserve_text_anchor)
+        {
+            uint16_t i;
+
+            target_page = new_page_count - 1U;
+            for (i = 0U; i < new_page_count; ++i)
+            {
+                const ui_reading_detail_page_entry_t *page = &s_reading_detail_pages[i];
+
+                if ((page->type == UI_READING_DETAIL_PAGE_TEXT ||
+                     page->type == UI_READING_DETAIL_PAGE_IMAGE_TEXT) &&
+                    page->end > page->start)
+                {
+                    if (text_anchor >= page->start && text_anchor < page->end)
+                    {
+                        target_page = i;
+                        break;
+                    }
+
+                    if (text_anchor < page->start)
+                    {
+                        target_page = i;
+                        break;
+                    }
+                }
+            }
+        }
+        else if (fallback_page < new_page_count)
+        {
+            target_page = fallback_page;
+        }
+        else
+        {
+            target_page = new_page_count - 1U;
+        }
+    }
+
+    s_reading_detail_current_page = target_page;
+    ui_reading_detail_apply_text_style();
 
     (void)ui_reading_detail_render_page();
 }
@@ -2582,6 +2676,8 @@ static bool ui_reading_detail_render_page(void)
     else
     {
         ui_reading_detail_release_current_image();
+        ui_reading_detail_release_text_bitmap_buffer();
+        ui_reading_detail_apply_text_style();
         lv_obj_set_pos(s_reading_detail_refs.content_label,
                        ui_reading_detail_get_text_offset_x(),
                        8);
@@ -2943,6 +3039,7 @@ static void ui_reading_detail_adjust_font_event_cb(lv_event_t *e)
     }
 
     s_reading_detail_font_size = (uint16_t)next_value;
+    ui_reading_detail_apply_text_style();
     ui_reading_detail_refresh_settings_panel();
     ui_reading_detail_rebuild_layout();
 }
@@ -2966,6 +3063,7 @@ static void ui_reading_detail_adjust_line_space_event_cb(lv_event_t *e)
     }
 
     s_reading_detail_line_space = (uint16_t)next_value;
+    ui_reading_detail_apply_text_style();
     ui_reading_detail_refresh_settings_panel();
     ui_reading_detail_rebuild_layout();
 }
@@ -3026,7 +3124,7 @@ void ui_Reading_Detail_screen_init(void)
     lv_obj_set_style_text_align(s_reading_detail_refs.content_label, LV_TEXT_ALIGN_LEFT, 0);
     lv_obj_set_style_pad_all(s_reading_detail_refs.content_label, 0, 0);
     lv_obj_set_style_text_line_space(s_reading_detail_refs.content_label,
-                                     ui_px_y(UI_READING_DETAIL_TEXT_LINE_SPACE),
+                                     ui_reading_detail_get_line_space(),
                                      0);
     lv_obj_add_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_reading_detail_refs.content_label,
@@ -3147,6 +3245,7 @@ void ui_Reading_Detail_screen_init(void)
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     ui_create_label(row, ui_i18n_pick("字号", "Font"), 0, 8, 80, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
     button = ui_create_button(row, 256, 0, 56, 42, "-", 24, UI_SCREEN_NONE, false);
+    s_reading_detail_refs.font_dec_button = button;
     lv_obj_add_event_cb(button, ui_reading_detail_adjust_font_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(-UI_READING_DETAIL_TEXT_FONT_STEP));
     s_reading_detail_refs.font_value_label = ui_create_label(row,
                                                              "22",
@@ -3159,6 +3258,7 @@ void ui_Reading_Detail_screen_init(void)
                                                              false,
                                                              false);
     button = ui_create_button(row, 404, 0, 56, 42, "+", 24, UI_SCREEN_NONE, true);
+    s_reading_detail_refs.font_inc_button = button;
     lv_obj_add_event_cb(button, ui_reading_detail_adjust_font_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)UI_READING_DETAIL_TEXT_FONT_STEP);
 
     row = ui_create_card(s_reading_detail_refs.settings_panel, 24, 102, 480, 42, UI_SCREEN_NONE, false, 0);
@@ -3166,6 +3266,7 @@ void ui_Reading_Detail_screen_init(void)
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     ui_create_label(row, ui_i18n_pick("行距", "Spacing"), 0, 8, 80, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
     button = ui_create_button(row, 256, 0, 56, 42, "-", 24, UI_SCREEN_NONE, false);
+    s_reading_detail_refs.line_space_dec_button = button;
     lv_obj_add_event_cb(button,
                         ui_reading_detail_adjust_line_space_event_cb,
                         LV_EVENT_CLICKED,
@@ -3181,6 +3282,7 @@ void ui_Reading_Detail_screen_init(void)
                                                                    false,
                                                                    false);
     button = ui_create_button(row, 404, 0, 56, 42, "+", 24, UI_SCREEN_NONE, true);
+    s_reading_detail_refs.line_space_inc_button = button;
     lv_obj_add_event_cb(button,
                         ui_reading_detail_adjust_line_space_event_cb,
                         LV_EVENT_CLICKED,
@@ -3241,8 +3343,6 @@ void ui_Reading_Detail_screen_destroy(void)
     memset(&s_reading_detail_refs, 0, sizeof(s_reading_detail_refs));
     memset(&s_reading_detail_swipe_state, 0, sizeof(s_reading_detail_swipe_state));
     s_reading_detail_current_page = 0U;
-    s_reading_detail_font_size = UI_READING_DETAIL_TEXT_FONT;
-    s_reading_detail_line_space = UI_READING_DETAIL_TEXT_LINE_SPACE;
     s_reading_detail_first_render_done = false;
     s_reading_detail_last_reported_page_count = 0U;
     s_reading_detail_last_reported_has_last_page = false;

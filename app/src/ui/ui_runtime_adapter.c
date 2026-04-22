@@ -614,11 +614,11 @@ void ui_runtime_request_back(void)
 
 void ui_runtime_handle_hardkey_nav(int direction)
 {
-    ui_screen_id_t active = ui_dispatch_get_active_screen();
+    ui_screen_id_t active = ui_runtime_get_active_screen_id();
 
     if (active == UI_SCREEN_NONE)
     {
-        active = ui_runtime_get_active_screen_id();
+        active = ui_dispatch_get_active_screen();
     }
 
     if (direction == 0)
