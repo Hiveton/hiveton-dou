@@ -32,7 +32,10 @@
 
  #define XZ_DOWNLINK_QUEUE_NUM 32  /* 从128减少到32，节省约1.5KB L2 RAM */
  #define XZ_MIC_FRAME_LEN (320 * 6) // 60ms for 16k samplerate
- #define XZ_SPK_FRAME_LEN (480 * 6) // 60ms for 24k samplerate, speaker frame len
+ #define XZ_SPK_FRAME_DURATION_MS 60U
+ #define XZ_SPK_MAX_SAMPLE_RATE 48000U
+ #define XZ_SPK_MAX_SAMPLES ((XZ_SPK_MAX_SAMPLE_RATE / 1000U) * XZ_SPK_FRAME_DURATION_MS)
+ #define XZ_SPK_FRAME_LEN (XZ_SPK_MAX_SAMPLES * 2U) // 60ms pcm bytes for max 48k samplerate
  
  #define LCD_BRIGHTNESS_MIN     (10)
  #define LCD_BRIGHTNESS_MID     (50)
@@ -103,6 +106,14 @@ typedef struct
     uint16_t downlink_decode_out[XZ_SPK_FRAME_LEN / 2];
     rt_slist_t downlink_decode_busy;
     rt_slist_t downlink_decode_idle;
+    bool downlink_buffering;
+    bool downlink_force_drain;
+    uint32_t decoder_sample_rate;
+    uint32_t speaker_sample_rate;
+    uint32_t downlink_busy_high_water;
+    uint32_t downlink_buffering_count;
+    uint32_t downlink_write_retry_count;
+    uint32_t downlink_write_fail_count;
     bool vad_enabled;
 } xz_audio_t;
 

@@ -48,6 +48,9 @@ lv_font_t * lv_tiny_ttf_create_file(const char * path, int32_t font_size);
  */
 lv_font_t * lv_tiny_ttf_create_file_ex(const char * path, int32_t font_size, lv_font_kerning_t kerning,
                                        size_t cache_size);
+
+lv_font_t * lv_tiny_ttf_create_posix_file_ex(const char * path, int32_t font_size, lv_font_kerning_t kerning,
+                                             size_t cache_size);
 #endif
 
 /**

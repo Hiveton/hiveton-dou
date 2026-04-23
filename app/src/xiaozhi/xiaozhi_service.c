@@ -15,6 +15,7 @@
 #include "network/net_manager.h"
 #include "audio_manager.h"
 #include "mem_section.h"
+#include "app_watchdog.h"
 
 #define DBG_TAG "xz_svc"
 #define DBG_LVL LOG_LVL_INFO
@@ -574,6 +575,7 @@ static void xiaozhi_service_thread(void *parameter)
     LOG_I("Service thread started");
     
     while (1) {
+        app_watchdog_heartbeat(APP_WDT_MODULE_XIAOZHI);
         if (rt_event_recv(s_event, XZ_EVT_INIT | XZ_EVT_DEINIT | 
                          XZ_EVT_START_LISTEN | XZ_EVT_STOP_LISTEN | 
                          XZ_EVT_ABORT | XZ_EVT_KWS_TRIGGER |

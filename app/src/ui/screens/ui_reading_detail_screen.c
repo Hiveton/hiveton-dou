@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <strings.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "dfs_posix.h"
 #include "rtthread.h"
@@ -17,11 +18,7 @@
 #include "ui_helpers.h"
 #include "../ui_image_policy.h"
 #include "ui_runtime_adapter.h"
-#define STBTT_malloc(x, u) ((void)(u), lv_malloc(x))
-#define STBTT_free(x, u) ((void)(u), lv_free(x))
-#define STBTT_STATIC
-#define STB_TRUETYPE_IMPLEMENTATION
-#include "../../../../sdk/external/lvgl_v9/src/libs/tiny_ttf/stb_truetype_htcw.h"
+#include "../../../../sdk/external/lvgl_v9/src/draw/lv_draw_buf.h"
 
 #define UI_READING_DETAIL_MAX_FILE_BYTES (256 * 1024)
 #define UI_READING_DETAIL_MAX_PAGE_COUNT 768U
@@ -45,11 +42,22 @@
 #define UI_READING_DETAIL_TEXT_LINE_SPACE_MIN 0
 #define UI_READING_DETAIL_TEXT_LINE_SPACE_MAX 12
 #define UI_READING_DETAIL_TEXT_LINE_SPACE_STEP 1
-#define UI_READING_DETAIL_FONT_DELTA 0
+#define UI_READING_DETAIL_FONT_ITEM_MAX 32U
 #define UI_READING_DETAIL_GLYPH_COVERAGE_THRESHOLD 160U
+#define UI_READING_DETAIL_BITMAP_PALETTE_BYTES \
+    (LV_COLOR_INDEXED_PALETTE_SIZE(LV_COLOR_FORMAT_I4) * sizeof(lv_color32_t))
 #define UI_READING_DETAIL_BITMAP_GLYPH_SCRATCH_BYTES 4096U
-#define UI_READING_DETAIL_SETTINGS_PANEL_HEIGHT 172
+#define UI_READING_DETAIL_HDFONT_PACKAGE_MAGIC "HDFPKG1"
+#define UI_READING_DETAIL_HDFONT_FACE_MAGIC "HDFNTC1"
+#define UI_READING_DETAIL_HDFONT_PACKAGE_HEADER_SIZE 64U
+#define UI_READING_DETAIL_HDFONT_PACKAGE_DIR_ENTRY_SIZE 16U
+#define UI_READING_DETAIL_HDFONT_FACE_HEADER_SIZE 64U
+#define UI_READING_DETAIL_HDFONT_GLYPH_ENTRY_SIZE 24U
+#define UI_READING_DETAIL_HDFONT_FLAG_RLE 0x0001U
+#define UI_READING_DETAIL_HDFONT_FLAG_ALPHA8 0x0002U
+#define UI_READING_DETAIL_SETTINGS_PANEL_HEIGHT 222
 #define UI_READING_DETAIL_SETTINGS_VALUE_WIDTH 76
+#define UI_READING_DETAIL_SETTINGS_FONT_NAME_WIDTH 164
 #define UI_READING_DETAIL_SWIPE_HANDLE_HEIGHT 48
 #define UI_READING_DETAIL_MAX_BLOCK_COUNT 256U
 #define UI_READING_DETAIL_MAX_IMAGE_COUNT 48U
@@ -80,10 +88,13 @@ typedef struct
     lv_obj_t *settings_panel;
     lv_obj_t *font_value_label;
     lv_obj_t *line_space_value_label;
+    lv_obj_t *font_family_value_label;
     lv_obj_t *font_dec_button;
     lv_obj_t *font_inc_button;
     lv_obj_t *line_space_dec_button;
     lv_obj_t *line_space_inc_button;
+    lv_obj_t *font_family_prev_button;
+    lv_obj_t *font_family_next_button;
     lv_obj_t *swipe_handle;
 } ui_reading_detail_refs_t;
 
@@ -125,6 +136,37 @@ typedef struct
     uint16_t image_height;
     uint16_t text_height;
 } ui_reading_detail_page_entry_t;
+
+typedef struct
+{
+    uint32_t codepoint;
+    uint32_t bitmap_offset;
+    uint32_t bitmap_length;
+    int32_t advance26;
+    int16_t x_off;
+    int16_t y_off;
+    uint16_t width;
+    uint16_t height;
+} ui_reading_detail_hdfont_glyph_t;
+
+typedef struct
+{
+    bool ready;
+    int fd;
+    bool index_from_audio;
+    uint16_t size_px;
+    uint16_t flags;
+    uint32_t face_offset;
+    uint32_t glyph_count;
+    uint32_t line_height26;
+    uint32_t ascent26;
+    uint32_t descent26;
+    uint32_t index_offset;
+    uint32_t bitmap_offset;
+    uint32_t bitmap_size;
+    uint8_t *index_data;
+    char path[UI_FONT_MANAGER_PATH_MAX];
+} ui_reading_detail_hdfont_state_t;
 
 lv_obj_t *ui_Reading_Detail = NULL;
 
@@ -179,22 +221,21 @@ static volatile bool s_reading_detail_first_page_layout_ready = false;
 static volatile bool s_reading_detail_first_page_bitmap_ready = false;
 static char s_reading_detail_request_path[256];
 static lv_image_dsc_t s_reading_detail_current_image_dsc;
-static uint16_t s_reading_detail_width_cache_size = 0U;
-static uint16_t s_reading_detail_ascii_width_cache[128];
-static uint16_t s_reading_detail_cjk_width = 0U;
-static uint16_t s_reading_detail_fullwidth_width = 0U;
-static lv_color_t *s_reading_detail_bitmap_buffer = NULL;
+static uint8_t *s_reading_detail_bitmap_storage = NULL;
+static uint8_t *s_reading_detail_bitmap_pixels = NULL;
+static uint32_t s_reading_detail_bitmap_pixel_bytes = 0U;
+static lv_draw_buf_t s_reading_detail_bitmap_draw_buf;
 static lv_image_dsc_t s_reading_detail_bitmap_dsc;
 static bool s_reading_detail_bitmap_inited = false;
-static stbtt_fontinfo s_reading_detail_stb_info;
-static bool s_reading_detail_stb_ready = false;
-static float s_reading_detail_stb_scale = 0.0f;
-static int s_reading_detail_stb_ascent = 0;
-static int s_reading_detail_stb_descent = 0;
-static int s_reading_detail_stb_line_gap = 0;
+static ui_reading_detail_hdfont_state_t s_reading_detail_hdfont;
 static uint8_t s_reading_detail_glyph_scratch[UI_READING_DETAIL_BITMAP_GLYPH_SCRATCH_BYTES];
-static uint8_t *s_reading_detail_external_font_data = NULL;
-static size_t s_reading_detail_external_font_size = 0U;
+static ui_font_manager_item_t s_reading_detail_font_items[UI_READING_DETAIL_FONT_ITEM_MAX];
+static uint16_t s_reading_detail_font_item_count = 0U;
+static uint16_t s_reading_detail_font_item_index = 0U;
+static bool s_reading_detail_font_use_system = true;
+static char s_reading_detail_font_path[UI_FONT_MANAGER_PATH_MAX];
+static char s_reading_detail_font_name[UI_FONT_MANAGER_NAME_MAX] = "系统字体";
+static char s_reading_detail_last_rejected_font_path[UI_FONT_MANAGER_PATH_MAX];
 static ui_reading_detail_text_source_type_t s_reading_detail_text_source = UI_READING_DETAIL_TEXT_SOURCE_NONE;
 static int s_reading_detail_text_fd = -1;
 static uint32_t s_reading_detail_text_length = 0U;
@@ -212,6 +253,56 @@ static char s_reading_detail_text_stream_window[UI_READING_DETAIL_TEXT_STREAM_WI
 static uint16_t s_reading_detail_font_size = UI_READING_DETAIL_TEXT_FONT;
 static uint16_t s_reading_detail_line_space = UI_READING_DETAIL_TEXT_LINE_SPACE;
 static ui_reading_detail_swipe_state_t s_reading_detail_swipe_state;
+static uint16_t s_reading_detail_watchdog_long_task_depth = 0U;
+
+#define UI_READING_DETAIL_WATCHDOG_LONG_TASK_TIMEOUT_MS 60000U
+
+static void ui_reading_detail_watchdog_begin_long_task(void)
+{
+    if (s_reading_detail_watchdog_long_task_depth == 0U)
+    {
+        app_watchdog_begin_long_task(APP_WDT_MODULE_READING,
+                                     UI_READING_DETAIL_WATCHDOG_LONG_TASK_TIMEOUT_MS);
+    }
+
+    ++s_reading_detail_watchdog_long_task_depth;
+}
+
+static void ui_reading_detail_watchdog_progress(void)
+{
+    if (s_reading_detail_watchdog_long_task_depth > 0U)
+    {
+        app_watchdog_progress(APP_WDT_MODULE_READING);
+    }
+    else
+    {
+        app_watchdog_heartbeat(APP_WDT_MODULE_READING);
+    }
+}
+
+static void ui_reading_detail_watchdog_end_long_task(void)
+{
+    if (s_reading_detail_watchdog_long_task_depth == 0U)
+    {
+        return;
+    }
+
+    --s_reading_detail_watchdog_long_task_depth;
+    if (s_reading_detail_watchdog_long_task_depth == 0U)
+    {
+        app_watchdog_end_long_task(APP_WDT_MODULE_READING);
+    }
+}
+
+static uint16_t ui_reading_detail_get_actual_font_size(void);
+static bool ui_reading_detail_init_hdfont(void);
+static bool ui_reading_detail_has_hdfont_suffix(const char *path);
+static bool ui_reading_detail_hdfont_find_glyph(uint32_t codepoint,
+                                                ui_reading_detail_hdfont_glyph_t *glyph);
+static uint16_t ui_reading_detail_hdfont_glyph_width(uint32_t codepoint,
+                                                     uint16_t fallback_width);
+static bool ui_reading_detail_render_text_hdfont_bitmap(const char *formatted_text);
+
 static lv_coord_t ui_reading_detail_get_text_offset_x(void)
 {
     return (lv_coord_t)((UI_READING_DETAIL_IMAGE_WIDTH - UI_READING_DETAIL_TEXT_WIDTH) / 2);
@@ -238,95 +329,635 @@ static void ui_reading_detail_refresh_file_name_label(void)
                                      ui_reading_list_get_selected_name());
 }
 
-extern const unsigned char xiaozhi_font[];
-extern const int xiaozhi_font_size;
+static void ui_reading_detail_release_hdfont(void)
+{
+    if (s_reading_detail_hdfont.index_data != NULL)
+    {
+        if (s_reading_detail_hdfont.index_from_audio)
+        {
+            audio_mem_free(s_reading_detail_hdfont.index_data);
+        }
+        else
+        {
+            rt_free(s_reading_detail_hdfont.index_data);
+        }
+    }
 
-static const uint8_t *ui_reading_detail_get_font_blob(size_t *font_size)
+    if (s_reading_detail_hdfont.ready && s_reading_detail_hdfont.fd >= 0)
+    {
+        close(s_reading_detail_hdfont.fd);
+    }
+
+    memset(&s_reading_detail_hdfont, 0, sizeof(s_reading_detail_hdfont));
+    s_reading_detail_hdfont.fd = -1;
+}
+
+static void ui_reading_detail_release_font_resources(void)
+{
+    ui_reading_detail_release_hdfont();
+}
+
+static const char *ui_reading_detail_get_selected_font_name(void)
+{
+    if (s_reading_detail_font_use_system)
+    {
+        return ui_i18n_pick("系统字体", "System Font");
+    }
+
+    return s_reading_detail_font_name[0] != '\0' ?
+           s_reading_detail_font_name :
+           ui_i18n_pick("未知字体", "Unknown Font");
+}
+
+static bool ui_reading_detail_get_selected_font_path(char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0U ||
+        s_reading_detail_font_use_system ||
+        s_reading_detail_font_path[0] == '\0')
+    {
+        return false;
+    }
+
+    rt_strncpy(buffer, s_reading_detail_font_path, buffer_size - 1U);
+    buffer[buffer_size - 1U] = '\0';
+    return true;
+}
+
+static bool ui_reading_detail_should_log_rejected_font(const char *path)
+{
+    if (path == NULL || path[0] == '\0')
+    {
+        return false;
+    }
+
+    if (strcmp(s_reading_detail_last_rejected_font_path, path) == 0)
+    {
+        return false;
+    }
+
+    rt_strncpy(s_reading_detail_last_rejected_font_path,
+               path,
+               sizeof(s_reading_detail_last_rejected_font_path) - 1U);
+    s_reading_detail_last_rejected_font_path[sizeof(s_reading_detail_last_rejected_font_path) - 1U] = '\0';
+    return true;
+}
+
+static bool ui_reading_detail_font_file_usable(const char *path, bool verbose)
+{
+    struct stat st;
+
+    if (path == NULL || path[0] == '\0')
+    {
+        return false;
+    }
+
+    if (!ui_reading_detail_has_hdfont_suffix(path))
+    {
+        if (verbose && ui_reading_detail_should_log_rejected_font(path))
+        {
+            rt_kprintf("reading_detail: reject non-hdfont %s\n", path);
+        }
+        return false;
+    }
+
+    if (stat(path, &st) != 0 || st.st_size <= 0)
+    {
+        if (verbose && ui_reading_detail_should_log_rejected_font(path))
+        {
+            rt_kprintf("reading_detail: reject font missing %s\n", path);
+        }
+        return false;
+    }
+
+    return true;
+}
+
+static bool ui_reading_detail_ascii_ieq(char left, char right)
+{
+    if (left >= 'A' && left <= 'Z')
+    {
+        left = (char)(left + ('a' - 'A'));
+    }
+    if (right >= 'A' && right <= 'Z')
+    {
+        right = (char)(right + ('a' - 'A'));
+    }
+    return left == right;
+}
+
+static bool ui_reading_detail_has_hdfont_suffix(const char *path)
+{
+    const char *suffix = ".hdfont";
+    size_t path_len;
+    size_t suffix_len;
+    size_t i;
+
+    if (path == NULL)
+    {
+        return false;
+    }
+
+    path_len = strlen(path);
+    suffix_len = strlen(suffix);
+    if (path_len < suffix_len)
+    {
+        return false;
+    }
+
+    path += path_len - suffix_len;
+    for (i = 0U; i < suffix_len; ++i)
+    {
+        if (!ui_reading_detail_ascii_ieq(path[i], suffix[i]))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static uint16_t ui_reading_detail_rd_u16(const uint8_t *data)
+{
+    return (uint16_t)((uint16_t)data[0] | ((uint16_t)data[1] << 8));
+}
+
+static uint32_t ui_reading_detail_rd_u32(const uint8_t *data)
+{
+    return (uint32_t)data[0] |
+           ((uint32_t)data[1] << 8) |
+           ((uint32_t)data[2] << 16) |
+           ((uint32_t)data[3] << 24);
+}
+
+static int16_t ui_reading_detail_rd_i16(const uint8_t *data)
+{
+    return (int16_t)ui_reading_detail_rd_u16(data);
+}
+
+static int32_t ui_reading_detail_rd_i32(const uint8_t *data)
+{
+    return (int32_t)ui_reading_detail_rd_u32(data);
+}
+
+static bool ui_reading_detail_hdfont_read_exact(int fd,
+                                                uint32_t offset,
+                                                void *buffer,
+                                                size_t length)
+{
+    uint8_t *out = (uint8_t *)buffer;
+    size_t done = 0U;
+
+    if (fd < 0 || buffer == NULL)
+    {
+        return false;
+    }
+
+    if (lseek(fd, (off_t)offset, SEEK_SET) < 0)
+    {
+        return false;
+    }
+
+    while (done < length)
+    {
+        int ret = read(fd, out + done, length - done);
+        if (ret <= 0)
+        {
+            return false;
+        }
+        done += (size_t)ret;
+    }
+
+    return true;
+}
+
+static bool ui_reading_detail_hdfont_parse_face_header(const uint8_t *header,
+                                                       uint32_t face_offset,
+                                                       uint32_t face_length,
+                                                       ui_reading_detail_hdfont_state_t *state)
+{
+    uint32_t index_offset;
+    uint32_t bitmap_offset;
+    uint32_t bitmap_size;
+
+    if (memcmp(header, UI_READING_DETAIL_HDFONT_FACE_MAGIC, 7U) != 0)
+    {
+        return false;
+    }
+
+    index_offset = ui_reading_detail_rd_u32(header + 32U);
+    bitmap_offset = ui_reading_detail_rd_u32(header + 36U);
+    bitmap_size = ui_reading_detail_rd_u32(header + 40U);
+    if (index_offset < UI_READING_DETAIL_HDFONT_FACE_HEADER_SIZE ||
+        bitmap_offset < index_offset ||
+        bitmap_size == 0U)
+    {
+        return false;
+    }
+
+    if (face_length > 0U &&
+        (bitmap_offset > face_length || bitmap_size > face_length - bitmap_offset))
+    {
+        return false;
+    }
+
+    state->flags = ui_reading_detail_rd_u16(header + 10U);
+    state->size_px = ui_reading_detail_rd_u16(header + 12U);
+    state->glyph_count = ui_reading_detail_rd_u32(header + 16U);
+    state->line_height26 = ui_reading_detail_rd_u32(header + 20U);
+    state->ascent26 = ui_reading_detail_rd_u32(header + 24U);
+    state->descent26 = ui_reading_detail_rd_u32(header + 28U);
+    state->face_offset = face_offset;
+    state->index_offset = face_offset + index_offset;
+    state->bitmap_offset = face_offset + bitmap_offset;
+    state->bitmap_size = bitmap_size;
+
+    if (state->glyph_count == 0U || state->glyph_count > 65535U ||
+        (state->flags & UI_READING_DETAIL_HDFONT_FLAG_ALPHA8) == 0U)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+static bool ui_reading_detail_hdfont_select_face(int fd,
+                                                 uint16_t requested_size,
+                                                 ui_reading_detail_hdfont_state_t *state)
+{
+    uint8_t header[UI_READING_DETAIL_HDFONT_PACKAGE_HEADER_SIZE];
+    uint8_t face_header[UI_READING_DETAIL_HDFONT_FACE_HEADER_SIZE];
+    uint16_t face_count;
+    uint32_t dir_offset;
+    uint16_t dir_entry_size;
+    uint32_t best_face_offset = 0U;
+    uint32_t best_face_length = 0U;
+    uint16_t best_delta = 0xFFFFU;
+    uint16_t i;
+
+    if (!ui_reading_detail_hdfont_read_exact(fd, 0U, header, sizeof(header)))
+    {
+        return false;
+    }
+
+    if (memcmp(header, UI_READING_DETAIL_HDFONT_FACE_MAGIC, 7U) == 0)
+    {
+        return ui_reading_detail_hdfont_parse_face_header(header, 0U, 0U, state);
+    }
+
+    if (memcmp(header, UI_READING_DETAIL_HDFONT_PACKAGE_MAGIC, 7U) != 0)
+    {
+        return false;
+    }
+
+    face_count = ui_reading_detail_rd_u16(header + 12U);
+    dir_offset = ui_reading_detail_rd_u32(header + 16U);
+    dir_entry_size = ui_reading_detail_rd_u16(header + 20U);
+    if (face_count == 0U ||
+        face_count > 128U ||
+        dir_offset < UI_READING_DETAIL_HDFONT_PACKAGE_HEADER_SIZE ||
+        dir_entry_size < UI_READING_DETAIL_HDFONT_PACKAGE_DIR_ENTRY_SIZE)
+    {
+        return false;
+    }
+
+    for (i = 0U; i < face_count; ++i)
+    {
+        uint8_t dir_entry[UI_READING_DETAIL_HDFONT_PACKAGE_DIR_ENTRY_SIZE];
+        uint16_t face_size;
+        uint16_t delta;
+        uint32_t face_offset;
+        uint32_t face_length;
+
+        if (!ui_reading_detail_hdfont_read_exact(fd,
+                                                 dir_offset + (uint32_t)i * dir_entry_size,
+                                                 dir_entry,
+                                                 sizeof(dir_entry)))
+        {
+            return false;
+        }
+
+        face_size = ui_reading_detail_rd_u16(dir_entry);
+        face_offset = ui_reading_detail_rd_u32(dir_entry + 4U);
+        face_length = ui_reading_detail_rd_u32(dir_entry + 8U);
+        delta = (face_size > requested_size) ?
+                (uint16_t)(face_size - requested_size) :
+                (uint16_t)(requested_size - face_size);
+
+        if (best_face_offset == 0U || delta < best_delta)
+        {
+            best_delta = delta;
+            best_face_offset = face_offset;
+            best_face_length = face_length;
+        }
+
+        if (delta == 0U)
+        {
+            break;
+        }
+    }
+
+    if (best_face_offset == 0U ||
+        !ui_reading_detail_hdfont_read_exact(fd,
+                                             best_face_offset,
+                                             face_header,
+                                             sizeof(face_header)))
+    {
+        return false;
+    }
+
+    return ui_reading_detail_hdfont_parse_face_header(face_header,
+                                                     best_face_offset,
+                                                     best_face_length,
+                                                     state);
+}
+
+static bool ui_reading_detail_init_hdfont(void)
 {
     char font_path[UI_FONT_MANAGER_PATH_MAX];
+    uint16_t actual_size;
+    uint32_t index_bytes;
     int fd;
-    off_t file_size;
-    ssize_t read_len;
+    ui_reading_detail_hdfont_state_t next_state;
 
-    if (font_size != NULL)
+    if (!ui_reading_detail_get_selected_font_path(font_path, sizeof(font_path)) ||
+        !ui_reading_detail_has_hdfont_suffix(font_path))
     {
-        *font_size = 0U;
+        if (s_reading_detail_hdfont.ready)
+        {
+            ui_reading_detail_release_hdfont();
+        }
+        return false;
     }
 
-    if (!ui_font_manager_get_active_font_path(font_path, sizeof(font_path)))
+    actual_size = ui_reading_detail_get_actual_font_size();
+    if (s_reading_detail_hdfont.ready &&
+        s_reading_detail_hdfont.size_px == actual_size &&
+        strcmp(s_reading_detail_hdfont.path, font_path) == 0)
     {
-        if (font_size != NULL)
-        {
-            *font_size = (size_t)xiaozhi_font_size;
-        }
-        return xiaozhi_font;
-    }
-
-    if (s_reading_detail_external_font_data != NULL)
-    {
-        if (font_size != NULL)
-        {
-            *font_size = s_reading_detail_external_font_size;
-        }
-        return s_reading_detail_external_font_data;
+        return true;
     }
 
     fd = open(font_path, O_RDONLY, 0);
     if (fd < 0)
     {
-        rt_kprintf("reading_detail: open font failed %s\n", font_path);
-        if (font_size != NULL)
-        {
-            *font_size = (size_t)xiaozhi_font_size;
-        }
-        return xiaozhi_font;
+        rt_kprintf("reading_detail: hdfont open failed %s\n", font_path);
+        ui_reading_detail_release_hdfont();
+        return false;
     }
 
-    file_size = lseek(fd, 0, SEEK_END);
-    if (file_size <= 0)
+    memset(&next_state, 0, sizeof(next_state));
+    next_state.fd = fd;
+    if (!ui_reading_detail_hdfont_select_face(fd, actual_size, &next_state))
     {
+        rt_kprintf("reading_detail: hdfont parse failed %s size=%u\n",
+                   font_path,
+                   (unsigned int)actual_size);
         close(fd);
-        if (font_size != NULL)
-        {
-            *font_size = (size_t)xiaozhi_font_size;
-        }
-        return xiaozhi_font;
+        ui_reading_detail_release_hdfont();
+        return false;
     }
 
-    (void)lseek(fd, 0, SEEK_SET);
-    s_reading_detail_external_font_data = (uint8_t *)audio_mem_malloc((uint32_t)file_size);
-    if (s_reading_detail_external_font_data == NULL)
+    index_bytes = next_state.glyph_count * UI_READING_DETAIL_HDFONT_GLYPH_ENTRY_SIZE;
+    next_state.index_data = (uint8_t *)audio_mem_malloc(index_bytes);
+    next_state.index_from_audio = true;
+    if (next_state.index_data == NULL)
     {
+        next_state.index_data = (uint8_t *)rt_malloc(index_bytes);
+        next_state.index_from_audio = false;
+    }
+    if (next_state.index_data == NULL)
+    {
+        rt_kprintf("reading_detail: hdfont index alloc failed glyphs=%lu bytes=%lu\n",
+                   (unsigned long)next_state.glyph_count,
+                   (unsigned long)index_bytes);
         close(fd);
-        rt_kprintf("reading_detail: alloc font failed size=%ld\n", (long)file_size);
-        if (font_size != NULL)
-        {
-            *font_size = (size_t)xiaozhi_font_size;
-        }
-        return xiaozhi_font;
+        ui_reading_detail_release_hdfont();
+        return false;
     }
 
-    read_len = read(fd, s_reading_detail_external_font_data, (size_t)file_size);
-    close(fd);
-    if (read_len != file_size)
+    if (!ui_reading_detail_hdfont_read_exact(fd,
+                                             next_state.index_offset,
+                                             next_state.index_data,
+                                             index_bytes))
     {
-        audio_mem_free(s_reading_detail_external_font_data);
-        s_reading_detail_external_font_data = NULL;
-        s_reading_detail_external_font_size = 0U;
-        rt_kprintf("reading_detail: read font failed %s\n", font_path);
-        if (font_size != NULL)
+        rt_kprintf("reading_detail: hdfont index read failed %s\n", font_path);
+        if (next_state.index_from_audio)
         {
-            *font_size = (size_t)xiaozhi_font_size;
+            audio_mem_free(next_state.index_data);
         }
-        return xiaozhi_font;
+        else
+        {
+            rt_free(next_state.index_data);
+        }
+        close(fd);
+        ui_reading_detail_release_hdfont();
+        return false;
     }
 
-    s_reading_detail_external_font_size = (size_t)file_size;
-    if (font_size != NULL)
+    rt_strncpy(next_state.path, font_path, sizeof(next_state.path) - 1U);
+    next_state.path[sizeof(next_state.path) - 1U] = '\0';
+    next_state.ready = true;
+
+    ui_reading_detail_release_hdfont();
+    s_reading_detail_hdfont = next_state;
+    rt_kprintf("reading_detail: hdfont loaded %s size=%u glyphs=%lu face=%lu\n",
+               font_path,
+               (unsigned int)s_reading_detail_hdfont.size_px,
+               (unsigned long)s_reading_detail_hdfont.glyph_count,
+               (unsigned long)s_reading_detail_hdfont.face_offset);
+    return true;
+}
+
+static void ui_reading_detail_hdfont_parse_glyph(uint32_t index,
+                                                 ui_reading_detail_hdfont_glyph_t *glyph)
+{
+    const uint8_t *entry;
+
+    entry = s_reading_detail_hdfont.index_data +
+            index * UI_READING_DETAIL_HDFONT_GLYPH_ENTRY_SIZE;
+    glyph->codepoint = ui_reading_detail_rd_u32(entry);
+    glyph->bitmap_offset = ui_reading_detail_rd_u32(entry + 4U);
+    glyph->bitmap_length = ui_reading_detail_rd_u32(entry + 8U);
+    glyph->advance26 = ui_reading_detail_rd_i32(entry + 12U);
+    glyph->x_off = ui_reading_detail_rd_i16(entry + 16U);
+    glyph->y_off = ui_reading_detail_rd_i16(entry + 18U);
+    glyph->width = ui_reading_detail_rd_u16(entry + 20U);
+    glyph->height = ui_reading_detail_rd_u16(entry + 22U);
+}
+
+static bool ui_reading_detail_hdfont_find_glyph(uint32_t codepoint,
+                                                ui_reading_detail_hdfont_glyph_t *glyph)
+{
+    uint32_t left = 0U;
+    uint32_t right;
+
+    if (!s_reading_detail_hdfont.ready ||
+        s_reading_detail_hdfont.index_data == NULL ||
+        glyph == NULL)
     {
-        *font_size = s_reading_detail_external_font_size;
+        return false;
     }
-    return s_reading_detail_external_font_data;
+
+    right = s_reading_detail_hdfont.glyph_count;
+    while (left < right)
+    {
+        uint32_t mid = left + (right - left) / 2U;
+        ui_reading_detail_hdfont_glyph_t current;
+
+        ui_reading_detail_hdfont_parse_glyph(mid, &current);
+        if (current.codepoint == codepoint)
+        {
+            *glyph = current;
+            return true;
+        }
+        if (current.codepoint < codepoint)
+        {
+            left = mid + 1U;
+        }
+        else
+        {
+            right = mid;
+        }
+    }
+
+    return false;
+}
+
+static uint16_t ui_reading_detail_hdfont_glyph_width(uint32_t codepoint,
+                                                     uint16_t fallback_width)
+{
+    ui_reading_detail_hdfont_glyph_t glyph;
+    int32_t advance;
+
+    if (!ui_reading_detail_init_hdfont() ||
+        !ui_reading_detail_hdfont_find_glyph(codepoint, &glyph))
+    {
+        return fallback_width;
+    }
+
+    advance = (glyph.advance26 + 32) >> 6;
+    if (advance <= 0)
+    {
+        return fallback_width;
+    }
+
+    return (uint16_t)advance;
+}
+
+static bool ui_reading_detail_set_selected_font_item(uint16_t index)
+{
+    const ui_font_manager_item_t *item;
+    bool changed;
+
+    if (index >= s_reading_detail_font_item_count)
+    {
+        return false;
+    }
+
+    item = &s_reading_detail_font_items[index];
+    if (!item->system && !ui_reading_detail_font_file_usable(item->path, true))
+    {
+        return false;
+    }
+
+    changed = (s_reading_detail_font_use_system != item->system);
+    if (!item->system)
+    {
+        changed = changed || strcmp(s_reading_detail_font_path, item->path) != 0;
+    }
+
+    s_reading_detail_font_item_index = index;
+    s_reading_detail_font_use_system = item->system;
+    if (item->system)
+    {
+        s_reading_detail_font_path[0] = '\0';
+        rt_strncpy(s_reading_detail_font_name,
+                   ui_i18n_pick("系统字体", "System Font"),
+                   sizeof(s_reading_detail_font_name) - 1U);
+    }
+    else
+    {
+        rt_strncpy(s_reading_detail_font_path, item->path, sizeof(s_reading_detail_font_path) - 1U);
+        rt_strncpy(s_reading_detail_font_name, item->name, sizeof(s_reading_detail_font_name) - 1U);
+    }
+    s_reading_detail_font_path[sizeof(s_reading_detail_font_path) - 1U] = '\0';
+    s_reading_detail_font_name[sizeof(s_reading_detail_font_name) - 1U] = '\0';
+
+    if (changed)
+    {
+        ui_reading_detail_release_font_resources();
+    }
+
+    return true;
+}
+
+static void ui_reading_detail_refresh_font_items(void)
+{
+    ui_font_manager_item_t discovered[UI_READING_DETAIL_FONT_ITEM_MAX];
+    bool previous_system = s_reading_detail_font_use_system;
+    char previous_path[UI_FONT_MANAGER_PATH_MAX];
+    uint16_t count;
+    uint16_t index = 0U;
+    uint16_t i;
+
+    rt_strncpy(previous_path, s_reading_detail_font_path, sizeof(previous_path) - 1U);
+    previous_path[sizeof(previous_path) - 1U] = '\0';
+
+    count = ui_font_manager_list_items(discovered,
+                                       (uint16_t)(sizeof(discovered) /
+                                                  sizeof(discovered[0])));
+    s_reading_detail_font_item_count = 0U;
+    memset(s_reading_detail_font_items, 0, sizeof(s_reading_detail_font_items));
+    for (i = 0U; i < count && s_reading_detail_font_item_count < UI_READING_DETAIL_FONT_ITEM_MAX; ++i)
+    {
+        if (!discovered[i].system &&
+            (!ui_reading_detail_has_hdfont_suffix(discovered[i].path) ||
+             !ui_reading_detail_font_file_usable(discovered[i].path, true)))
+        {
+            continue;
+        }
+
+        s_reading_detail_font_items[s_reading_detail_font_item_count] = discovered[i];
+        s_reading_detail_font_item_count++;
+    }
+
+    count = s_reading_detail_font_item_count;
+    if (count == 0U)
+    {
+        memset(&s_reading_detail_font_items[0], 0, sizeof(s_reading_detail_font_items[0]));
+        rt_strncpy(s_reading_detail_font_items[0].name,
+                   ui_i18n_pick("系统字体", "System Font"),
+                   sizeof(s_reading_detail_font_items[0].name) - 1U);
+        s_reading_detail_font_items[0].system = true;
+        count = 1U;
+    }
+
+    for (i = 0U; i < count; ++i)
+    {
+        if (previous_system && s_reading_detail_font_items[i].system)
+        {
+            index = i;
+            break;
+        }
+        if (!previous_system &&
+            !s_reading_detail_font_items[i].system &&
+            strcmp(previous_path, s_reading_detail_font_items[i].path) == 0)
+        {
+            index = i;
+            break;
+        }
+    }
+
+    s_reading_detail_font_item_count = count;
+    if (!ui_reading_detail_set_selected_font_item(index))
+    {
+        (void)ui_reading_detail_set_selected_font_item(0U);
+    }
+}
+
+static bool ui_reading_detail_using_external_font(void)
+{
+    return !s_reading_detail_font_use_system && s_reading_detail_font_path[0] != '\0';
 }
 
 static uint32_t ui_reading_detail_now_ms(void)
@@ -375,6 +1006,7 @@ static void ui_reading_detail_set_settings_visible(bool visible);
 static bool ui_reading_detail_settings_visible(void);
 static void ui_reading_detail_apply_text_style(void);
 static void ui_reading_detail_rebuild_layout(void);
+static bool ui_reading_detail_has_rebuild_source(void);
 static void ui_reading_detail_bottom_swipe_event_cb(lv_event_t *e);
 static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
                                                        uint32_t codepoint,
@@ -459,12 +1091,15 @@ static void ui_reading_detail_apply_text_style(void)
 
 static void ui_reading_detail_release_text_bitmap_buffer(void)
 {
-    if (s_reading_detail_bitmap_buffer != NULL)
+    if (s_reading_detail_bitmap_storage != NULL)
     {
-        audio_mem_free(s_reading_detail_bitmap_buffer);
-        s_reading_detail_bitmap_buffer = NULL;
+        audio_mem_free(s_reading_detail_bitmap_storage);
     }
 
+    s_reading_detail_bitmap_storage = NULL;
+    s_reading_detail_bitmap_pixels = NULL;
+    s_reading_detail_bitmap_pixel_bytes = 0U;
+    memset(&s_reading_detail_bitmap_draw_buf, 0, sizeof(s_reading_detail_bitmap_draw_buf));
     memset(&s_reading_detail_bitmap_dsc, 0, sizeof(s_reading_detail_bitmap_dsc));
     s_reading_detail_bitmap_inited = false;
     s_reading_detail_first_page_bitmap_ready = false;
@@ -724,79 +1359,62 @@ static uint16_t ui_reading_detail_get_max_lines_for_height(lv_coord_t text_heigh
     return max_lines;
 }
 
-static bool ui_reading_detail_init_stb_font(void)
-{
-    int font_px;
-    const uint8_t *font_blob;
-    size_t font_size;
-
-    if (s_reading_detail_stb_ready)
-    {
-        return true;
-    }
-
-    font_blob = ui_reading_detail_get_font_blob(&font_size);
-    if (font_blob == NULL || font_size == 0U)
-    {
-        rt_kprintf("reading_detail: no font blob\n");
-        return false;
-    }
-
-    if (!stbtt_InitFont(&s_reading_detail_stb_info,
-                        font_blob,
-                        stbtt_GetFontOffsetForIndex(font_blob, 0)))
-    {
-        rt_kprintf("reading_detail: stb init failed\n");
-        return false;
-    }
-
-    font_px = (int)ui_reading_detail_get_actual_font_size() + UI_READING_DETAIL_FONT_DELTA;
-    if (font_px <= 0)
-    {
-        font_px = UI_READING_DETAIL_TEXT_FONT + UI_READING_DETAIL_FONT_DELTA;
-    }
-
-    s_reading_detail_stb_scale = stbtt_ScaleForMappingEmToPixels(&s_reading_detail_stb_info,
-                                                                 (float)font_px);
-    stbtt_GetFontVMetrics(&s_reading_detail_stb_info,
-                          &s_reading_detail_stb_ascent,
-                          &s_reading_detail_stb_descent,
-                          &s_reading_detail_stb_line_gap);
-    s_reading_detail_stb_ready = true;
-    return true;
-}
-
 static bool ui_reading_detail_ensure_bitmap_buffer(void)
 {
-    uint32_t pixel_count;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    uint32_t pixel_bytes;
     uint32_t data_size;
+    uint8_t *image_data;
+    uint8_t level;
 
-    if (s_reading_detail_bitmap_buffer != NULL)
+    if (s_reading_detail_bitmap_storage != NULL)
     {
         return true;
     }
 
-    pixel_count = (uint32_t)ui_px_w(UI_READING_DETAIL_TEXT_WIDTH) *
-                  (uint32_t)ui_px_h(UI_READING_DETAIL_TEXT_HEIGHT);
-    data_size = pixel_count * (uint32_t)sizeof(lv_color_t);
-    s_reading_detail_bitmap_buffer = (lv_color_t *)audio_mem_malloc(data_size);
-    if (s_reading_detail_bitmap_buffer == NULL)
+    width = (uint32_t)ui_px_w(UI_READING_DETAIL_TEXT_WIDTH);
+    height = (uint32_t)ui_px_h(UI_READING_DETAIL_TEXT_HEIGHT);
+    stride = lv_draw_buf_width_to_stride(width, LV_COLOR_FORMAT_I4);
+    pixel_bytes = stride * height;
+    data_size = UI_READING_DETAIL_BITMAP_PALETTE_BYTES + pixel_bytes;
+
+    image_data = (uint8_t *)audio_mem_malloc(data_size);
+    if (image_data == NULL)
     {
         rt_kprintf("reading_detail: bitmap alloc failed bytes=%lu\n",
                    (unsigned long)data_size);
         return false;
     }
 
-    memset(s_reading_detail_bitmap_buffer, 0xFF, data_size);
-    memset(&s_reading_detail_bitmap_dsc, 0, sizeof(s_reading_detail_bitmap_dsc));
-    s_reading_detail_bitmap_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
-    s_reading_detail_bitmap_dsc.header.w = ui_px_w(UI_READING_DETAIL_TEXT_WIDTH);
-    s_reading_detail_bitmap_dsc.header.h = ui_px_h(UI_READING_DETAIL_TEXT_HEIGHT);
-    s_reading_detail_bitmap_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-    s_reading_detail_bitmap_dsc.header.stride =
-        s_reading_detail_bitmap_dsc.header.w * (lv_coord_t)sizeof(lv_color_t);
-    s_reading_detail_bitmap_dsc.data_size = data_size;
-    s_reading_detail_bitmap_dsc.data = (const uint8_t *)s_reading_detail_bitmap_buffer;
+    memset(image_data, 0, data_size);
+    if (lv_draw_buf_init(&s_reading_detail_bitmap_draw_buf,
+                         width,
+                         height,
+                         LV_COLOR_FORMAT_I4,
+                         stride,
+                         image_data,
+                         data_size) != LV_RESULT_OK)
+    {
+        audio_mem_free(image_data);
+        rt_kprintf("reading_detail: bitmap draw_buf init failed bytes=%lu\n",
+                   (unsigned long)data_size);
+        return false;
+    }
+
+    for (level = 0U; level < 16U; ++level)
+    {
+        uint8_t gray = (uint8_t)(255U - (level * 255U / 15U));
+        lv_draw_buf_set_palette(&s_reading_detail_bitmap_draw_buf,
+                                level,
+                                lv_color32_make(gray, gray, gray, 255));
+    }
+
+    s_reading_detail_bitmap_storage = image_data;
+    s_reading_detail_bitmap_pixels = image_data + UI_READING_DETAIL_BITMAP_PALETTE_BYTES;
+    s_reading_detail_bitmap_pixel_bytes = pixel_bytes;
+    lv_draw_buf_to_image(&s_reading_detail_bitmap_draw_buf, &s_reading_detail_bitmap_dsc);
     s_reading_detail_bitmap_inited = true;
     return true;
 }
@@ -1227,7 +1845,7 @@ static void ui_reading_detail_blend_glyph(const uint8_t *glyph_bitmap,
     int max_w;
     int max_h;
 
-    if (glyph_bitmap == NULL || s_reading_detail_bitmap_buffer == NULL || !s_reading_detail_bitmap_inited)
+    if (glyph_bitmap == NULL || s_reading_detail_bitmap_pixels == NULL || !s_reading_detail_bitmap_inited)
     {
         return;
     }
@@ -1246,6 +1864,9 @@ static void ui_reading_detail_blend_glyph(const uint8_t *glyph_bitmap,
         for (gx = 0; gx < glyph_w; ++gx)
         {
             uint8_t coverage;
+            uint8_t *pixel_byte;
+            uint8_t current_level;
+            uint8_t target_level;
             int px = dst_x + gx;
 
             if (px < 0 || px >= max_w)
@@ -1259,54 +1880,125 @@ static void ui_reading_detail_blend_glyph(const uint8_t *glyph_bitmap,
                 continue;
             }
 
-            s_reading_detail_bitmap_buffer[py * max_w + px] = lv_color_make(0, 0, 0);
+            target_level = (uint8_t)((coverage * 15U + 127U) / 255U);
+            if (target_level == 0U)
+            {
+                target_level = 1U;
+            }
+
+            pixel_byte = s_reading_detail_bitmap_pixels +
+                         ((size_t)py * (size_t)s_reading_detail_bitmap_dsc.header.stride) +
+                         ((uint32_t)px >> 1);
+            if ((px & 1) == 0)
+            {
+                current_level = (uint8_t)((*pixel_byte >> 4) & 0x0FU);
+                if (target_level > current_level)
+                {
+                    *pixel_byte = (uint8_t)((*pixel_byte & 0x0FU) | (target_level << 4));
+                }
+            }
+            else
+            {
+                current_level = (uint8_t)(*pixel_byte & 0x0FU);
+                if (target_level > current_level)
+                {
+                    *pixel_byte = (uint8_t)((*pixel_byte & 0xF0U) | target_level);
+                }
+            }
         }
     }
 }
 
-static bool ui_reading_detail_render_text_bitmap(const char *formatted_text)
+static bool ui_reading_detail_hdfont_decode_rle(const uint8_t *encoded,
+                                                uint32_t encoded_length,
+                                                uint8_t *decoded,
+                                                uint32_t decoded_length)
 {
-    uint8_t *glyph_bitmap;
+    uint32_t in_pos = 0U;
+    uint32_t out_pos = 0U;
+
+    if (encoded == NULL || decoded == NULL)
+    {
+        return false;
+    }
+
+    while (in_pos < encoded_length && out_pos < decoded_length)
+    {
+        uint8_t token = encoded[in_pos++];
+        uint32_t run_length = (uint32_t)(token & 0x7FU) + 1U;
+
+        if ((token & 0x80U) == 0U)
+        {
+            if (run_length > decoded_length - out_pos)
+            {
+                return false;
+            }
+            memset(decoded + out_pos, 0, run_length);
+            out_pos += run_length;
+            continue;
+        }
+
+        if (run_length > encoded_length - in_pos ||
+            run_length > decoded_length - out_pos)
+        {
+            return false;
+        }
+        memcpy(decoded + out_pos, encoded + in_pos, run_length);
+        in_pos += run_length;
+        out_pos += run_length;
+    }
+
+    return in_pos == encoded_length && out_pos == decoded_length;
+}
+
+static bool ui_reading_detail_render_text_hdfont_bitmap(const char *formatted_text)
+{
     uint32_t index;
+    uint32_t progress_tick;
     int pen_x;
     int pen_y;
     int baseline;
     int line_step;
     uint32_t codepoint;
+    uint32_t scratch_half = (uint32_t)(sizeof(s_reading_detail_glyph_scratch) / 2U);
 
     if (formatted_text == NULL)
     {
         return false;
     }
 
-    if (!ui_reading_detail_ensure_bitmap_buffer() || !ui_reading_detail_init_stb_font())
+    if (!ui_reading_detail_ensure_bitmap_buffer() || !ui_reading_detail_init_hdfont())
     {
         return false;
     }
 
-    memset(s_reading_detail_bitmap_buffer, 0xFF, s_reading_detail_bitmap_dsc.data_size);
-    line_step = ui_reading_detail_get_text_line_height_px() + ui_reading_detail_get_line_space();
+    memset(s_reading_detail_bitmap_pixels, 0, s_reading_detail_bitmap_pixel_bytes);
+    line_step = (int)((s_reading_detail_hdfont.line_height26 + 32U) >> 6);
+    if (line_step <= 0)
+    {
+        line_step = ui_px_h(UI_READING_DETAIL_TEXT_FONT);
+    }
+    line_step += ui_reading_detail_get_line_space();
     if (line_step <= 0)
     {
         line_step = 1;
     }
 
-    baseline = (int)(s_reading_detail_stb_ascent * s_reading_detail_stb_scale + 0.5f);
+    baseline = (int)((s_reading_detail_hdfont.ascent26 + 32U) >> 6);
+    if (baseline <= 0)
+    {
+        baseline = line_step;
+    }
+
     pen_x = 0;
     pen_y = baseline;
     index = 0U;
-    glyph_bitmap = s_reading_detail_glyph_scratch;
+    progress_tick = 0U;
 
     while ((codepoint = ui_reading_detail_utf8_next(formatted_text, &index)) != 0U)
     {
-        uint32_t next_index = index;
-        uint32_t next_codepoint = ui_reading_detail_utf8_next(formatted_text, &next_index);
-        int x0;
-        int y0;
-        int x1;
-        int y1;
-        int glyph_w;
-        int glyph_h;
+        ui_reading_detail_hdfont_glyph_t glyph;
+        uint16_t fallback_width;
         int advance_px;
 
         if (codepoint == '\n')
@@ -1316,73 +2008,117 @@ static bool ui_reading_detail_render_text_bitmap(const char *formatted_text)
             continue;
         }
 
-        advance_px = (int)ui_reading_detail_get_glyph_width_fast(NULL,
-                                                                 codepoint,
-                                                                 next_codepoint,
-                                                                 (uint16_t)LV_MAX(ui_reading_detail_get_text_line_height_px() / 2, 1));
-        stbtt_GetCodepointBitmapBox(&s_reading_detail_stb_info,
-                                    (int)codepoint,
-                                    s_reading_detail_stb_scale,
-                                    s_reading_detail_stb_scale,
-                                    &x0,
-                                    &y0,
-                                    &x1,
-                                    &y1);
-        glyph_w = x1 - x0;
-        glyph_h = y1 - y0;
-        if (glyph_w > 0 && glyph_h > 0)
+        fallback_width = (uint16_t)LV_MAX(line_step / 2, 1);
+        if (!ui_reading_detail_hdfont_find_glyph(codepoint, &glyph))
         {
-            size_t glyph_bytes = (size_t)glyph_w * (size_t)glyph_h;
+            pen_x += fallback_width;
+            continue;
+        }
 
-            if (glyph_bytes > sizeof(s_reading_detail_glyph_scratch))
+        advance_px = (glyph.advance26 + 32) >> 6;
+        if (advance_px <= 0)
+        {
+            advance_px = fallback_width;
+        }
+
+        if (glyph.width > 0U &&
+            glyph.height > 0U &&
+            glyph.bitmap_length > 0U &&
+            glyph.bitmap_offset <= s_reading_detail_hdfont.bitmap_size &&
+            glyph.bitmap_length <= s_reading_detail_hdfont.bitmap_size - glyph.bitmap_offset)
+        {
+            uint32_t raw_bytes = (uint32_t)glyph.width * (uint32_t)glyph.height;
+            uint8_t *encoded = NULL;
+            uint8_t *decoded = NULL;
+            bool encoded_heap = false;
+            bool decoded_heap = false;
+            bool glyph_ready = false;
+
+            if (raw_bytes > 0U)
             {
-                glyph_bitmap = (uint8_t *)rt_malloc(glyph_bytes);
-                if (glyph_bitmap == NULL)
+                if (glyph.bitmap_length <= scratch_half)
                 {
-                    return false;
+                    encoded = s_reading_detail_glyph_scratch;
                 }
-            }
+                else
+                {
+                    encoded = (uint8_t *)rt_malloc(glyph.bitmap_length);
+                    encoded_heap = true;
+                }
 
-            memset(glyph_bitmap, 0, glyph_bytes);
-            stbtt_MakeCodepointBitmap(&s_reading_detail_stb_info,
-                                      glyph_bitmap,
-                                      glyph_w,
-                                      glyph_h,
-                                      glyph_w,
-                                      s_reading_detail_stb_scale,
-                                      s_reading_detail_stb_scale,
-                                      (int)codepoint);
-            ui_reading_detail_blend_glyph(glyph_bitmap,
-                                          glyph_w,
-                                          glyph_h,
-                                          pen_x + x0,
-                                          pen_y + y0);
+                if (raw_bytes <= scratch_half)
+                {
+                    decoded = s_reading_detail_glyph_scratch + scratch_half;
+                }
+                else
+                {
+                    decoded = (uint8_t *)rt_malloc(raw_bytes);
+                    decoded_heap = true;
+                }
 
-            if (glyph_bitmap != s_reading_detail_glyph_scratch)
-            {
-                rt_free(glyph_bitmap);
-                glyph_bitmap = s_reading_detail_glyph_scratch;
+                if (encoded != NULL && decoded != NULL &&
+                    ui_reading_detail_hdfont_read_exact(s_reading_detail_hdfont.fd,
+                                                        s_reading_detail_hdfont.bitmap_offset + glyph.bitmap_offset,
+                                                        encoded,
+                                                        glyph.bitmap_length))
+                {
+                    if ((s_reading_detail_hdfont.flags & UI_READING_DETAIL_HDFONT_FLAG_RLE) != 0U)
+                    {
+                        glyph_ready = ui_reading_detail_hdfont_decode_rle(encoded,
+                                                                          glyph.bitmap_length,
+                                                                          decoded,
+                                                                          raw_bytes);
+                    }
+                    else if (glyph.bitmap_length == raw_bytes)
+                    {
+                        memcpy(decoded, encoded, raw_bytes);
+                        glyph_ready = true;
+                    }
+                }
+
+                if (glyph_ready)
+                {
+                    ui_reading_detail_blend_glyph(decoded,
+                                                  (int)glyph.width,
+                                                  (int)glyph.height,
+                                                  pen_x + (int)glyph.x_off,
+                                                  pen_y + (int)glyph.y_off);
+                }
+
+                if (encoded_heap && encoded != NULL)
+                {
+                    rt_free(encoded);
+                }
+                if (decoded_heap && decoded != NULL)
+                {
+                    rt_free(decoded);
+                }
             }
         }
 
         pen_x += advance_px;
+        if ((progress_tick++ & 0x3FU) == 0U)
+        {
+            ui_reading_detail_watchdog_progress();
+        }
     }
 
     return true;
 }
 
-static bool ui_reading_detail_is_cjk_codepoint(uint32_t codepoint)
+static bool ui_reading_detail_render_text_bitmap(const char *formatted_text)
 {
-    return (codepoint >= 0x3400U && codepoint <= 0x4DBFU) ||
-           (codepoint >= 0x4E00U && codepoint <= 0x9FFFU) ||
-           (codepoint >= 0xF900U && codepoint <= 0xFAFFU);
-}
+    if (formatted_text == NULL)
+    {
+        return false;
+    }
 
-static bool ui_reading_detail_is_fullwidth_codepoint(uint32_t codepoint)
-{
-    return (codepoint >= 0x3000U && codepoint <= 0x303FU) ||
-           (codepoint >= 0xFF01U && codepoint <= 0xFF60U) ||
-           (codepoint >= 0xFFE0U && codepoint <= 0xFFE6U);
+    if (!ui_reading_detail_init_hdfont())
+    {
+        return false;
+    }
+
+    return ui_reading_detail_render_text_hdfont_bitmap(formatted_text);
 }
 
 static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
@@ -1390,100 +2126,55 @@ static uint16_t ui_reading_detail_get_glyph_width_fast(const lv_font_t *font,
                                                        uint32_t next_codepoint,
                                                        uint16_t fallback_width)
 {
-    int advance = 0;
-    int lsb = 0;
-    int kern_advance = 0;
-    uint16_t actual_font_size;
+    lv_font_glyph_dsc_t glyph_dsc;
     uint16_t width;
 
-    LV_UNUSED(font);
-
-    if (!ui_reading_detail_init_stb_font())
+    if (s_reading_detail_font_path[0] != '\0' &&
+        ui_reading_detail_has_hdfont_suffix(s_reading_detail_font_path) &&
+        ui_reading_detail_init_hdfont())
     {
-        return fallback_width;
+        return ui_reading_detail_hdfont_glyph_width(codepoint, fallback_width);
     }
 
-    actual_font_size = ui_reading_detail_get_actual_font_size();
-    if (s_reading_detail_width_cache_size != actual_font_size)
+    if (font != NULL)
     {
-        memset(s_reading_detail_ascii_width_cache, 0, sizeof(s_reading_detail_ascii_width_cache));
-        s_reading_detail_cjk_width = 0U;
-        s_reading_detail_fullwidth_width = 0U;
-        s_reading_detail_width_cache_size = actual_font_size;
-    }
-
-    if (codepoint < 128U)
-    {
-        width = s_reading_detail_ascii_width_cache[codepoint];
-        if (width == 0U)
+        memset(&glyph_dsc, 0, sizeof(glyph_dsc));
+        if (lv_font_get_glyph_dsc(font, &glyph_dsc, codepoint, next_codepoint))
         {
-            stbtt_GetCodepointHMetrics(&s_reading_detail_stb_info, (int)codepoint, &advance, &lsb);
-            kern_advance = next_codepoint != 0U
-                               ? stbtt_GetCodepointKernAdvance(&s_reading_detail_stb_info,
-                                                               (int)codepoint,
-                                                               (int)next_codepoint)
-                               : 0;
-            width = (uint16_t)((advance + kern_advance) * s_reading_detail_stb_scale + 0.5f);
-            if (width == 0U) width = fallback_width;
-            s_reading_detail_ascii_width_cache[codepoint] = width;
+            width = glyph_dsc.adv_w;
+            if (width == 0U)
+            {
+                width = fallback_width;
+            }
+            return width;
         }
-        return width;
     }
 
-    if (ui_reading_detail_is_cjk_codepoint(codepoint))
-    {
-        if (s_reading_detail_cjk_width == 0U)
-        {
-            stbtt_GetCodepointHMetrics(&s_reading_detail_stb_info, 0x4E2D, &advance, &lsb);
-            s_reading_detail_cjk_width = (uint16_t)(advance * s_reading_detail_stb_scale + 0.5f);
-            if (s_reading_detail_cjk_width == 0U) s_reading_detail_cjk_width = fallback_width;
-        }
-        return s_reading_detail_cjk_width;
-    }
-
-    if (ui_reading_detail_is_fullwidth_codepoint(codepoint))
-    {
-        if (s_reading_detail_fullwidth_width == 0U)
-        {
-            stbtt_GetCodepointHMetrics(&s_reading_detail_stb_info, 0x3002, &advance, &lsb);
-            s_reading_detail_fullwidth_width = (uint16_t)(advance * s_reading_detail_stb_scale + 0.5f);
-            if (s_reading_detail_fullwidth_width == 0U) s_reading_detail_fullwidth_width = fallback_width;
-        }
-        return s_reading_detail_fullwidth_width;
-    }
-
-    stbtt_GetCodepointHMetrics(&s_reading_detail_stb_info, (int)codepoint, &advance, &lsb);
-    kern_advance = next_codepoint != 0U
-                       ? stbtt_GetCodepointKernAdvance(&s_reading_detail_stb_info,
-                                                       (int)codepoint,
-                                                       (int)next_codepoint)
-                       : 0;
-    width = (uint16_t)((advance + kern_advance) * s_reading_detail_stb_scale + 0.5f);
-    if (width == 0U)
-    {
-        width = fallback_width;
-    }
-
-    return width;
+    return fallback_width;
 }
 
 static int32_t ui_reading_detail_get_text_line_height_px(void)
 {
-    float line_height;
+    const lv_font_t *font;
 
-    if (!ui_reading_detail_init_stb_font())
+    if (s_reading_detail_font_path[0] != '\0' &&
+        ui_reading_detail_has_hdfont_suffix(s_reading_detail_font_path) &&
+        ui_reading_detail_init_hdfont())
     {
-        return ui_px_h(UI_READING_DETAIL_TEXT_FONT);
+        int32_t hdfont_line_height = (int32_t)((s_reading_detail_hdfont.line_height26 + 32U) >> 6);
+        if (hdfont_line_height > 0)
+        {
+            return hdfont_line_height;
+        }
     }
 
-    line_height = (float)(s_reading_detail_stb_ascent - s_reading_detail_stb_descent + s_reading_detail_stb_line_gap) *
-                  s_reading_detail_stb_scale;
-    if (line_height <= 0.0f)
+    font = ui_reading_detail_get_text_font();
+    if (font != NULL && font->line_height > 0)
     {
-        line_height = (float)ui_px_h(UI_READING_DETAIL_TEXT_FONT);
+        return font->line_height;
     }
 
-    return (int32_t)(line_height + 0.5f);
+    return ui_px_h(UI_READING_DETAIL_TEXT_FONT);
 }
 
 static bool ui_reading_detail_append_page_entry(ui_reading_detail_page_type_t type,
@@ -1534,6 +2225,7 @@ static uint32_t ui_reading_detail_measure_page_range_limited(uint32_t start,
     uint32_t current_index = start;
     uint32_t previous_index = start;
     uint32_t char_start = start;
+    uint32_t progress_tick = 0U;
     uint32_t letter;
     uint32_t letter_next;
     int32_t line_width = 0;
@@ -1541,6 +2233,7 @@ static uint32_t ui_reading_detail_measure_page_range_limited(uint32_t start,
     int32_t max_width;
     int32_t letter_space;
     uint16_t fallback_width;
+    const lv_font_t *font;
     size_t written = 0U;
 
     if (formatted_buffer != NULL && formatted_buffer_size > 0U)
@@ -1554,6 +2247,7 @@ static uint32_t ui_reading_detail_measure_page_range_limited(uint32_t start,
     }
     max_width = ui_px_w(UI_READING_DETAIL_TEXT_WIDTH);
     letter_space = 0;
+    font = ui_reading_detail_using_external_font() ? NULL : ui_reading_detail_get_text_font();
     fallback_width = (uint16_t)(ui_reading_detail_get_text_line_height_px() / 2);
     if (fallback_width == 0U)
     {
@@ -1578,6 +2272,10 @@ static uint32_t ui_reading_detail_measure_page_range_limited(uint32_t start,
         {
             ++current_index;
             end = current_index;
+            if ((progress_tick++ & 0x3FU) == 0U)
+            {
+                ui_reading_detail_watchdog_progress();
+            }
             continue;
         }
 
@@ -1590,6 +2288,10 @@ static uint32_t ui_reading_detail_measure_page_range_limited(uint32_t start,
             {
                 formatted_buffer[written++] = current_byte;
                 formatted_buffer[written] = '\0';
+            }
+            if ((progress_tick++ & 0x3FU) == 0U)
+            {
+                ui_reading_detail_watchdog_progress();
             }
             continue;
         }
@@ -1610,6 +2312,10 @@ static uint32_t ui_reading_detail_measure_page_range_limited(uint32_t start,
 
             ++lines_used;
             line_width = 0;
+            if ((progress_tick++ & 0x3FU) == 0U)
+            {
+                ui_reading_detail_watchdog_progress();
+            }
             continue;
         }
 
@@ -1623,7 +2329,7 @@ static uint32_t ui_reading_detail_measure_page_range_limited(uint32_t start,
         {
             letter_next = 0U;
         }
-        char_width = (int32_t)ui_reading_detail_get_glyph_width_fast(NULL,
+        char_width = (int32_t)ui_reading_detail_get_glyph_width_fast(font,
                                                                      letter,
                                                                      letter_next,
                                                                      fallback_width);
@@ -1664,6 +2370,11 @@ static uint32_t ui_reading_detail_measure_page_range_limited(uint32_t start,
                                                          char_start,
                                                          current_index);
             formatted_buffer[written] = '\0';
+        }
+
+        if ((progress_tick++ & 0x3FU) == 0U)
+        {
+            ui_reading_detail_watchdog_progress();
         }
     }
 
@@ -1708,6 +2419,8 @@ static uint32_t ui_reading_detail_measure_page_range(uint32_t start,
 
 static bool ui_reading_detail_paginate_text_range(uint32_t start, uint32_t end)
 {
+    uint32_t progress_tick = 0U;
+
     while (start < end && ui_reading_detail_get_text_byte(start) != '\0')
     {
         uint32_t page_end = ui_reading_detail_measure_page_range(start, end, NULL, 0U);
@@ -1723,6 +2436,10 @@ static bool ui_reading_detail_paginate_text_range(uint32_t start, uint32_t end)
         }
 
         start = page_end;
+        if ((progress_tick++ & 0x07U) == 0U)
+        {
+            ui_reading_detail_watchdog_progress();
+        }
     }
 
     return true;
@@ -1731,6 +2448,7 @@ static bool ui_reading_detail_paginate_text_range(uint32_t start, uint32_t end)
 static bool ui_reading_detail_paginate_epub_blocks(void)
 {
     uint16_t i = 0U;
+    uint32_t progress_tick = 0U;
     uint32_t viewport_height = (uint32_t)ui_px_h(UI_READING_DETAIL_READING_BOX_HEIGHT);
     uint32_t gap_height = (uint32_t)ui_px_y(UI_READING_DETAIL_IMAGE_TEXT_GAP);
 
@@ -1745,6 +2463,10 @@ static bool ui_reading_detail_paginate_epub_blocks(void)
                 return false;
             }
             ++i;
+            if ((progress_tick++ & 0x03U) == 0U)
+            {
+                ui_reading_detail_watchdog_progress();
+            }
             continue;
         }
 
@@ -1766,6 +2488,10 @@ static bool ui_reading_detail_paginate_epub_blocks(void)
                     return false;
                 }
                 ++i;
+                if ((progress_tick++ & 0x03U) == 0U)
+                {
+                    ui_reading_detail_watchdog_progress();
+                }
                 continue;
             }
 
@@ -1781,6 +2507,10 @@ static bool ui_reading_detail_paginate_epub_blocks(void)
                     return false;
                 }
                 ++i;
+                if ((progress_tick++ & 0x03U) == 0U)
+                {
+                    ui_reading_detail_watchdog_progress();
+                }
                 continue;
             }
 
@@ -1827,6 +2557,10 @@ static bool ui_reading_detail_paginate_epub_blocks(void)
                     }
 
                     i = (uint16_t)(i + 2U);
+                    if ((progress_tick++ & 0x03U) == 0U)
+                    {
+                        ui_reading_detail_watchdog_progress();
+                    }
                     continue;
                 }
             }
@@ -1843,6 +2577,10 @@ static bool ui_reading_detail_paginate_epub_blocks(void)
         }
 
         ++i;
+        if ((progress_tick++ & 0x03U) == 0U)
+        {
+            ui_reading_detail_watchdog_progress();
+        }
     }
 
     return true;
@@ -1866,6 +2604,7 @@ static void ui_reading_detail_load_thread_entry(void *parameter)
         request_id = s_reading_detail_request_id;
         rt_snprintf(file_path, sizeof(file_path), "%s", s_reading_detail_request_path);
         load_start_ms = ui_reading_detail_now_ms();
+        ui_reading_detail_watchdog_begin_long_task();
 
         if (file_path[0] == '\0')
         {
@@ -1899,6 +2638,7 @@ static void ui_reading_detail_load_thread_entry(void *parameter)
         {
             rt_kprintf("reading_detail: request=%lu canceled after load\n",
                        (unsigned long)request_id);
+            ui_reading_detail_watchdog_end_long_task();
             continue;
         }
 
@@ -1919,6 +2659,8 @@ static void ui_reading_detail_load_thread_entry(void *parameter)
                        has_last_page ? 1U : 0U,
                        (unsigned long)(ui_reading_detail_now_ms() - load_start_ms));
         }
+
+        ui_reading_detail_watchdog_end_long_task();
     }
 }
 
@@ -2064,6 +2806,12 @@ static void ui_reading_detail_refresh_settings_panel(void)
         ui_reading_detail_set_label_text(s_reading_detail_refs.line_space_value_label, value_text);
     }
 
+    if (s_reading_detail_refs.font_family_value_label != NULL)
+    {
+        ui_reading_detail_set_label_text(s_reading_detail_refs.font_family_value_label,
+                                         ui_reading_detail_get_selected_font_name());
+    }
+
     ui_reading_detail_set_button_enabled(s_reading_detail_refs.font_dec_button,
                                          s_reading_detail_font_size > UI_READING_DETAIL_TEXT_FONT_MIN);
     ui_reading_detail_set_button_enabled(s_reading_detail_refs.font_inc_button,
@@ -2072,6 +2820,27 @@ static void ui_reading_detail_refresh_settings_panel(void)
                                          s_reading_detail_line_space > UI_READING_DETAIL_TEXT_LINE_SPACE_MIN);
     ui_reading_detail_set_button_enabled(s_reading_detail_refs.line_space_inc_button,
                                          s_reading_detail_line_space < UI_READING_DETAIL_TEXT_LINE_SPACE_MAX);
+    ui_reading_detail_set_button_enabled(s_reading_detail_refs.font_family_prev_button,
+                                         s_reading_detail_font_item_count > 1U);
+    ui_reading_detail_set_button_enabled(s_reading_detail_refs.font_family_next_button,
+                                         s_reading_detail_font_item_count > 1U);
+}
+
+static bool ui_reading_detail_has_rebuild_source(void)
+{
+    if (ui_reading_detail_get_text_length() > 0U)
+    {
+        return true;
+    }
+
+    if (s_reading_detail_epub_block_count > 0U ||
+        s_reading_detail_epub_image_count > 0U ||
+        s_reading_detail_page_count > 0U)
+    {
+        return true;
+    }
+
+    return false;
 }
 
 static void ui_reading_detail_set_settings_visible(bool visible)
@@ -2106,12 +2875,14 @@ static void ui_reading_detail_rebuild_layout(void)
     uint16_t new_page_count;
     uint16_t target_page = 0U;
 
-    if (s_reading_detail_load_state != UI_READING_DETAIL_LOAD_READY || ui_reading_detail_get_text_length() == 0U)
+    if (s_reading_detail_load_state != UI_READING_DETAIL_LOAD_READY ||
+        !ui_reading_detail_has_rebuild_source())
     {
         ui_reading_detail_apply_text_style();
         return;
     }
 
+    ui_reading_detail_watchdog_begin_long_task();
     fallback_page = s_reading_detail_current_page;
     old_page_count = ui_reading_detail_snapshot_page_count(NULL);
     if (fallback_page < old_page_count)
@@ -2129,8 +2900,6 @@ static void ui_reading_detail_rebuild_layout(void)
 
     ui_reading_detail_release_current_image();
     ui_reading_detail_release_text_bitmap_buffer();
-    s_reading_detail_stb_ready = false;
-    s_reading_detail_width_cache_size = 0U;
     s_reading_detail_first_page_layout_ready = false;
     s_reading_detail_first_page_bitmap_ready = false;
     s_reading_detail_first_render_done = false;
@@ -2146,11 +2915,13 @@ static void ui_reading_detail_rebuild_layout(void)
     {
         if (!ui_reading_detail_paginate_epub_blocks())
         {
+            ui_reading_detail_watchdog_end_long_task();
             return;
         }
     }
     else if (!ui_reading_detail_paginate_text_range(0U, ui_reading_detail_get_text_length()))
     {
+        ui_reading_detail_watchdog_end_long_task();
         return;
     }
 
@@ -2199,6 +2970,7 @@ static void ui_reading_detail_rebuild_layout(void)
     ui_reading_detail_apply_text_style();
 
     (void)ui_reading_detail_render_page();
+    ui_reading_detail_watchdog_end_long_task();
 }
 
 static bool ui_reading_detail_load_text_from_path(const char *file_path)
@@ -2208,7 +2980,9 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
     uint32_t paginate_start_ms;
     uint32_t paginate_elapsed_ms;
     bool using_memory_fallback = false;
+    bool ok = false;
 
+    ui_reading_detail_watchdog_begin_long_task();
     memset(s_reading_detail_text, 0, sizeof(s_reading_detail_text));
     ui_reading_detail_reset_text_source();
     ui_reading_detail_reset_epub_lazy_state();
@@ -2221,7 +2995,7 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
                     ui_i18n_pick("TF 卡中还没有可阅读的文本文件。\n\n请先返回列表页确认文件是否已经识别。",
                                  "There are no readable text files on the TF card yet.\n\nPlease go back to the list and check whether the file has been detected."));
         ui_reading_detail_use_memory_text();
-        return false;
+        goto cleanup;
     }
 
     open_start_ms = ui_reading_detail_now_ms();
@@ -2234,9 +3008,10 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
                                  "Failed to open file:\n%s\n\nPlease confirm the file exists and the TF card is readable."),
                     file_path);
         ui_reading_detail_use_memory_text();
-        return false;
+        goto cleanup;
     }
     open_elapsed_ms = ui_reading_detail_now_ms() - open_start_ms;
+    ui_reading_detail_watchdog_progress();
 
     if (ui_reading_detail_get_text_length() == 0U)
     {
@@ -2272,6 +3047,7 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
         }
         paginate_elapsed_ms = ui_reading_detail_now_ms() - paginate_start_ms;
     }
+    ui_reading_detail_watchdog_progress();
 
     rt_kprintf("reading_detail: file=%s bytes=%lu open_ms=%lu paginate_ms=%lu total_ms=%lu\n",
                file_path,
@@ -2280,7 +3056,11 @@ static bool ui_reading_detail_load_text_from_path(const char *file_path)
                (unsigned long)paginate_elapsed_ms,
                (unsigned long)(ui_reading_detail_now_ms() - open_start_ms));
 
-    return true;
+    ok = true;
+
+cleanup:
+    ui_reading_detail_watchdog_end_long_task();
+    return ok;
 }
 
 static bool ui_reading_detail_load_epub_chapter(uint16_t chapter_index)
@@ -2288,11 +3068,13 @@ static bool ui_reading_detail_load_epub_chapter(uint16_t chapter_index)
     char error_text[128];
     uint16_t block_count = 0U;
     uint16_t image_count = 0U;
+    bool ok = false;
 
+    ui_reading_detail_watchdog_begin_long_task();
     if (!s_reading_detail_epub_lazy_mode ||
         chapter_index >= s_reading_detail_epub_spine_count)
     {
-        return false;
+        goto cleanup;
     }
 
     ui_reading_detail_reset_pages();
@@ -2320,8 +3102,9 @@ static bool ui_reading_detail_load_epub_chapter(uint16_t chapter_index)
         ui_reading_detail_reset_pages();
         ui_reading_detail_use_memory_text();
         (void)ui_reading_detail_paginate_text_range(0U, (uint32_t)strlen(s_reading_detail_text));
-        return false;
+        goto cleanup;
     }
+    ui_reading_detail_watchdog_progress();
 
     ui_reading_detail_use_memory_text();
 
@@ -2336,6 +3119,7 @@ static bool ui_reading_detail_load_epub_chapter(uint16_t chapter_index)
         rt_kprintf("reading_detail: epub chapter paginate failed chapter=%u\n",
                    (unsigned int)chapter_index);
     }
+    ui_reading_detail_watchdog_progress();
 
     if (s_reading_detail_page_count == 0U)
     {
@@ -2351,14 +3135,20 @@ static bool ui_reading_detail_load_epub_chapter(uint16_t chapter_index)
 
     s_reading_detail_epub_current_chapter = chapter_index;
     s_reading_detail_image_transition_refresh_pending = true;
-    return true;
+    ok = true;
+
+cleanup:
+    ui_reading_detail_watchdog_end_long_task();
+    return ok;
 }
 
 static bool ui_reading_detail_load_epub_from_path(const char *file_path)
 {
     char error_text[128];
     uint16_t spine_count = 0U;
+    bool ok = false;
 
+    ui_reading_detail_watchdog_begin_long_task();
     ui_reading_detail_reset_text_source();
     ui_reading_detail_reset_pages();
     ui_reading_detail_reset_epub_lazy_state();
@@ -2380,8 +3170,9 @@ static bool ui_reading_detail_load_epub_from_path(const char *file_path)
         ui_reading_detail_reset_pages();
         ui_reading_detail_use_memory_text();
         (void)ui_reading_detail_paginate_text_range(0U, (uint32_t)strlen(s_reading_detail_text));
-        return false;
+        goto cleanup;
     }
+    ui_reading_detail_watchdog_progress();
 
     s_reading_detail_epub_lazy_mode = true;
     s_reading_detail_epub_spine_count = spine_count;
@@ -2390,14 +3181,19 @@ static bool ui_reading_detail_load_epub_from_path(const char *file_path)
     if (!ui_reading_detail_load_epub_chapter(0U))
     {
         ui_reading_detail_reset_epub_lazy_state();
-        return false;
+        goto cleanup;
     }
+    ui_reading_detail_watchdog_progress();
 
     rt_kprintf("reading_detail: epub indexed chapters=%u current=%u pages=%u\n",
                (unsigned int)s_reading_detail_epub_spine_count,
                (unsigned int)(s_reading_detail_epub_current_chapter + 1U),
                (unsigned int)s_reading_detail_page_count);
-    return true;
+    ok = true;
+
+cleanup:
+    ui_reading_detail_watchdog_end_long_task();
+    return ok;
 }
 
 static void ui_reading_detail_request_async_load(void)
@@ -2437,6 +3233,7 @@ static void ui_reading_detail_load_selected_sync(void)
     uint32_t request_id;
     uint32_t load_start_ms;
 
+    ui_reading_detail_watchdog_begin_long_task();
     ui_reading_detail_reset_text_source();
     ui_reading_detail_reset_pages();
     memset(s_reading_detail_text, 0, sizeof(s_reading_detail_text));
@@ -2464,6 +3261,7 @@ static void ui_reading_detail_load_selected_sync(void)
     rt_kprintf("reading_detail: request=%lu queued path=%s\n",
                (unsigned long)request_id,
                s_reading_detail_request_path[0] != '\0' ? s_reading_detail_request_path : "<none>");
+    ui_reading_detail_watchdog_progress();
 
     if (file_path[0] == '\0')
     {
@@ -2496,6 +3294,7 @@ static void ui_reading_detail_load_selected_sync(void)
         s_reading_detail_first_page_layout_ready = page_count > 0U;
         s_reading_detail_load_state = UI_READING_DETAIL_LOAD_READY;
         s_reading_detail_completed_request_id = request_id;
+        ui_reading_detail_watchdog_progress();
 
         rt_kprintf("reading_detail: request=%lu pages=%u last=%u total_ms=%lu\n",
                    (unsigned long)request_id,
@@ -2503,6 +3302,8 @@ static void ui_reading_detail_load_selected_sync(void)
                    has_last_page ? 1U : 0U,
                    (unsigned long)(ui_reading_detail_now_ms() - load_start_ms));
     }
+
+    ui_reading_detail_watchdog_end_long_task();
 }
 
 bool ui_reading_detail_prepare_selected_async(void)
@@ -2572,8 +3373,9 @@ static bool ui_reading_detail_render_page(void)
     }
 
     render_start_ms = ui_reading_detail_now_ms();
+    ui_reading_detail_watchdog_begin_long_task();
     s_reading_detail_render_in_progress = true;
-    app_watchdog_pet();
+    ui_reading_detail_watchdog_progress();
     page = &s_reading_detail_pages[s_reading_detail_current_page];
     image_max_width = ui_px_w(UI_READING_DETAIL_IMAGE_WIDTH);
     decode_image_height = (page->type == UI_READING_DETAIL_PAGE_IMAGE)
@@ -2602,6 +3404,7 @@ static bool ui_reading_detail_render_page(void)
 
         ui_reading_detail_release_current_image();
         ui_reading_detail_release_text_bitmap_buffer();
+        ui_reading_detail_watchdog_progress();
         if (!reading_epub_decode_image(s_reading_detail_request_path,
                                        s_reading_detail_epub_images[page->image_index].internal_path,
                                        (uint16_t)image_max_width,
@@ -2684,6 +3487,7 @@ static bool ui_reading_detail_render_page(void)
         lv_obj_set_size(s_reading_detail_refs.content_label,
                         ui_px_w(UI_READING_DETAIL_TEXT_WIDTH),
                         ui_px_h(UI_READING_DETAIL_TEXT_HEIGHT));
+        ui_reading_detail_watchdog_progress();
         (void)ui_reading_detail_measure_page_range(page->start,
                                                    page->end,
                                                    s_reading_detail_page_buffer,
@@ -2696,10 +3500,39 @@ static bool ui_reading_detail_render_page(void)
                         ui_i18n_pick("正文为空。", "The page is empty."));
         }
 
-        ui_reading_detail_set_label_text(s_reading_detail_refs.content_label,
-                                         s_reading_detail_page_buffer);
-        lv_obj_clear_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
+        if (ui_reading_detail_using_external_font() &&
+            ui_reading_detail_render_text_bitmap(s_reading_detail_page_buffer))
+        {
+            ui_image_set_src(s_reading_detail_refs.content_image, &s_reading_detail_bitmap_dsc);
+            lv_image_set_pivot(s_reading_detail_refs.content_image, 0, 0);
+            lv_image_set_scale_x(s_reading_detail_refs.content_image, LV_SCALE_NONE);
+            lv_image_set_scale_y(s_reading_detail_refs.content_image, LV_SCALE_NONE);
+            lv_image_set_antialias(s_reading_detail_refs.content_image, false);
+            lv_image_set_offset_x(s_reading_detail_refs.content_image, 0);
+            lv_image_set_offset_y(s_reading_detail_refs.content_image, 0);
+            lv_image_set_inner_align(s_reading_detail_refs.content_image, LV_IMAGE_ALIGN_TOP_LEFT);
+            lv_obj_set_pos(s_reading_detail_refs.content_image,
+                           ui_reading_detail_get_text_offset_x(),
+                           8);
+            lv_obj_set_size(s_reading_detail_refs.content_image,
+                            s_reading_detail_bitmap_dsc.header.w,
+                            s_reading_detail_bitmap_dsc.header.h);
+            lv_obj_add_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_clear_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
+        }
+        else
+        {
+            if (ui_reading_detail_using_external_font())
+            {
+                rt_kprintf("reading_detail: external font render fallback path=%s page=%u\n",
+                           s_reading_detail_font_path[0] != '\0' ? s_reading_detail_font_path : "<empty>",
+                           (unsigned int)(s_reading_detail_current_page + 1U));
+            }
+            ui_reading_detail_set_label_text(s_reading_detail_refs.content_label,
+                                             s_reading_detail_page_buffer);
+            lv_obj_clear_flag(s_reading_detail_refs.content_label, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(s_reading_detail_refs.content_image, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
     lv_obj_invalidate(s_reading_detail_refs.content_label);
@@ -2718,12 +3551,13 @@ static bool ui_reading_detail_render_page(void)
     render_ok = true;
 
 done:
-    app_watchdog_pet();
+    ui_reading_detail_watchdog_progress();
     s_reading_detail_render_in_progress = false;
     if (render_ok)
     {
         ui_reading_detail_arm_navigation_lock(UI_READING_DETAIL_NAV_LOCK_MS);
     }
+    ui_reading_detail_watchdog_end_long_task();
     return render_ok;
 }
 
@@ -2777,7 +3611,7 @@ static void ui_reading_detail_prev_page(void)
     }
 
     ui_reading_detail_arm_navigation_lock(UI_READING_DETAIL_NAV_LOCK_MS);
-    app_watchdog_pet();
+    ui_reading_detail_watchdog_progress();
 
     if (s_reading_detail_current_page == 0U)
     {
@@ -2826,7 +3660,7 @@ static void ui_reading_detail_next_page(void)
     }
 
     ui_reading_detail_arm_navigation_lock(UI_READING_DETAIL_NAV_LOCK_MS);
-    app_watchdog_pet();
+    ui_reading_detail_watchdog_progress();
 
     page_count = ui_reading_detail_snapshot_page_count(&has_last_page);
     if ((uint16_t)(s_reading_detail_current_page + 1U) < page_count)
@@ -3068,6 +3902,65 @@ static void ui_reading_detail_adjust_line_space_event_cb(lv_event_t *e)
     ui_reading_detail_rebuild_layout();
 }
 
+static void ui_reading_detail_adjust_font_family_event_cb(lv_event_t *e)
+{
+    intptr_t delta;
+    int32_t next_index;
+    const char *selected_name;
+    char selected_path[UI_FONT_MANAGER_PATH_MAX];
+
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    ui_reading_detail_refresh_font_items();
+    if (s_reading_detail_font_item_count <= 1U)
+    {
+        return;
+    }
+
+    delta = (intptr_t)lv_event_get_user_data(e);
+    next_index = (int32_t)s_reading_detail_font_item_index + (int32_t)delta;
+    if (next_index < 0)
+    {
+        next_index = (int32_t)s_reading_detail_font_item_count - 1;
+    }
+    else if (next_index >= (int32_t)s_reading_detail_font_item_count)
+    {
+        next_index = 0;
+    }
+
+    if ((uint16_t)next_index == s_reading_detail_font_item_index)
+    {
+        return;
+    }
+
+    if (!ui_reading_detail_set_selected_font_item((uint16_t)next_index))
+    {
+        return;
+    }
+
+    selected_name = ui_reading_detail_get_selected_font_name();
+    selected_path[0] = '\0';
+    (void)ui_reading_detail_get_selected_font_path(selected_path, sizeof(selected_path));
+    rt_kprintf("reading_detail: font switched name=%s system=%u path=%s\n",
+               selected_name,
+               s_reading_detail_font_use_system ? 1U : 0U,
+               selected_path[0] != '\0' ? selected_path : "<system>");
+
+    if (ui_reading_detail_using_external_font() &&
+        !ui_reading_detail_init_hdfont())
+    {
+        rt_kprintf("reading_detail: selected hdfont init failed path=%s\n",
+                   selected_path[0] != '\0' ? selected_path : "<empty>");
+    }
+
+    ui_reading_detail_apply_text_style();
+    ui_reading_detail_refresh_settings_panel();
+    ui_reading_detail_rebuild_layout();
+}
+
 void ui_Reading_Detail_screen_init(void)
 {
     lv_obj_t *reading_box;
@@ -3287,6 +4180,34 @@ void ui_Reading_Detail_screen_init(void)
                         ui_reading_detail_adjust_line_space_event_cb,
                         LV_EVENT_CLICKED,
                         (void *)(intptr_t)UI_READING_DETAIL_TEXT_LINE_SPACE_STEP);
+
+    row = ui_create_card(s_reading_detail_refs.settings_panel, 24, 152, 480, 42, UI_SCREEN_NONE, false, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    ui_create_label(row, ui_i18n_pick("字体", "Typeface"), 0, 8, 80, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
+    button = ui_create_button(row, 204, 0, 48, 42, "<", 22, UI_SCREEN_NONE, false);
+    s_reading_detail_refs.font_family_prev_button = button;
+    lv_obj_add_event_cb(button,
+                        ui_reading_detail_adjust_font_family_event_cb,
+                        LV_EVENT_CLICKED,
+                        (void *)(intptr_t)-1);
+    s_reading_detail_refs.font_family_value_label = ui_create_label(row,
+                                                                    ui_i18n_pick("系统字体", "System Font"),
+                                                                    260,
+                                                                    8,
+                                                                    UI_READING_DETAIL_SETTINGS_FONT_NAME_WIDTH,
+                                                                    24,
+                                                                    18,
+                                                                    LV_TEXT_ALIGN_CENTER,
+                                                                    false,
+                                                                    false);
+    button = ui_create_button(row, 432, 0, 48, 42, ">", 22, UI_SCREEN_NONE, true);
+    s_reading_detail_refs.font_family_next_button = button;
+    lv_obj_add_event_cb(button,
+                        ui_reading_detail_adjust_font_family_event_cb,
+                        LV_EVENT_CLICKED,
+                        (void *)(intptr_t)1);
+    ui_reading_detail_refresh_font_items();
     ui_reading_detail_refresh_settings_panel();
 
     ui_reading_detail_show_loading_state();
@@ -3327,18 +4248,7 @@ void ui_Reading_Detail_screen_destroy(void)
         ui_Reading_Detail = NULL;
     }
 
-    if (s_reading_detail_external_font_data != NULL)
-    {
-        audio_mem_free(s_reading_detail_external_font_data);
-        s_reading_detail_external_font_data = NULL;
-        s_reading_detail_external_font_size = 0U;
-    }
-    s_reading_detail_stb_ready = false;
-    s_reading_detail_width_cache_size = 0U;
-    s_reading_detail_stb_scale = 0.0f;
-    s_reading_detail_stb_ascent = 0;
-    s_reading_detail_stb_descent = 0;
-    s_reading_detail_stb_line_gap = 0;
+    ui_reading_detail_release_font_resources();
 
     memset(&s_reading_detail_refs, 0, sizeof(s_reading_detail_refs));
     memset(&s_reading_detail_swipe_state, 0, sizeof(s_reading_detail_swipe_state));

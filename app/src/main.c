@@ -20,6 +20,7 @@
 #include "bt_connection_manager.h"
 #include "audio_manager.h"
 #include "app_buttons.h"
+#include "app_watchdog.h"
 #include "bf0_pm.h"
 #include "gui_app_pm.h"
 #include "ui/ui.h"
@@ -598,6 +599,7 @@ static void ui_thread_entry(void *parameter)
         }
 #endif
 
+        app_watchdog_heartbeat(APP_WDT_MODULE_UI);
         rt_thread_mdelay(delay_ms);
     }
 }
@@ -750,6 +752,8 @@ int main(void)
     {
         return 0;
     }
+
+    app_watchdog_set_mode(APP_WDT_MODE_ACTIVE);
 
     while (1)
     {

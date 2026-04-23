@@ -15,7 +15,6 @@
 #include "rtthread.h"
 #include "ui.h"
 #include "ui_dispatch.h"
-#include "lv_tiny_ttf.h"
 #include "ui_helpers.h"
 #include "ui_runtime_adapter.h"
 
@@ -75,7 +74,7 @@ static bool s_font_manager_async_refresh_pending = false;
 static char s_font_manager_list_signature[UI_FONT_MANAGER_PATH_MAX] = {0};
 static bool s_font_manager_list_signature_valid = false;
 
-static bool ui_font_manager_has_ttf_suffix(const char *name)
+static bool ui_font_manager_has_hdfont_suffix(const char *name)
 {
     const char *ext;
 
@@ -90,7 +89,7 @@ static bool ui_font_manager_has_ttf_suffix(const char *name)
         return false;
     }
 
-    return strcasecmp(ext, ".ttf") == 0;
+    return strcasecmp(ext, ".hdfont") == 0;
 }
 
 static bool ui_font_manager_is_hidden_entry(const char *name)
@@ -183,25 +182,6 @@ static void ui_font_manager_copy_path(char *buffer, size_t buffer_size, const ch
 
     rt_strncpy(buffer, path, buffer_size - 1U);
     buffer[buffer_size - 1U] = '\0';
-}
-
-static bool ui_font_manager_make_lvgl_fs_path(const char *font_path, char *buffer, size_t buffer_size)
-{
-    if (font_path == NULL || font_path[0] == '\0' || buffer == NULL || buffer_size < 5U)
-    {
-        return false;
-    }
-
-    if (font_path[0] == '/')
-    {
-        rt_snprintf(buffer, buffer_size, "A:%s", font_path);
-    }
-    else
-    {
-        rt_snprintf(buffer, buffer_size, "A:/%s", font_path);
-    }
-
-    return true;
 }
 
 static bool ui_font_manager_try_mount_device(const char *device_name,
@@ -407,28 +387,12 @@ static bool ui_font_manager_font_file_acceptable(const char *path, bool verbose)
 
 static bool ui_font_manager_can_open_font(const char *path)
 {
-    lv_font_t *probe_font;
-    char lvgl_path[UI_FONT_MANAGER_PATH_MAX + 8];
-
     if (!ui_font_manager_font_file_acceptable(path, true))
     {
         return false;
     }
 
-    if (!ui_font_manager_make_lvgl_fs_path(path, lvgl_path, sizeof(lvgl_path)))
-    {
-        return false;
-    }
-
-    probe_font = lv_tiny_ttf_create_file_ex(lvgl_path, 18, LV_FONT_KERNING_NORMAL, 8);
-    if (probe_font == NULL)
-    {
-        rt_kprintf("font_mgr: probe font load failed %s lvgl=%s\n", path, lvgl_path);
-        return false;
-    }
-
-    lv_tiny_ttf_destroy(probe_font);
-    return true;
+    return ui_font_manager_has_hdfont_suffix(path);
 }
 
 static uint32_t ui_font_manager_hash_list_item(const char *name, off_t file_size)
@@ -485,7 +449,7 @@ static bool ui_font_manager_capture_list_signature(char *signature, size_t signa
         struct stat st;
 
         if (ui_font_manager_is_hidden_entry(entry->d_name) ||
-            !ui_font_manager_has_ttf_suffix(entry->d_name))
+            !ui_font_manager_has_hdfont_suffix(entry->d_name))
         {
             continue;
         }
@@ -752,17 +716,13 @@ void ui_font_manager_notify_storage_ready(void)
     if (!storage_ready)
     {
         ui_font_manager_apply_configured_font(&changed);
-        ui_font_manager_request_refresh_if_changed(changed ||
-                                                   (list_changed &&
-                                                    ui_dispatch_get_active_screen() == UI_SCREEN_FONT_SETTINGS));
+        ui_font_manager_request_refresh_if_changed(changed || list_changed);
         return;
     }
 
     ui_font_manager_load_config();
     ui_font_manager_apply_configured_font(&changed);
-    ui_font_manager_request_refresh_if_changed(changed ||
-                                               (list_changed &&
-                                                ui_dispatch_get_active_screen() == UI_SCREEN_FONT_SETTINGS));
+    ui_font_manager_request_refresh_if_changed(changed || list_changed);
 }
 
 void ui_font_manager_notify_storage_removed(void)
@@ -880,7 +840,7 @@ uint16_t ui_font_manager_list_items(ui_font_manager_item_t *items, uint16_t max_
     while ((entry = readdir(dir)) != NULL)
     {
         if (ui_font_manager_is_hidden_entry(entry->d_name) ||
-            !ui_font_manager_has_ttf_suffix(entry->d_name))
+            !ui_font_manager_has_hdfont_suffix(entry->d_name))
         {
             continue;
         }
@@ -944,7 +904,6 @@ void ui_font_manager_rebuild_ui(void)
     ui_Language_screen_destroy();
     ui_Bluetooth_Config_screen_destroy();
     ui_Wallpaper_screen_destroy();
-    ui_Font_Settings_screen_destroy();
     ui_helpers_reset_font_cache();
 
     if (active == UI_SCREEN_NONE || active == UI_SCREEN_STANDBY)

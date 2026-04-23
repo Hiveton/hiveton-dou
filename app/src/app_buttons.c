@@ -228,12 +228,9 @@ static bool app_buttons_wakeup_only(void)
     bool sleeping = sleep_manager_is_sleeping();
     ui_screen_id_t active = ui_dispatch_get_active_screen();
 
-    ui_dispatch_request_activity();
-
     if (sleeping || active == UI_SCREEN_STANDBY)
     {
         sleep_manager_request_wakeup();
-        ui_dispatch_request_exit_standby();
         return true;
     }
 
@@ -242,7 +239,7 @@ static bool app_buttons_wakeup_only(void)
 
 static void app_buttons_dispatch_short(app_key_id_t key_id)
 {
-    app_watchdog_input_hint();
+    app_watchdog_heartbeat(APP_WDT_MODULE_BUTTON);
 
     switch (key_id)
     {
@@ -253,9 +250,9 @@ static void app_buttons_dispatch_short(app_key_id_t key_id)
 
             if (sleeping || active == UI_SCREEN_STANDBY)
             {
-                ui_dispatch_request_activity();
                 sleep_manager_request_wakeup();
-                ui_dispatch_request_exit_standby();
+                s_app_keys[APP_KEY_PWR].long_reported = true;
+                return;
             }
             else
             {
@@ -281,11 +278,16 @@ static void app_buttons_dispatch_short(app_key_id_t key_id)
 
 static void app_buttons_dispatch_long(app_key_id_t key_id)
 {
-    app_watchdog_input_hint();
+    app_watchdog_heartbeat(APP_WDT_MODULE_BUTTON);
 
     if (key_id == APP_KEY_PWR)
     {
-        if (!app_buttons_wakeup_only())
+        if (app_buttons_wakeup_only())
+        {
+            s_app_keys[APP_KEY_PWR].long_reported = true;
+            return;
+        }
+
         {
             APP_BUTTON_LOG("app_buttons: pwr long\n");
             ui_dispatch_request_poweroff_confirm();
@@ -504,6 +506,7 @@ static void app_buttons_thread_entry(void *parameter)
         {
             app_buttons_refresh_runtime_pinmux();
             app_buttons_poll_short_keys();
+            app_watchdog_heartbeat(APP_WDT_MODULE_BUTTON);
             if (!s_app_buttons_module_enabled)
             {
                 return;
@@ -523,12 +526,10 @@ static void app_buttons_thread_entry(void *parameter)
 
         if (((pending & APP_BUTTON_EVT_PWR_PRESS) != 0U) && s_app_keys[APP_KEY_PWR].enabled)
         {
-            app_watchdog_input_hint();
-            if (sleep_manager_is_sleeping() || (ui_dispatch_get_active_screen() == UI_SCREEN_STANDBY))
+            app_watchdog_heartbeat(APP_WDT_MODULE_BUTTON);
+            if (app_buttons_wakeup_only())
             {
-                ui_dispatch_request_activity();
-                sleep_manager_request_wakeup();
-                ui_dispatch_request_exit_standby();
+                s_app_keys[APP_KEY_PWR].long_reported = true;
             }
         }
 

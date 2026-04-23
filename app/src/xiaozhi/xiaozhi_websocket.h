@@ -50,6 +50,7 @@ void xz_websocket_begin_barge_in(void);
         rt_sem_t sem;
         uint8_t is_connected;
     } xiaozhi_ws_t;
+    extern xiaozhi_ws_t g_xz_ws;
 
     typedef enum
     {

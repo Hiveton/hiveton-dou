@@ -138,6 +138,7 @@
 #define CAT1_MODEM_HIGH_BAUD_FAIL_LIMIT 2U
 #define CAT1_MODEM_RX_DRAIN_TIMEOUT_MS 120U
 #define CAT1_MODEM_RX_DRAIN_IDLE_MS    20U
+#define CAT1_MODEM_REG_LONG_TASK_TIMEOUT_MS 180000U
 #define CAT1_MODEM_CONFIG_FILE_NAME "cat1.cfg"
 
 typedef enum
@@ -629,7 +630,7 @@ static rt_size_t cat1_modem_raw_exchange(rt_device_t uart_device,
         }
 
         rt_size_t read_len = rt_device_read(uart_device, -1, &rx_buf[total], rx_buf_size - 1 - total);
-        app_watchdog_pet();
+        app_watchdog_progress(APP_WDT_MODULE_CAT1);
         if (read_len > 0)
         {
             rt_size_t full_total;
@@ -954,6 +955,9 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
 {
     char rx_buf[256];
     int i;
+    int result = -RT_ERROR;
+
+    app_watchdog_begin_long_task(APP_WDT_MODULE_CAT1, CAT1_MODEM_REG_LONG_TASK_TIMEOUT_MS);
 
     (void)cat1_modem_raw_command(uart_device, "AT+CEREG=2\r", rx_buf, sizeof(rx_buf), 2000U);
     (void)cat1_modem_raw_command(uart_device, "AT+CGREG=2\r", rx_buf, sizeof(rx_buf), 2000U);
@@ -973,9 +977,10 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
         if (cat1_modem_offline_requested())
         {
             cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
-            return -RT_EBUSY;
+            result = -RT_EBUSY;
+            goto cat1_wait_registered_cleanup;
         }
-        app_watchdog_pet();
+        app_watchdog_progress(APP_WDT_MODULE_CAT1);
 
         cat1_modem_set_status_text("4G: 检查SIM卡");
         cpin_result = cat1_modem_raw_command(uart_device, "AT+CPIN?\r", rx_buf, sizeof(rx_buf), 3000U);
@@ -1020,7 +1025,8 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
             if (cfun_result == -RT_EBUSY || cat1_modem_offline_requested())
             {
                 cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
-                return -RT_EBUSY;
+                result = -RT_EBUSY;
+                goto cat1_wait_registered_cleanup;
             }
 
             if (cfun_result == RT_EOK)
@@ -1050,7 +1056,8 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
                     if (stat == 1 || stat == 5)
                     {
                         cat1_modem_set_status_text("4G: LTE已注册");
-                        return RT_EOK;
+                        result = RT_EOK;
+                        goto cat1_wait_registered_cleanup;
                     }
                 }
             }
@@ -1058,7 +1065,8 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
         if (cat1_modem_offline_requested())
         {
             cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
-            return -RT_EBUSY;
+            result = -RT_EBUSY;
+            goto cat1_wait_registered_cleanup;
         }
 
         if (cat1_modem_raw_command(uart_device, "AT+CREG?\r", rx_buf, sizeof(rx_buf), 3000U) == RT_EOK)
@@ -1072,7 +1080,8 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
         if (cat1_modem_offline_requested())
         {
             cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
-            return -RT_EBUSY;
+            result = -RT_EBUSY;
+            goto cat1_wait_registered_cleanup;
         }
 
         if (cat1_modem_raw_command(uart_device, "AT+CGREG?\r", rx_buf, sizeof(rx_buf), 3000U) == RT_EOK)
@@ -1090,7 +1099,8 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
         if (cat1_modem_offline_requested())
         {
             cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
-            return -RT_EBUSY;
+            result = -RT_EBUSY;
+            goto cat1_wait_registered_cleanup;
         }
 
         if (cat1_modem_raw_command(uart_device, "AT+CGATT?\r", rx_buf, sizeof(rx_buf), 3000U) == RT_EOK)
@@ -1108,7 +1118,8 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
         if (cat1_modem_offline_requested())
         {
             cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
-            return -RT_EBUSY;
+            result = -RT_EBUSY;
+            goto cat1_wait_registered_cleanup;
         }
 
         if (cat1_modem_raw_command(uart_device, "AT+QNWINFO\r", rx_buf, sizeof(rx_buf), 3000U) == RT_EOK)
@@ -1122,7 +1133,8 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
         if (cat1_modem_offline_requested())
         {
             cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
-            return -RT_EBUSY;
+            result = -RT_EBUSY;
+            goto cat1_wait_registered_cleanup;
         }
 
         if (cat1_modem_raw_command(uart_device, "AT+COPS?\r", rx_buf, sizeof(rx_buf), 3000U) == RT_EOK)
@@ -1136,7 +1148,8 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
         if (cat1_modem_offline_requested())
         {
             cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
-            return -RT_EBUSY;
+            result = -RT_EBUSY;
+            goto cat1_wait_registered_cleanup;
         }
 
         if (cat1_modem_raw_command(uart_device, "AT+CSQ\r", rx_buf, sizeof(rx_buf), 3000U) == RT_EOK)
@@ -1154,7 +1167,8 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
         if (cat1_modem_offline_requested())
         {
             cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
-            return -RT_EBUSY;
+            result = -RT_EBUSY;
+            goto cat1_wait_registered_cleanup;
         }
 
         if (need_extra_diag)
@@ -1167,16 +1181,21 @@ static int cat1_modem_wait_registered_raw(rt_device_t uart_device)
         if (cat1_modem_offline_requested())
         {
             cat1_modem_set_status_text("4G: 蓝牙连接，4G已停用");
-            return -RT_EBUSY;
+            result = -RT_EBUSY;
+            goto cat1_wait_registered_cleanup;
         }
 
         cat1_modem_set_status_text("4G: 搜网中");
-        app_watchdog_pet();
+        app_watchdog_progress(APP_WDT_MODULE_CAT1);
         rt_thread_mdelay(1000);
     }
 
     cat1_modem_set_status_text("4G: 注册超时");
-    return -RT_ETIMEOUT;
+    result = -RT_ETIMEOUT;
+
+cat1_wait_registered_cleanup:
+    app_watchdog_end_long_task(APP_WDT_MODULE_CAT1);
+    return result;
 }
 
 static int cat1_modem_configure_pdp_raw(rt_device_t uart_device)

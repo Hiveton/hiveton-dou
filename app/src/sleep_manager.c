@@ -7,6 +7,7 @@
 #include <rtdevice.h>
 #include <drivers/alarm.h>
 
+#include "app_watchdog.h"
 #include "network/net_manager.h"
 #include "ui/ui_dispatch.h"
 #include "gui_app_pm.h"
@@ -31,17 +32,40 @@
 #define SLEEP_MANAGER_NETWORK_SETUP_GRACE_MS 180000U
 
 static bool s_sleeping = false;
+static bool s_standby_pending = false;
 static ui_screen_id_t s_last_source_screen = UI_SCREEN_HOME;
 static rt_alarm_t s_minute_alarm = RT_NULL;
 static bool s_activity_reported = false;
 static rt_tick_t s_last_activity_tick = 0;
 
+static void sleep_manager_ensure_alarm(void);
+
 static bool sleep_manager_is_idle_exempt_screen(ui_screen_id_t screen_id)
 {
     return (screen_id == UI_SCREEN_NONE ||
             screen_id == UI_SCREEN_STANDBY ||
-            screen_id == UI_SCREEN_AI_DOU ||
             screen_id == UI_SCREEN_READING_DETAIL);
+}
+
+static void sleep_manager_begin_sleep_cycle(void)
+{
+    if (s_sleeping)
+    {
+        return;
+    }
+
+    s_sleeping = true;
+    app_watchdog_set_mode(APP_WDT_MODE_SLEEP);
+    s_standby_pending = false;
+    sleep_manager_ensure_alarm();
+    if (s_minute_alarm != RT_NULL)
+    {
+        if (rt_alarm_start(s_minute_alarm) != RT_EOK)
+        {
+            rt_kprintf("sleep_mgr: minute alarm start failed\n");
+        }
+    }
+    net_manager_suspend_for_sleep();
 }
 
 static void sleep_manager_minute_alarm_cb(rt_alarm_t alarm, time_t timestamp)
@@ -140,40 +164,25 @@ void sleep_manager_on_enter_standby(ui_screen_id_t from_screen)
 
     if (s_sleeping)
     {
+        s_standby_pending = false;
         return;
     }
 
-    s_sleeping = true;
-    sleep_manager_ensure_alarm();
-    if (s_minute_alarm != RT_NULL)
-    {
-        if (rt_alarm_start(s_minute_alarm) != RT_EOK)
-        {
-            rt_kprintf("sleep_mgr: minute alarm start failed\n");
-        }
-    }
-    net_manager_suspend_for_sleep();
-    if (gui_pm_is_ready())
-    {
-        /*
-         * On EPD targets APP_KEEP_EPD_CONTENT_ON_SLEEP is forced to 1 above:
-         * enter GUI PM sleep without adding an app-level clear/blank step. The
-         * GUI PM layer keeps the panel content visible instead of poweroff-clear.
-         */
-        gui_pm_fsm(GUI_PM_ACTION_SLEEP);
-    }
+    s_standby_pending = true;
 }
 
 void sleep_manager_on_exit_standby(ui_screen_id_t target_screen)
 {
     (void)target_screen;
 
+    s_standby_pending = false;
     if (!s_sleeping)
     {
         return;
     }
 
     s_sleeping = false;
+    app_watchdog_set_mode(APP_WDT_MODE_ACTIVE);
     if (s_minute_alarm != RT_NULL)
     {
         rt_alarm_stop(s_minute_alarm);
@@ -193,6 +202,18 @@ bool sleep_manager_is_sleeping(void)
 
 void sleep_manager_request_wakeup(void)
 {
+    ui_screen_id_t active_screen = ui_dispatch_get_active_screen();
+
+    if (active_screen == UI_SCREEN_STANDBY)
+    {
+        if (s_sleeping && gui_pm_is_ready())
+        {
+            gui_pm_fsm(GUI_PM_ACTION_WAKEUP);
+        }
+        ui_dispatch_request_exit_standby();
+        return;
+    }
+
     if (s_sleeping)
     {
         if (gui_pm_is_ready())
@@ -212,6 +233,16 @@ void sleep_manager_request_wakeup(void)
 
 void sleep_manager_resume_sleep_cycle(void)
 {
+    if (!s_sleeping)
+    {
+        if (!s_standby_pending)
+        {
+            return;
+        }
+
+        sleep_manager_begin_sleep_cycle();
+    }
+
     if (!s_sleeping)
     {
         return;

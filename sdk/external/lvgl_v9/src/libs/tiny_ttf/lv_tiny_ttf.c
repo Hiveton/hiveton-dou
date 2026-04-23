@@ -11,6 +11,11 @@
 #if LV_USE_TINY_TTF != 0
 #include "../../core/lv_global.h"
 
+#if LV_TINY_TTF_FILE_SUPPORT != 0
+#include <fcntl.h>
+#include <dfs_file.h>
+#endif
+
 #define font_draw_buf_handlers &(LV_GLOBAL_DEFAULT()->font_draw_buf_handlers)
 
 /*********************
@@ -36,6 +41,8 @@
 /* a hydra stream that can be in memory or from a file*/
 typedef struct ttf_cb_stream {
     lv_fs_file_t * file;
+    struct dfs_fd dfs_file;
+    bool dfs_opened;
     const void * data;
     size_t size;
     size_t position;
@@ -91,7 +98,7 @@ static const void * ttf_get_glyph_bitmap_cb(lv_font_glyph_dsc_t * g_dsc, lv_draw
 static void ttf_release_glyph_cb(const lv_font_t * font, lv_font_glyph_dsc_t * g_dsc);
 static lv_font_t * lv_tiny_ttf_create(const char * path, const void * data, size_t data_size,
                                       int32_t font_size, lv_font_kerning_t kerning,
-                                      size_t cache_size);
+                                      size_t cache_size, bool posix_file);
 
 static bool tiny_ttf_glyph_cache_create_cb(tiny_ttf_glyph_cache_data_t * node, void * user_data);
 static void tiny_ttf_glyph_cache_free_cb(tiny_ttf_glyph_cache_data_t * node, void * user_data);
@@ -155,7 +162,11 @@ void lv_tiny_ttf_destroy(lv_font_t * font)
     if(font->dsc != NULL) {
         ttf_font_desc_t * ttf = (ttf_font_desc_t *)font->dsc;
 #if LV_TINY_TTF_FILE_SUPPORT != 0
-        if(ttf->stream.file != NULL) {
+        if(ttf->stream.dfs_opened) {
+            dfs_file_close(&ttf->stream.dfs_file);
+            ttf->stream.dfs_opened = false;
+        }
+        else if(ttf->stream.file != NULL) {
             lv_fs_close(&ttf->file);
         }
 #endif
@@ -175,7 +186,14 @@ void lv_tiny_ttf_destroy(lv_font_t * font)
 #if LV_TINY_TTF_FILE_SUPPORT != 0
 static void ttf_cb_stream_read(ttf_cb_stream_t * stream, void * data, size_t to_read)
 {
-    if(stream->file != NULL) {
+    if(stream->dfs_opened) {
+        int br = dfs_file_read(&stream->dfs_file, data, to_read);
+        if(br < 0) br = 0;
+        if((size_t)br < to_read) {
+            memset(((uint8_t *)data) + br, 0, to_read - (size_t)br);
+        }
+    }
+    else if(stream->file != NULL) {
         uint32_t br;
         lv_fs_read(stream->file, data, to_read, &br);
     }
@@ -189,7 +207,10 @@ static void ttf_cb_stream_read(ttf_cb_stream_t * stream, void * data, size_t to_
 }
 static void ttf_cb_stream_seek(ttf_cb_stream_t * stream, size_t position)
 {
-    if(stream->file != NULL) {
+    if(stream->dfs_opened) {
+        (void)dfs_file_lseek(&stream->dfs_file, (off_t)position);
+    }
+    else if(stream->file != NULL) {
         lv_fs_seek(stream->file, position, LV_FS_SEEK_SET);
     }
     else {
@@ -356,7 +377,7 @@ static void lv_tiny_ttf_cache_create(ttf_font_desc_t * dsc)
 }
 
 static lv_font_t * lv_tiny_ttf_create(const char * path, const void * data, size_t data_size, int32_t font_size,
-                                      lv_font_kerning_t kerning, size_t cache_size)
+                                      lv_font_kerning_t kerning, size_t cache_size, bool posix_file)
 {
     LV_UNUSED(data_size);
     if((path == NULL && data == NULL) || 0 >= font_size) {
@@ -370,24 +391,45 @@ static lv_font_t * lv_tiny_ttf_create(const char * path, const void * data, size
     }
 #if LV_TINY_TTF_FILE_SUPPORT != 0
     if(path != NULL) {
-        if(LV_FS_RES_OK != lv_fs_open(&dsc->file, path, LV_FS_MODE_RD)) {
-            lv_free(dsc);
-            LV_LOG_ERROR("tiny_ttf: unable to open %s\n", path);
-            return NULL;
+        if(posix_file) {
+            lv_memzero(&dsc->stream.dfs_file, sizeof(dsc->stream.dfs_file));
+            if(dfs_file_open(&dsc->stream.dfs_file, path, O_RDONLY) < 0) {
+                lv_free(dsc);
+                LV_LOG_ERROR("tiny_ttf: unable to open dfs %s\n", path);
+                return NULL;
+            }
+            dsc->stream.dfs_opened = true;
         }
-        dsc->stream.file = &dsc->file;
+        else {
+            if(LV_FS_RES_OK != lv_fs_open(&dsc->file, path, LV_FS_MODE_RD)) {
+                lv_free(dsc);
+                LV_LOG_ERROR("tiny_ttf: unable to open %s\n", path);
+                return NULL;
+            }
+            dsc->stream.file = &dsc->file;
+        }
     }
     else {
         dsc->stream.data = (const uint8_t *)data;
         dsc->stream.size = data_size;
     }
     if(0 == stbtt_InitFont(&dsc->info, &dsc->stream, stbtt_GetFontOffsetForIndex(&dsc->stream, 0))) {
+#if LV_TINY_TTF_FILE_SUPPORT != 0
+        if(dsc->stream.dfs_opened) {
+            dfs_file_close(&dsc->stream.dfs_file);
+            dsc->stream.dfs_opened = false;
+        }
+        else if(dsc->stream.file != NULL) {
+            lv_fs_close(&dsc->file);
+        }
+#endif
         lv_free(dsc);
         LV_LOG_ERROR("tiny_ttf: init failed");
         return NULL;
     }
 
 #else
+    LV_UNUSED(posix_file);
     dsc->stream = (const uint8_t *)data;
     if(0 == stbtt_InitFont(&dsc->info, dsc->stream, stbtt_GetFontOffsetForIndex(dsc->stream, 0))) {
         lv_free(dsc);
@@ -400,6 +442,15 @@ static lv_font_t * lv_tiny_ttf_create(const char * path, const void * data, size
 
     lv_font_t * out_font = lv_malloc_zeroed(sizeof(lv_font_t));
     if(out_font == NULL) {
+#if LV_TINY_TTF_FILE_SUPPORT != 0
+        if(dsc->stream.dfs_opened) {
+            dfs_file_close(&dsc->stream.dfs_file);
+            dsc->stream.dfs_opened = false;
+        }
+        else if(dsc->stream.file != NULL) {
+            lv_fs_close(&dsc->file);
+        }
+#endif
         lv_free(dsc);
         LV_LOG_ERROR("tiny_ttf: out of memory");
         return NULL;
@@ -424,22 +475,27 @@ static lv_font_t * lv_tiny_ttf_create(const char * path, const void * data, size
 lv_font_t * lv_tiny_ttf_create_file_ex(const char * path, int32_t font_size, lv_font_kerning_t kerning,
                                        size_t cache_size)
 {
-    return lv_tiny_ttf_create(path, NULL, 0, font_size, kerning, cache_size);
+    return lv_tiny_ttf_create(path, NULL, 0, font_size, kerning, cache_size, false);
+}
+lv_font_t * lv_tiny_ttf_create_posix_file_ex(const char * path, int32_t font_size, lv_font_kerning_t kerning,
+                                             size_t cache_size)
+{
+    return lv_tiny_ttf_create(path, NULL, 0, font_size, kerning, cache_size, true);
 }
 lv_font_t * lv_tiny_ttf_create_file(const char * path, int32_t font_size)
 {
-    return lv_tiny_ttf_create(path, NULL, 0, font_size, LV_FONT_KERNING_NORMAL, LV_TINY_TTF_CACHE_GLYPH_CNT);
+    return lv_tiny_ttf_create(path, NULL, 0, font_size, LV_FONT_KERNING_NORMAL, LV_TINY_TTF_CACHE_GLYPH_CNT, false);
 }
 #endif
 
 lv_font_t * lv_tiny_ttf_create_data_ex(const void * data, size_t data_size, int32_t font_size,
                                        lv_font_kerning_t kerning, size_t cache_size)
 {
-    return lv_tiny_ttf_create(NULL, data, data_size, font_size, kerning, cache_size);
+    return lv_tiny_ttf_create(NULL, data, data_size, font_size, kerning, cache_size, false);
 }
 lv_font_t * lv_tiny_ttf_create_data(const void * data, size_t data_size, int32_t font_size)
 {
-    return lv_tiny_ttf_create(NULL, data, data_size, font_size, LV_FONT_KERNING_NORMAL, LV_TINY_TTF_CACHE_GLYPH_CNT);
+    return lv_tiny_ttf_create(NULL, data, data_size, font_size, LV_FONT_KERNING_NORMAL, LV_TINY_TTF_CACHE_GLYPH_CNT, false);
 }
 
 /*-----------------

@@ -7,6 +7,7 @@
 
 #include "ui/ui_dispatch.h"
 #include "ui/ui_helpers.h"
+#include "app_watchdog.h"
 #include "xiaozhi/weather/weather.h"
 #include "xiaozhi/xiaozhi_client_public.h"
 #include "xiaozhi/xiaozhi_service.h"
@@ -902,10 +903,6 @@ static void net_manager_apply_requested_mode(net_manager_mode_t mode, rt_uint8_t
     rt_uint8_t previous_bt_enabled = s_bt_enabled;
     rt_uint8_t previous_4g_enabled = s_4g_enabled;
 
-    if (save_config)
-    {
-        net_manager_save_mode_config(mode);
-    }
     if (s_radios_suspended && mode != NET_MANAGER_MODE_SLEEP)
     {
         if (mode == NET_MANAGER_MODE_BT ||
@@ -916,6 +913,11 @@ static void net_manager_apply_requested_mode(net_manager_mode_t mode, rt_uint8_t
         }
         net_manager_update_runtime_state();
         return;
+    }
+
+    if (save_config)
+    {
+        net_manager_save_mode_config(mode);
     }
 
     s_desired_mode = mode;
@@ -1116,6 +1118,7 @@ static void net_manager_thread_entry(void *parameter)
 
     (void)parameter;
     s_bt_last_loss_tick = rt_tick_get();
+    app_watchdog_set_module_required(APP_WDT_MODULE_NET, true);
 
     while (1)
     {
@@ -1135,6 +1138,7 @@ static void net_manager_thread_entry(void *parameter)
         net_manager_enforce_mutual_exclusion_locked();
         net_manager_update_runtime_state();
         net_manager_service_background_work();
+        app_watchdog_heartbeat(APP_WDT_MODULE_NET);
     }
 }
 
@@ -1209,6 +1213,7 @@ rt_err_t net_manager_init(void)
 
     rt_thread_startup(&s_net_manager_thread);
     rt_thread_startup(&s_net_register_thread);
+    app_watchdog_set_module_required(APP_WDT_MODULE_NET, true);
     net_manager_signal_refresh();
     s_initialized = 1U;
     return RT_EOK;

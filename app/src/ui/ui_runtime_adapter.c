@@ -41,7 +41,6 @@ static const ui_runtime_screen_entry_t s_ui_runtime_screens[] = {
     {UI_SCREEN_SETTINGS, &ui_Settings, ui_Settings_screen_destroy, ui_Settings_screen_init},
     {UI_SCREEN_BRIGHTNESS, &ui_Brightness, ui_Brightness_screen_destroy, ui_Brightness_screen_init},
     {UI_SCREEN_LANGUAGE, &ui_Language, ui_Language_screen_destroy, ui_Language_screen_init},
-    {UI_SCREEN_FONT_SETTINGS, &ui_Font_Settings, ui_Font_Settings_screen_destroy, ui_Font_Settings_screen_init},
     {UI_SCREEN_BLUETOOTH_CONFIG, &ui_Bluetooth_Config, ui_Bluetooth_Config_screen_destroy, ui_Bluetooth_Config_screen_init},
     {UI_SCREEN_NETWORK_MODE, &ui_Network_Mode, ui_Network_Mode_screen_destroy, ui_Network_Mode_screen_init},
     {UI_SCREEN_WALLPAPER, &ui_Wallpaper, ui_Wallpaper_screen_destroy, ui_Wallpaper_screen_init},
@@ -91,8 +90,6 @@ extern void ui_time_manage_hardware_prev_page(void);
 extern void ui_time_manage_hardware_next_page(void);
 extern void ui_settings_hardware_prev_page(void);
 extern void ui_settings_hardware_next_page(void);
-extern void ui_font_settings_hardware_prev_page(void);
-extern void ui_font_settings_hardware_next_page(void);
 extern void ui_network_mode_hardware_prev_option(void);
 extern void ui_network_mode_hardware_next_option(void);
 extern void ui_calendar_hardware_prev_month(void);
@@ -507,6 +504,11 @@ void ui_runtime_switch_to(ui_screen_id_t target)
             s_ui_runtime_first_present_done = true;
         }
 
+        if (target == UI_SCREEN_STANDBY)
+        {
+            ui_standby_screen_refresh_now();
+        }
+
         ui_runtime_log_heap("switch_end",
                             entry->id,
                             target);
@@ -708,19 +710,6 @@ void ui_runtime_handle_hardkey_nav(int direction)
         else
         {
             ui_settings_hardware_next_page();
-        }
-        return;
-    }
-
-    if (active == UI_SCREEN_FONT_SETTINGS)
-    {
-        if (direction < 0)
-        {
-            ui_font_settings_hardware_prev_page();
-        }
-        else
-        {
-            ui_font_settings_hardware_next_page();
         }
         return;
     }

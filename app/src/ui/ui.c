@@ -23,7 +23,6 @@ static const ui_screen_id_t s_ui_rotation_sequence[] = {
     UI_SCREEN_SETTINGS,
     UI_SCREEN_BRIGHTNESS,
     UI_SCREEN_LANGUAGE,
-    UI_SCREEN_FONT_SETTINGS,
     UI_SCREEN_BLUETOOTH_CONFIG,
     UI_SCREEN_NETWORK_MODE,
     UI_SCREEN_WALLPAPER,
@@ -69,7 +68,6 @@ void ui_destroy( void )
 {
     ui_Wallpaper_screen_destroy();
     ui_Network_Mode_screen_destroy();
-    ui_Font_Settings_screen_destroy();
     ui_Standby_screen_destroy();
     ui_Bluetooth_Config_screen_destroy();
     ui_Language_screen_destroy();

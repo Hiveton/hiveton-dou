@@ -334,6 +334,7 @@ void ui_standby_screen_refresh_now(void)
         lv_timer_set_period(s_refresh_timer, ui_standby_next_refresh_delay_ms());
     }
 
+    lv_refr_now(NULL);
     sleep_manager_resume_sleep_cycle();
 }
 

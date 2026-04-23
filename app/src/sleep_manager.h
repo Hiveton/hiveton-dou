@@ -17,6 +17,7 @@ void sleep_manager_on_enter_standby(ui_screen_id_t from_screen);
 void sleep_manager_on_exit_standby(ui_screen_id_t target_screen);
 bool sleep_manager_is_sleeping(void);
 void sleep_manager_request_wakeup(void);
+/* Enter or re-enter the true sleep state after standby content refresh. */
 void sleep_manager_resume_sleep_cycle(void);
 
 #ifdef __cplusplus

@@ -71,30 +71,6 @@ static const char *ui_settings_language_card_title(void)
     }
 }
 
-static const char *ui_settings_font_card_title(void)
-{
-    switch (s_language)
-    {
-    case UI_SETTINGS_LANGUAGE_EN_US:
-        return "Font";
-    case UI_SETTINGS_LANGUAGE_ZH_CN:
-    default:
-        return "字体设置";
-    }
-}
-
-static const char *ui_settings_font_card_summary(void)
-{
-    switch (s_language)
-    {
-    case UI_SETTINGS_LANGUAGE_EN_US:
-        return "Choose system font or TF card TTF fonts";
-    case UI_SETTINGS_LANGUAGE_ZH_CN:
-    default:
-        return "选择系统字体或 TF 卡 TTF 字体";
-    }
-}
-
 static const char *ui_settings_bluetooth_config_card_title(void)
 {
     switch (s_language)
@@ -219,7 +195,6 @@ static const ui_settings_item_t s_settings_items[] = {
     {ui_settings_brightness_card_title, ui_settings_brightness_card_summary, UI_SCREEN_BRIGHTNESS},
     {ui_settings_language_card_title, ui_settings_language_card_summary, UI_SCREEN_LANGUAGE},
     {ui_settings_network_mode_card_title, ui_settings_network_mode_card_summary, UI_SCREEN_NETWORK_MODE},
-    {ui_settings_font_card_title, ui_settings_font_card_summary, UI_SCREEN_FONT_SETTINGS},
     {ui_settings_wallpaper_card_title, ui_settings_wallpaper_card_summary, UI_SCREEN_WALLPAPER},
     {ui_settings_bluetooth_config_card_title, ui_settings_bluetooth_config_card_summary, UI_SCREEN_BLUETOOTH_CONFIG},
 };
