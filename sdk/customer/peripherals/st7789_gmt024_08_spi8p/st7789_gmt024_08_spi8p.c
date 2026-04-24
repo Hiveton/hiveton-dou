@@ -22,7 +22,9 @@
 #define EPD_LOGICAL_HEIGHT LCD_VER_RES_MAX
 #define EPD_BACKLIGHT_PWM_DEV_NAME "pwm2"
 #define EPD_BACKLIGHT_PWM_CHANNEL 4
-#define EPD_BACKLIGHT_PWM_PERIOD_NS (10 * 1000)
+#define EPD_BACKLIGHT_PWM_PERIOD_NS (1000 * 1000)
+/* GPIO_A01 backlight PWM pin. PA00 is LCD reset and must not be touched here. */
+#define EPD_BACKLIGHT_GPIO_PIN 1U
 #define EPD_GRAY2_FRAME_SIZE (EPD_WIDTH * EPD_HEIGHT / 4) /* 2bpp */
 #define EPD_MONO_FRAME_SIZE (EPD_WIDTH * EPD_HEIGHT / 8)  /* 1bpp */
 #define EPD_SELF_TEST_PATTERN 0
@@ -176,12 +178,60 @@ static const unsigned char LUT_GRAY4[245] = {
 };
 static struct rt_device_pwm *g_epd_backlight_pwm = RT_NULL;
 static rt_bool_t g_epd_backlight_pwm_ready = RT_FALSE;
+static rt_bool_t g_epd_backlight_clock_hold = RT_FALSE;
+static uint8_t g_epd_backlight_level = 0U;
+
+#if defined(BSP_PM_FREQ_SCALING) && defined(SOC_BF0_HCPU)
+extern void sifli_pm_pwm_clock_hold(rt_bool_t hold);
+#endif
+
+static void EPD_BacklightClockHold(rt_bool_t hold)
+{
+#if defined(BSP_PM_FREQ_SCALING) && defined(SOC_BF0_HCPU)
+    hold = hold ? RT_TRUE : RT_FALSE;
+    if (g_epd_backlight_clock_hold != hold)
+    {
+        sifli_pm_pwm_clock_hold(hold);
+        g_epd_backlight_clock_hold = hold;
+        rt_kprintf("epd_bl: pm deepwfi clock hold %s\n", hold ? "on" : "off");
+    }
+#else
+    (void)hold;
+#endif
+}
+
+static void EPD_LogBacklightState(const char *tag)
+{
+    rt_kprintf("epd_bl[%s]: GPTIM1_PINR=0x%08x pwm=%p ready=%d level=%u\n",
+               tag,
+               hwp_hpsys_cfg->GPTIM1_PINR,
+               g_epd_backlight_pwm,
+               g_epd_backlight_pwm_ready,
+               g_epd_backlight_level);
+}
+
+static void EPD_RouteBacklightPwm(void)
+{
+    MODIFY_REG(hwp_hpsys_cfg->GPTIM1_PINR,
+               HPSYS_CFG_GPTIM1_PINR_CH4_PIN_Msk,
+               MAKE_REG_VAL(EPD_BACKLIGHT_GPIO_PIN,
+                            HPSYS_CFG_GPTIM1_PINR_CH4_PIN_Msk,
+                            HPSYS_CFG_GPTIM1_PINR_CH4_PIN_Pos));
+    HAL_PIN_Set(PAD_PA01, PA01_TIM, PIN_NOPULL, 1);
+    HAL_PIN_Set_DS0(PAD_PA01, 1, 1);
+    HAL_PIN_Set_DS1(PAD_PA01, 1, 1);
+}
 
 static void EPD_SetBacklightFallback(uint8_t br)
 {
+    (void)br;
+    EPD_BacklightClockHold(RT_FALSE);
     HAL_PIN_Set(PAD_PA01, GPIO_A1, PIN_NOPULL, 1);
-    BSP_GPIO_Set(1, br > 0 ? 1 : 0, 1);
-    rt_kprintf("EPD backlight fallback gpio=%u\n", br > 0 ? 1U : 0U);
+    HAL_PIN_Set_DS0(PAD_PA01, 1, 1);
+    HAL_PIN_Set_DS1(PAD_PA01, 1, 1);
+    BSP_GPIO_Set(EPD_BACKLIGHT_GPIO_PIN, 0, 1);
+    rt_kprintf("EPD backlight pwm fallback: force PA01 low\n");
+    EPD_LogBacklightState("fallback-low");
 }
 
 static void EPD_SetBacklight(uint8_t br)
@@ -195,13 +245,8 @@ static void EPD_SetBacklight(uint8_t br)
     {
         br = 100;
     }
-
-    MODIFY_REG(hwp_hpsys_cfg->GPTIM1_PINR,
-               HPSYS_CFG_GPTIM1_PINR_CH4_PIN_Msk,
-               MAKE_REG_VAL(PAD_PA01 - PAD_PA00,
-                            HPSYS_CFG_GPTIM1_PINR_CH4_PIN_Msk,
-                            HPSYS_CFG_GPTIM1_PINR_CH4_PIN_Pos));
-    HAL_PIN_Set(PAD_PA01, PA01_TIM, PIN_NOPULL, 1);
+    g_epd_backlight_level = br;
+    EPD_RouteBacklightPwm();
 
     if (g_epd_backlight_pwm == RT_NULL)
     {
@@ -238,27 +283,17 @@ static void EPD_SetBacklight(uint8_t br)
         return;
     }
 
-    if (br == 0)
+    result = rt_pwm_enable(g_epd_backlight_pwm, EPD_BACKLIGHT_PWM_CHANNEL);
+    if (result != RT_EOK)
     {
-        result = rt_pwm_disable(g_epd_backlight_pwm, EPD_BACKLIGHT_PWM_CHANNEL);
-        if (result != RT_EOK)
-        {
-            LOG_W("EPD backlight pwm disable failed: %d", result);
-            EPD_SetBacklightFallback(0);
-        }
-    }
-    else
-    {
-        result = rt_pwm_enable(g_epd_backlight_pwm, EPD_BACKLIGHT_PWM_CHANNEL);
-        if (result != RT_EOK)
-        {
-            LOG_W("EPD backlight pwm enable failed: %d", result);
-            EPD_SetBacklightFallback(br);
-            return;
-        }
+        LOG_W("EPD backlight pwm enable failed: %d", result);
+        EPD_SetBacklightFallback(br);
+        return;
     }
 
+    EPD_BacklightClockHold(br > 0 ? RT_TRUE : RT_FALSE);
     LOG_I("EPD backlight brightness=%d pulse=%d", br, pulse);
+    EPD_LogBacklightState("pwm-ok");
 }
 
 #define EPD_FULL 0
@@ -1897,6 +1932,7 @@ static void LCD_Drv_Init(LCDC_HandleTypeDef *hlcdc, uint8_t Mode)
     EPD_SendCommand(hlcdc, 0x04);
     s_epd_busy_stage = "init:0x04";
     EPD_ReadBusy();
+    EPD_SetBacklight(g_epd_backlight_level);
 }
 
 
@@ -2255,6 +2291,7 @@ MSH_CMD_EXPORT(epd_test, epd_test [white|black|split|circle|gray]);
 
 static void LCD_IdleModeOn(LCDC_HandleTypeDef *hlcdc)
 {
+    EPD_BacklightClockHold(RT_FALSE);
     EPD_EnterDeepSleep(hlcdc);
     BSP_LCD_PowerDown();
     BSP_LCD_Reset(0);
@@ -2386,7 +2423,7 @@ static const LCD_DrvOpsDef epd_spi_drv = {
     .WriteMultiplePixels = LCD_WriteMultiplePixels,
     .ReadPixel = LCD_ReadPixel,
     .SetColorMode = LCD_SetColorMode,
-    .SetBrightness = RT_NULL,
+    .SetBrightness = LCD_SetBrightness,
     .IdleModeOn = RT_NULL,
     .IdleModeOff = RT_NULL,
 };

@@ -2,6 +2,7 @@
 #include "ui_i18n.h"
 #include "ui_helpers.h"
 #include "ui_runtime_adapter.h"
+#include "config/app_config.h"
 #include "network/net_manager.h"
 #include "rtthread.h"
 
@@ -25,7 +26,6 @@ typedef struct
     lv_obj_t *subtitle_label;
 } ui_settings_card_refs_t;
 
-static ui_settings_language_t s_language = UI_SETTINGS_LANGUAGE_ZH_CN;
 static ui_settings_card_refs_t s_settings_cards[UI_SETTINGS_VISIBLE_COUNT];
 static lv_obj_t *s_settings_prev_button = NULL;
 static lv_obj_t *s_settings_next_button = NULL;
@@ -37,7 +37,7 @@ extern rt_uint8_t app_get_panel_brightness(void);
 
 static const char *ui_settings_title_text(void)
 {
-    switch (s_language)
+    switch (ui_settings_get_language())
     {
     case UI_SETTINGS_LANGUAGE_EN_US:
         return "Settings";
@@ -49,7 +49,7 @@ static const char *ui_settings_title_text(void)
 
 static const char *ui_settings_brightness_card_title(void)
 {
-    switch (s_language)
+    switch (ui_settings_get_language())
     {
     case UI_SETTINGS_LANGUAGE_EN_US:
         return "Brightness";
@@ -61,7 +61,7 @@ static const char *ui_settings_brightness_card_title(void)
 
 static const char *ui_settings_language_card_title(void)
 {
-    switch (s_language)
+    switch (ui_settings_get_language())
     {
     case UI_SETTINGS_LANGUAGE_EN_US:
         return "Language";
@@ -73,7 +73,7 @@ static const char *ui_settings_language_card_title(void)
 
 static const char *ui_settings_bluetooth_config_card_title(void)
 {
-    switch (s_language)
+    switch (ui_settings_get_language())
     {
     case UI_SETTINGS_LANGUAGE_EN_US:
         return "Bluetooth Config";
@@ -85,7 +85,7 @@ static const char *ui_settings_bluetooth_config_card_title(void)
 
 static const char *ui_settings_bluetooth_config_card_summary(void)
 {
-    switch (s_language)
+    switch (ui_settings_get_language())
     {
     case UI_SETTINGS_LANGUAGE_EN_US:
         return "Bluetooth status, connection state and device name presets";
@@ -95,9 +95,27 @@ static const char *ui_settings_bluetooth_config_card_summary(void)
     }
 }
 
+static const char *ui_settings_ai_weather_card_title(void)
+{
+    return ui_i18n_pick("AI与天气", "AI & Weather");
+}
+
+static const char *ui_settings_ai_weather_card_summary(void)
+{
+    static char buffer[64];
+
+    rt_snprintf(buffer,
+                sizeof(buffer),
+                ui_i18n_pick("AI自动重连：%s  天气自动刷新：%s",
+                             "AI reconnect: %s  Weather refresh: %s"),
+                app_config_get_ai_auto_resume() ? ui_i18n_pick("开", "On") : ui_i18n_pick("关", "Off"),
+                app_config_get_weather_auto_refresh() ? ui_i18n_pick("开", "On") : ui_i18n_pick("关", "Off"));
+    return buffer;
+}
+
 static const char *ui_settings_wallpaper_card_title(void)
 {
-    switch (s_language)
+    switch (ui_settings_get_language())
     {
     case UI_SETTINGS_LANGUAGE_EN_US:
         return "Wallpaper";
@@ -109,7 +127,7 @@ static const char *ui_settings_wallpaper_card_title(void)
 
 static const char *ui_settings_wallpaper_card_summary(void)
 {
-    switch (s_language)
+    switch (ui_settings_get_language())
     {
     case UI_SETTINGS_LANGUAGE_EN_US:
         return "Open the TF picture preview page";
@@ -131,7 +149,7 @@ static void ui_settings_format_brightness_summary(char *buffer, size_t buffer_si
     brightness = app_get_panel_brightness();
     if (brightness == 0U)
     {
-        switch (s_language)
+        switch (ui_settings_get_language())
         {
         case UI_SETTINGS_LANGUAGE_EN_US:
             rt_snprintf(buffer, buffer_size, "Currently off");
@@ -144,7 +162,7 @@ static void ui_settings_format_brightness_summary(char *buffer, size_t buffer_si
     }
     else
     {
-        switch (s_language)
+        switch (ui_settings_get_language())
         {
         case UI_SETTINGS_LANGUAGE_EN_US:
             rt_snprintf(buffer, buffer_size, "Current brightness %u%%", (unsigned int)brightness);
@@ -197,6 +215,7 @@ static const ui_settings_item_t s_settings_items[] = {
     {ui_settings_network_mode_card_title, ui_settings_network_mode_card_summary, UI_SCREEN_NETWORK_MODE},
     {ui_settings_wallpaper_card_title, ui_settings_wallpaper_card_summary, UI_SCREEN_WALLPAPER},
     {ui_settings_bluetooth_config_card_title, ui_settings_bluetooth_config_card_summary, UI_SCREEN_BLUETOOTH_CONFIG},
+    {ui_settings_ai_weather_card_title, ui_settings_ai_weather_card_summary, UI_SCREEN_AI_WEATHER_SETTINGS},
 };
 
 static const int s_settings_card_y_positions[UI_SETTINGS_VISIBLE_COUNT] = {0, 108, 216, 324, 432};
@@ -394,7 +413,14 @@ static void ui_settings_create_card(lv_obj_t *parent, uint16_t slot_index, int y
 
 ui_settings_language_t ui_settings_get_language(void)
 {
-    return s_language;
+    ui_settings_language_t language = app_config_get_ui_language();
+
+    if (language >= UI_SETTINGS_LANGUAGE_COUNT)
+    {
+        language = UI_SETTINGS_LANGUAGE_ZH_CN;
+    }
+
+    return language;
 }
 
 void ui_settings_set_language(ui_settings_language_t language)
@@ -404,12 +430,13 @@ void ui_settings_set_language(ui_settings_language_t language)
         return;
     }
 
-    s_language = language;
+    app_config_set_ui_language(language);
+    app_config_save();
 }
 
 const char *ui_settings_get_language_label(void)
 {
-    switch (s_language)
+    switch (ui_settings_get_language())
     {
     case UI_SETTINGS_LANGUAGE_EN_US:
         return "English";

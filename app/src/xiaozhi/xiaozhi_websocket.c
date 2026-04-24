@@ -40,6 +40,7 @@
 #include "audio_mem.h"
 #include "network/net_manager.h"
 #include "network/network_mem.h"
+#include "../config/app_config.h"
 #include "../sleep_manager.h"
 #include "ui/ui_dispatch.h"
 #include "xiaozhi_service.h"
@@ -976,13 +977,8 @@ void xz_ws_button_init2(void)
 void xz_ws_audio_init()
 {
     rt_kprintf("xz_audio_init\n");
-    {
-        int volume = audio_server_get_private_volume(AUDIO_TYPE_LOCAL_MUSIC);
-        if (volume < 12)
-        {
-            audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC, 12);
-        }
-    }
+    audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC,
+                                    (int)app_config_get_audio_music_volume());
     xz_audio_decoder_encoder_open(1); // 打开音频解码器和编码器
 
 }

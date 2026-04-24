@@ -19,6 +19,7 @@ SET(SOURCES screens/ui_home_screen.c
     screens/ui_bluetooth_config_screen.c
     screens/ui_network_mode_screen.c
     screens/ui_wallpaper_screen.c
+    screens/ui_ai_weather_settings_screen.c
     home_screen.c
     ui.c
     ui_i18n.c

@@ -13,15 +13,13 @@
 #include "dfs_posix.h"
 #include "rtdevice.h"
 #include "rtthread.h"
+#include "config/app_config.h"
 #include "ui.h"
 #include "ui_dispatch.h"
 #include "ui_helpers.h"
 #include "ui_runtime_adapter.h"
 
 #define UI_FONT_MANAGER_DIR_NAME "font"
-#define UI_FONT_MANAGER_CONFIG_DIR_NAME "config"
-#define UI_FONT_MANAGER_CONFIG_FILE_NAME "system.cfg"
-#define UI_FONT_MANAGER_CFG_KEY "font="
 
 static const char *const s_font_manager_device_candidates[] = {"sd0", "sd1", "sd2", "sdio0"};
 static const char *const s_font_manager_mount_candidates[] = {"/", "/tf", "/sd", "/sd0"};
@@ -31,13 +29,6 @@ static const char *const s_font_manager_font_dir_candidates[] = {
     "/sd/font",
     "/sd0/font",
     "font",
-};
-static const char *const s_font_manager_config_dir_candidates[] = {
-    "/config",
-    "/tf/config",
-    "/sd/config",
-    "/sd0/config",
-    "config",
 };
 static const char *const s_font_manager_root_candidates[] = {
     "/",
@@ -49,7 +40,6 @@ static const char *const s_font_manager_known_subdirs[] = {
     "books",
     "record",
     "pic",
-    "config",
     "font",
 };
 typedef struct
@@ -57,7 +47,6 @@ typedef struct
     bool initialized;
     bool use_system_font;
     bool tf_ready;
-    char configured_path[UI_FONT_MANAGER_PATH_MAX];
     char active_path[UI_FONT_MANAGER_PATH_MAX];
     char active_name[UI_FONT_MANAGER_NAME_MAX];
 } ui_font_manager_state_t;
@@ -66,7 +55,6 @@ static ui_font_manager_state_t s_font_manager = {
     false,
     true,
     false,
-    {0},
     {0},
     "系统字体",
 };
@@ -323,11 +311,6 @@ static bool ui_font_manager_build_subdir_path(const char *subdir, char *buffer, 
         candidates = s_font_manager_font_dir_candidates;
         candidate_count = sizeof(s_font_manager_font_dir_candidates) / sizeof(s_font_manager_font_dir_candidates[0]);
     }
-    else if (strcmp(subdir, UI_FONT_MANAGER_CONFIG_DIR_NAME) == 0)
-    {
-        candidates = s_font_manager_config_dir_candidates;
-        candidate_count = sizeof(s_font_manager_config_dir_candidates) / sizeof(s_font_manager_config_dir_candidates[0]);
-    }
 
     for (i = 0; candidates != RT_NULL && i < candidate_count; ++i)
     {
@@ -340,25 +323,6 @@ static bool ui_font_manager_build_subdir_path(const char *subdir, char *buffer, 
 
     buffer[0] = '\0';
     return false;
-}
-
-static bool ui_font_manager_build_config_file_path(char *buffer, size_t buffer_size)
-{
-    char config_dir[UI_FONT_MANAGER_PATH_MAX];
-
-    if (!ui_font_manager_build_subdir_path(UI_FONT_MANAGER_CONFIG_DIR_NAME,
-                                           config_dir,
-                                           sizeof(config_dir)))
-    {
-        if (buffer != NULL && buffer_size > 0U)
-        {
-            buffer[0] = '\0';
-        }
-        return false;
-    }
-
-    rt_snprintf(buffer, buffer_size, "%s/%s", config_dir, UI_FONT_MANAGER_CONFIG_FILE_NAME);
-    return true;
 }
 
 static bool ui_font_manager_font_file_acceptable(const char *path, bool verbose)
@@ -491,114 +455,12 @@ static bool ui_font_manager_list_changed(void)
     return changed;
 }
 
-static void ui_font_manager_trim_line(char *text)
-{
-    size_t len;
-
-    if (text == NULL)
-    {
-        return;
-    }
-
-    len = strlen(text);
-    while (len > 0U &&
-           (text[len - 1U] == '\r' || text[len - 1U] == '\n' ||
-            text[len - 1U] == ' ' || text[len - 1U] == '\t'))
-    {
-        text[--len] = '\0';
-    }
-}
-
-static void ui_font_manager_load_config(void)
-{
-    int fd;
-    char buffer[UI_FONT_MANAGER_PATH_MAX + 32];
-    char config_path[UI_FONT_MANAGER_PATH_MAX];
-    ssize_t read_len;
-    char *value;
-
-    s_font_manager.configured_path[0] = '\0';
-    if (!ui_font_manager_build_config_file_path(config_path, sizeof(config_path)))
-    {
-        return;
-    }
-
-    fd = open(config_path, O_RDONLY, 0);
-    if (fd < 0)
-    {
-        return;
-    }
-
-    read_len = read(fd, buffer, sizeof(buffer) - 1);
-    close(fd);
-    if (read_len <= 0)
-    {
-        return;
-    }
-
-    buffer[read_len] = '\0';
-    ui_font_manager_trim_line(buffer);
-    value = strstr(buffer, UI_FONT_MANAGER_CFG_KEY);
-    if (value == NULL)
-    {
-        return;
-    }
-
-    value += strlen(UI_FONT_MANAGER_CFG_KEY);
-    if (strcmp(value, "system") == 0)
-    {
-        s_font_manager.configured_path[0] = '\0';
-        return;
-    }
-
-    rt_strncpy(s_font_manager.configured_path, value, sizeof(s_font_manager.configured_path) - 1U);
-    s_font_manager.configured_path[sizeof(s_font_manager.configured_path) - 1U] = '\0';
-}
-
-static void ui_font_manager_save_config(void)
-{
-    int fd;
-    char buffer[UI_FONT_MANAGER_PATH_MAX + 32];
-    char config_dir[UI_FONT_MANAGER_PATH_MAX];
-    char config_path[UI_FONT_MANAGER_PATH_MAX];
-
-    if (!s_font_manager.tf_ready)
-    {
-        return;
-    }
-
-    if (!ui_font_manager_build_subdir_path(UI_FONT_MANAGER_CONFIG_DIR_NAME,
-                                           config_dir,
-                                           sizeof(config_dir)))
-    {
-        return;
-    }
-
-    rt_snprintf(config_path, sizeof(config_path), "%s/%s", config_dir, UI_FONT_MANAGER_CONFIG_FILE_NAME);
-    mkdir(config_dir, 0);
-    fd = open(config_path, O_WRONLY | O_CREAT | O_TRUNC, 0);
-    if (fd < 0)
-    {
-        return;
-    }
-
-    if (s_font_manager.use_system_font)
-    {
-        rt_snprintf(buffer, sizeof(buffer), "%ssystem\n", UI_FONT_MANAGER_CFG_KEY);
-    }
-    else
-    {
-        rt_snprintf(buffer, sizeof(buffer), "%s%s\n", UI_FONT_MANAGER_CFG_KEY, s_font_manager.active_path);
-    }
-
-    write(fd, buffer, strlen(buffer));
-    close(fd);
-}
-
 static void ui_font_manager_apply_configured_font(bool *changed)
 {
     bool previous_system = s_font_manager.use_system_font;
     char previous_path[UI_FONT_MANAGER_PATH_MAX];
+    char configured_path[UI_FONT_MANAGER_PATH_MAX];
+    bool use_system_font;
 
     if (changed != NULL)
     {
@@ -608,19 +470,19 @@ static void ui_font_manager_apply_configured_font(bool *changed)
     rt_strncpy(previous_path, s_font_manager.active_path, sizeof(previous_path) - 1U);
     previous_path[sizeof(previous_path) - 1U] = '\0';
 
-    if (!s_font_manager.tf_ready || s_font_manager.configured_path[0] == '\0')
+    use_system_font = app_config_get_reading_use_system_font();
+    app_config_get_reading_font_path(configured_path, sizeof(configured_path));
+    if (use_system_font || configured_path[0] == '\0')
     {
         ui_font_manager_set_system_active();
     }
-    else if (ui_font_manager_can_open_font(s_font_manager.configured_path))
+    else if (ui_font_manager_can_open_font(configured_path))
     {
-        ui_font_manager_set_file_active(s_font_manager.configured_path);
+        ui_font_manager_set_file_active(configured_path);
     }
     else
     {
-        s_font_manager.configured_path[0] = '\0';
         ui_font_manager_set_system_active();
-        ui_font_manager_save_config();
     }
 
     if (changed != NULL)
@@ -668,7 +530,6 @@ static void ui_font_manager_request_async_refresh_if_changed(bool changed)
 void ui_font_manager_init(void)
 {
     bool changed = false;
-    char config_path[UI_FONT_MANAGER_PATH_MAX];
     char font_dir[UI_FONT_MANAGER_PATH_MAX];
 
     if (s_font_manager.initialized)
@@ -676,14 +537,8 @@ void ui_font_manager_init(void)
         return;
     }
 
-    if ((ui_font_manager_build_config_file_path(config_path, sizeof(config_path)) &&
-         ui_font_manager_file_exists(config_path)) ||
-        (ui_font_manager_build_subdir_path(UI_FONT_MANAGER_DIR_NAME, font_dir, sizeof(font_dir)) &&
-         ui_font_manager_dir_exists(font_dir)))
-    {
-        s_font_manager.tf_ready = true;
-        ui_font_manager_load_config();
-    }
+    s_font_manager.tf_ready = ui_font_manager_build_subdir_path(UI_FONT_MANAGER_DIR_NAME, font_dir, sizeof(font_dir)) &&
+                              ui_font_manager_dir_exists(font_dir);
 
     ui_font_manager_apply_configured_font(&changed);
     ui_font_manager_list_changed();
@@ -701,16 +556,13 @@ void ui_font_manager_deinit(void)
 void ui_font_manager_notify_storage_ready(void)
 {
     bool changed = false;
-    char config_path[UI_FONT_MANAGER_PATH_MAX];
     char font_dir[UI_FONT_MANAGER_PATH_MAX];
     bool storage_ready;
     bool list_changed;
 
     ui_font_manager_init();
-    storage_ready = (ui_font_manager_build_config_file_path(config_path, sizeof(config_path)) &&
-                     ui_font_manager_file_exists(config_path)) ||
-                    (ui_font_manager_build_subdir_path(UI_FONT_MANAGER_DIR_NAME, font_dir, sizeof(font_dir)) &&
-                     ui_font_manager_dir_exists(font_dir));
+    storage_ready = ui_font_manager_build_subdir_path(UI_FONT_MANAGER_DIR_NAME, font_dir, sizeof(font_dir)) &&
+                    ui_font_manager_dir_exists(font_dir);
     s_font_manager.tf_ready = storage_ready;
     list_changed = ui_font_manager_list_changed();
     if (!storage_ready)
@@ -720,7 +572,6 @@ void ui_font_manager_notify_storage_ready(void)
         return;
     }
 
-    ui_font_manager_load_config();
     ui_font_manager_apply_configured_font(&changed);
     ui_font_manager_request_refresh_if_changed(changed || list_changed);
 }
@@ -772,9 +623,10 @@ bool ui_font_manager_select_system_font(void)
         return true;
     }
 
-    s_font_manager.configured_path[0] = '\0';
     ui_font_manager_set_system_active();
-    ui_font_manager_save_config();
+    app_config_set_reading_use_system_font(true);
+    app_config_set_reading_font_path("");
+    app_config_save();
     ui_font_manager_request_async_refresh_if_changed(changed);
     return true;
 }
@@ -800,10 +652,10 @@ bool ui_font_manager_select_font_file(const char *path)
         return false;
     }
 
-    rt_strncpy(s_font_manager.configured_path, path, sizeof(s_font_manager.configured_path) - 1U);
-    s_font_manager.configured_path[sizeof(s_font_manager.configured_path) - 1U] = '\0';
     ui_font_manager_set_file_active(path);
-    ui_font_manager_save_config();
+    app_config_set_reading_use_system_font(false);
+    app_config_set_reading_font_path(path);
+    app_config_save();
     ui_font_manager_request_async_refresh_if_changed(changed);
     return true;
 }

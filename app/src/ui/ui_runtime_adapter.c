@@ -8,6 +8,7 @@
 #include "ui.h"
 #include "ui_dispatch.h"
 #include "ui_helpers.h"
+#include "../config/app_config.h"
 #include "../sleep_manager.h"
 
 typedef void (*ui_runtime_screen_destroy_cb_t)(void);
@@ -44,6 +45,7 @@ static const ui_runtime_screen_entry_t s_ui_runtime_screens[] = {
     {UI_SCREEN_BLUETOOTH_CONFIG, &ui_Bluetooth_Config, ui_Bluetooth_Config_screen_destroy, ui_Bluetooth_Config_screen_init},
     {UI_SCREEN_NETWORK_MODE, &ui_Network_Mode, ui_Network_Mode_screen_destroy, ui_Network_Mode_screen_init},
     {UI_SCREEN_WALLPAPER, &ui_Wallpaper, ui_Wallpaper_screen_destroy, ui_Wallpaper_screen_init},
+    {UI_SCREEN_AI_WEATHER_SETTINGS, &ui_AI_Weather_Settings, ui_AI_Weather_Settings_screen_destroy, ui_AI_Weather_Settings_screen_init},
 };
 static bool s_ui_runtime_first_present_done = false;
 static lv_timer_t *s_ui_runtime_idle_timer = NULL;
@@ -264,6 +266,8 @@ static void ui_runtime_adjust_volume(int delta)
     }
 
     audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC, volume);
+    app_config_set_audio_music_volume((uint32_t)volume);
+    (void)app_config_save();
     xiaozhi_ui_update_volume(volume);
 }
 

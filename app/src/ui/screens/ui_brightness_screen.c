@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "ui_helpers.h"
 #include "ui_runtime_adapter.h"
+#include "config/app_config.h"
 #include "rtthread.h"
 
 lv_obj_t *ui_Brightness = NULL;
@@ -187,6 +188,8 @@ static void ui_brightness_adjust_event_cb(lv_event_t *e)
     brightness = app_get_panel_brightness();
     brightness = (delta < 0) ? ui_brightness_step_down(brightness) : ui_brightness_step_up(brightness);
     app_set_panel_brightness(brightness);
+    app_config_set_display_brightness(brightness);
+    app_config_save();
     ui_Settings_screen_destroy();
     ui_brightness_refresh();
     if (ui_runtime_get_active_screen_id() == UI_SCREEN_BRIGHTNESS)

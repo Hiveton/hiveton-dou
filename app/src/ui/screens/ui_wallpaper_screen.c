@@ -13,6 +13,7 @@
 #include "dfs_posix.h"
 #include "rtdevice.h"
 #include "rtthread.h"
+#include "../../config/app_config.h"
 #include "audio_mem.h"
 #include "drv_lcd.h"
 #include "../../../../sdk/external/lvgl_v9/src/draw/lv_draw_buf.h"
@@ -122,6 +123,11 @@ static bool ui_wallpaper_consume_pending_full_refresh(const char *reason)
     return true;
 }
 
+static void ui_wallpaper_render(void);
+static bool ui_wallpaper_find_next_image_path(const char *current_path,
+                                              char *buffer,
+                                              size_t buffer_size);
+
 static void ui_wallpaper_input_event_cb(lv_event_t *e)
 {
     lv_event_code_t code = lv_event_get_code(e);
@@ -132,9 +138,27 @@ static void ui_wallpaper_input_event_cb(lv_event_t *e)
     }
 
     ui_wallpaper_queue_full_refresh_on_input(code == LV_EVENT_PRESSED ? "pressed" : "clicked");
+
+    if (code == LV_EVENT_CLICKED)
+    {
+        char next_path[256];
+
+        next_path[0] = '\0';
+        if (ui_wallpaper_find_next_image_path(s_wallpaper_image_path,
+                                              next_path,
+                                              sizeof(next_path)))
+        {
+            (void)app_config_set_wallpaper_path(next_path);
+            (void)app_config_save();
+            ui_wallpaper_render();
+        }
+    }
 }
 
 static void ui_wallpaper_render(void);
+static bool ui_wallpaper_find_next_image_path(const char *current_path,
+                                              char *buffer,
+                                              size_t buffer_size);
 
 static const char *s_wallpaper_tf_devices[] = {
     "sd0",
@@ -211,6 +235,75 @@ static bool ui_wallpaper_build_pic_dir(char *buffer, size_t buffer_size)
 
     buffer[0] = '\0';
     return false;
+}
+
+static bool ui_wallpaper_find_next_image_path(const char *current_path,
+                                              char *buffer,
+                                              size_t buffer_size)
+{
+    char pic_dir[192];
+    char first_path[256];
+    DIR *dir = NULL;
+    struct dirent *entry;
+    bool return_next;
+
+    if (buffer == NULL || buffer_size == 0U)
+    {
+        return false;
+    }
+
+    buffer[0] = '\0';
+    first_path[0] = '\0';
+    return_next = (current_path == NULL || current_path[0] == '\0');
+
+    if (!ui_wallpaper_build_pic_dir(pic_dir, sizeof(pic_dir)))
+    {
+        return false;
+    }
+
+    dir = opendir(pic_dir);
+    if (dir == NULL)
+    {
+        return false;
+    }
+
+    while ((entry = readdir(dir)) != NULL)
+    {
+        char candidate[256];
+
+        if (entry->d_name[0] == '.' || !ui_wallpaper_is_image_file(entry->d_name))
+        {
+            continue;
+        }
+
+        rt_snprintf(candidate, sizeof(candidate), "%s/%s", pic_dir, entry->d_name);
+        if (first_path[0] == '\0')
+        {
+            rt_snprintf(first_path, sizeof(first_path), "%s", candidate);
+        }
+
+        if (return_next)
+        {
+            rt_snprintf(buffer, buffer_size, "%s", candidate);
+            closedir(dir);
+            return true;
+        }
+
+        if (current_path != NULL && strcmp(candidate, current_path) == 0)
+        {
+            return_next = true;
+        }
+    }
+
+    closedir(dir);
+
+    if (first_path[0] == '\0')
+    {
+        return false;
+    }
+
+    rt_snprintf(buffer, buffer_size, "%s", first_path);
+    return true;
 }
 
 static void ui_wallpaper_set_decode_errorf(const char *fmt, ...)
@@ -1148,6 +1241,7 @@ static void ui_wallpaper_render_timer_cb(lv_timer_t *timer)
 static void ui_wallpaper_render(void)
 {
     char pic_dir[192];
+    char configured_path[256];
     DIR *dir = NULL;
     struct dirent *entry;
     bool attempted_file = false;
@@ -1161,6 +1255,25 @@ static void ui_wallpaper_render(void)
     ui_wallpaper_release_decoded_image();
     memset(s_wallpaper_image_path, 0, sizeof(s_wallpaper_image_path));
     memset(s_wallpaper_image_src, 0, sizeof(s_wallpaper_image_src));
+
+    app_config_get_wallpaper_path(configured_path, sizeof(configured_path));
+    if (configured_path[0] != '\0')
+    {
+        attempted_file = true;
+        rt_snprintf(s_wallpaper_image_path,
+                    sizeof(s_wallpaper_image_path),
+                    "%s",
+                    configured_path);
+        if (ui_wallpaper_decode_file_to_image(s_wallpaper_image_path, &s_wallpaper_image_dsc))
+        {
+            rt_kprintf("wallpaper: decode ok path=%s\n", s_wallpaper_image_path);
+            goto render_ready;
+        }
+
+        rt_kprintf("wallpaper: decode failed path=%s reason=%s\n",
+                   s_wallpaper_image_path,
+                   s_wallpaper_last_error[0] != '\0' ? s_wallpaper_last_error : "unknown");
+    }
 
     if (!ui_wallpaper_build_pic_dir(pic_dir, sizeof(pic_dir)))
     {
@@ -1215,10 +1328,11 @@ static void ui_wallpaper_render(void)
                                          s_wallpaper_last_error :
                                          (attempted_file ?
                                           "JPEG/PNG 解码失败，请换基础格式图片" :
-                                          "目录中未找到图片文件"));
+                                         "目录中未找到图片文件"));
         return;
     }
 
+render_ready:
     (void)ui_wallpaper_consume_pending_full_refresh("image_present");
     lcd_set_epd_image_refresh_hint(RT_TRUE);
     s_wallpaper_refs.image = lv_img_create(s_wallpaper_refs.image_card);

@@ -14,6 +14,7 @@
 #include "reading_epub.h"
 #include "ui.h"
 #include "ui_i18n.h"
+#include "config/app_config.h"
 #include "ui_font_manager.h"
 #include "ui_helpers.h"
 #include "../ui_image_policy.h"
@@ -295,6 +296,10 @@ static void ui_reading_detail_watchdog_end_long_task(void)
 }
 
 static uint16_t ui_reading_detail_get_actual_font_size(void);
+static void ui_reading_detail_load_config_defaults(void);
+static void ui_reading_detail_save_font_selection(void);
+static void ui_reading_detail_save_layout(void);
+static void ui_reading_detail_save_config(void);
 static bool ui_reading_detail_init_hdfont(void);
 static bool ui_reading_detail_has_hdfont_suffix(const char *path);
 static bool ui_reading_detail_hdfont_find_glyph(uint32_t codepoint,
@@ -355,6 +360,76 @@ static void ui_reading_detail_release_hdfont(void)
 static void ui_reading_detail_release_font_resources(void)
 {
     ui_reading_detail_release_hdfont();
+}
+
+static void ui_reading_detail_load_config_defaults(void)
+{
+    char font_path[UI_FONT_MANAGER_PATH_MAX];
+
+    s_reading_detail_font_size = app_config_get_reading_font_size();
+    if (s_reading_detail_font_size < UI_READING_DETAIL_TEXT_FONT_MIN)
+    {
+        s_reading_detail_font_size = UI_READING_DETAIL_TEXT_FONT_MIN;
+    }
+    else if (s_reading_detail_font_size > UI_READING_DETAIL_TEXT_FONT_MAX)
+    {
+        s_reading_detail_font_size = UI_READING_DETAIL_TEXT_FONT_MAX;
+    }
+
+    s_reading_detail_line_space = app_config_get_reading_line_space();
+    if (s_reading_detail_line_space < UI_READING_DETAIL_TEXT_LINE_SPACE_MIN)
+    {
+        s_reading_detail_line_space = UI_READING_DETAIL_TEXT_LINE_SPACE_MIN;
+    }
+    else if (s_reading_detail_line_space > UI_READING_DETAIL_TEXT_LINE_SPACE_MAX)
+    {
+        s_reading_detail_line_space = UI_READING_DETAIL_TEXT_LINE_SPACE_MAX;
+    }
+
+    s_reading_detail_font_use_system = app_config_get_reading_use_system_font();
+    app_config_get_reading_font_path(font_path, sizeof(font_path));
+    s_reading_detail_font_path[0] = '\0';
+    s_reading_detail_font_name[0] = '\0';
+    s_reading_detail_last_rejected_font_path[0] = '\0';
+
+    if (s_reading_detail_font_use_system || font_path[0] == '\0')
+    {
+        s_reading_detail_font_use_system = true;
+        rt_strncpy(s_reading_detail_font_name,
+                   ui_i18n_pick("系统字体", "System Font"),
+                   sizeof(s_reading_detail_font_name) - 1U);
+    }
+    else
+    {
+        const char *base;
+
+        rt_strncpy(s_reading_detail_font_path, font_path, sizeof(s_reading_detail_font_path) - 1U);
+        base = strrchr(font_path, '/');
+        base = (base != NULL) ? (base + 1) : font_path;
+        rt_strncpy(s_reading_detail_font_name, base, sizeof(s_reading_detail_font_name) - 1U);
+    }
+
+    s_reading_detail_font_path[sizeof(s_reading_detail_font_path) - 1U] = '\0';
+    s_reading_detail_font_name[sizeof(s_reading_detail_font_name) - 1U] = '\0';
+}
+
+static void ui_reading_detail_save_font_selection(void)
+{
+    app_config_set_reading_use_system_font(s_reading_detail_font_use_system);
+    app_config_set_reading_font_path(s_reading_detail_font_use_system ? "" : s_reading_detail_font_path);
+}
+
+static void ui_reading_detail_save_layout(void)
+{
+    app_config_set_reading_font_size(s_reading_detail_font_size);
+    app_config_set_reading_line_space(s_reading_detail_line_space);
+}
+
+static void ui_reading_detail_save_config(void)
+{
+    ui_reading_detail_save_font_selection();
+    ui_reading_detail_save_layout();
+    app_config_save();
 }
 
 static const char *ui_reading_detail_get_selected_font_name(void)
@@ -894,13 +969,19 @@ static bool ui_reading_detail_set_selected_font_item(uint16_t index)
 static void ui_reading_detail_refresh_font_items(void)
 {
     ui_font_manager_item_t discovered[UI_READING_DETAIL_FONT_ITEM_MAX];
-    bool previous_system = s_reading_detail_font_use_system;
+    bool previous_system = app_config_get_reading_use_system_font();
     char previous_path[UI_FONT_MANAGER_PATH_MAX];
+    char configured_path[UI_FONT_MANAGER_PATH_MAX];
     uint16_t count;
     uint16_t index = 0U;
     uint16_t i;
 
-    rt_strncpy(previous_path, s_reading_detail_font_path, sizeof(previous_path) - 1U);
+    app_config_get_reading_font_path(configured_path, sizeof(configured_path));
+    previous_path[0] = '\0';
+    if (!previous_system)
+    {
+        rt_strncpy(previous_path, configured_path, sizeof(previous_path) - 1U);
+    }
     previous_path[sizeof(previous_path) - 1U] = '\0';
 
     count = ui_font_manager_list_items(discovered,
@@ -3873,6 +3954,8 @@ static void ui_reading_detail_adjust_font_event_cb(lv_event_t *e)
     }
 
     s_reading_detail_font_size = (uint16_t)next_value;
+    ui_reading_detail_save_layout();
+    app_config_save();
     ui_reading_detail_apply_text_style();
     ui_reading_detail_refresh_settings_panel();
     ui_reading_detail_rebuild_layout();
@@ -3897,6 +3980,8 @@ static void ui_reading_detail_adjust_line_space_event_cb(lv_event_t *e)
     }
 
     s_reading_detail_line_space = (uint16_t)next_value;
+    ui_reading_detail_save_layout();
+    app_config_save();
     ui_reading_detail_apply_text_style();
     ui_reading_detail_refresh_settings_panel();
     ui_reading_detail_rebuild_layout();
@@ -3941,6 +4026,7 @@ static void ui_reading_detail_adjust_font_family_event_cb(lv_event_t *e)
         return;
     }
 
+    ui_reading_detail_save_config();
     selected_name = ui_reading_detail_get_selected_font_name();
     selected_path[0] = '\0';
     (void)ui_reading_detail_get_selected_font_path(selected_path, sizeof(selected_path));
@@ -3980,6 +4066,7 @@ void ui_Reading_Detail_screen_init(void)
     s_reading_detail_first_render_done = false;
     s_reading_detail_last_reported_page_count = 0U;
     s_reading_detail_last_reported_has_last_page = false;
+    ui_reading_detail_load_config_defaults();
 
     ui_Reading_Detail = ui_create_screen_base();
     rt_kprintf("reading_detail: init fullscreen detail\n");

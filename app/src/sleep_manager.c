@@ -8,6 +8,7 @@
 #include <drivers/alarm.h>
 
 #include "app_watchdog.h"
+#include "config/app_config.h"
 #include "network/net_manager.h"
 #include "ui/ui_dispatch.h"
 #include "gui_app_pm.h"
@@ -17,18 +18,17 @@
  * aligned with GUI PM so EPD sleep does not regress into a clear/blank path.
  */
 #ifndef APP_KEEP_EPD_CONTENT_ON_SLEEP
-#if defined(BSP_LCDC_USING_EPD_8BIT)
+#if defined(BSP_LCDC_USING_EPD_8BIT) || defined(LCD_USING_ST7789_GTM024_08_SPI8P)
 #define APP_KEEP_EPD_CONTENT_ON_SLEEP 1
 #else
 #define APP_KEEP_EPD_CONTENT_ON_SLEEP 0
 #endif
 #endif
 
-#if defined(BSP_LCDC_USING_EPD_8BIT) && !APP_KEEP_EPD_CONTENT_ON_SLEEP
+#if (defined(BSP_LCDC_USING_EPD_8BIT) || defined(LCD_USING_ST7789_GTM024_08_SPI8P)) && !APP_KEEP_EPD_CONTENT_ON_SLEEP
 #error "EPD targets must keep display content on sleep; do not clear or blank the panel."
 #endif
 
-#define SLEEP_MANAGER_IDLE_TIMEOUT_MS 60000U
 #define SLEEP_MANAGER_NETWORK_SETUP_GRACE_MS 180000U
 
 static bool s_sleeping = false;
@@ -121,7 +121,14 @@ static void sleep_manager_ensure_alarm(void)
 
 uint32_t sleep_manager_get_idle_timeout_ms(void)
 {
-    return SLEEP_MANAGER_IDLE_TIMEOUT_MS;
+    uint32_t timeout_sec = app_config_get_display_standby_timeout_sec();
+
+    if (timeout_sec > (UINT_MAX / 1000U))
+    {
+        return UINT_MAX;
+    }
+
+    return timeout_sec * 1000U;
 }
 
 void sleep_manager_report_activity(void)
@@ -132,6 +139,7 @@ void sleep_manager_report_activity(void)
 
 bool sleep_manager_should_enter_standby(ui_screen_id_t active_id, uint32_t inactive_ms)
 {
+    uint32_t idle_timeout_ms;
     uint32_t report_idle_ms;
     net_manager_snapshot_t net_snapshot;
 
@@ -141,6 +149,7 @@ bool sleep_manager_should_enter_standby(ui_screen_id_t active_id, uint32_t inact
     }
 
     report_idle_ms = sleep_manager_get_report_idle_ms();
+    idle_timeout_ms = sleep_manager_get_idle_timeout_ms();
     net_manager_get_snapshot(&net_snapshot);
     if (net_snapshot.desired_mode == NET_MANAGER_MODE_4G &&
         net_snapshot.net_4g_enabled &&
@@ -151,8 +160,7 @@ bool sleep_manager_should_enter_standby(ui_screen_id_t active_id, uint32_t inact
         return false;
     }
 
-    return inactive_ms >= SLEEP_MANAGER_IDLE_TIMEOUT_MS &&
-           report_idle_ms >= SLEEP_MANAGER_IDLE_TIMEOUT_MS;
+    return inactive_ms >= idle_timeout_ms && report_idle_ms >= idle_timeout_ms;
 }
 
 void sleep_manager_on_enter_standby(ui_screen_id_t from_screen)

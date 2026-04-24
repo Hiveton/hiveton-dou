@@ -37,6 +37,7 @@ extern lv_obj_t *ui_Language;
 extern lv_obj_t *ui_Bluetooth_Config;
 extern lv_obj_t *ui_Network_Mode;
 extern lv_obj_t *ui_Wallpaper;
+extern lv_obj_t *ui_AI_Weather_Settings;
 
 typedef enum
 {
@@ -118,6 +119,8 @@ void ui_network_mode_hardware_prev_option(void);
 void ui_network_mode_hardware_next_option(void);
 void ui_Wallpaper_screen_init(void);
 void ui_Wallpaper_screen_destroy(void);
+void ui_AI_Weather_Settings_screen_init(void);
+void ui_AI_Weather_Settings_screen_destroy(void);
 
 ui_screen_id_t ui_rotation_next_screen(ui_screen_id_t current);
 void ui_init(void);

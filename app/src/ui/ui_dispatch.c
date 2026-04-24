@@ -297,16 +297,19 @@ void ui_dispatch_request_exit_standby(void)
 
 void ui_dispatch_request_back(void)
 {
+    ui_dispatch_request_activity();
     ui_dispatch_send(UI_DISPATCH_EVT_BACK);
 }
 
 void ui_dispatch_request_hardkey_up(void)
 {
+    ui_dispatch_request_activity();
     ui_dispatch_send(UI_DISPATCH_EVT_HARDKEY_UP);
 }
 
 void ui_dispatch_request_hardkey_down(void)
 {
+    ui_dispatch_request_activity();
     ui_dispatch_send(UI_DISPATCH_EVT_HARDKEY_DOWN);
 }
 
@@ -328,9 +331,11 @@ void ui_dispatch_request_screen_switch(ui_screen_id_t screen_id)
         ui_dispatch_request_exit_standby();
         break;
     case UI_SCREEN_HOME:
+        ui_dispatch_request_activity();
         ui_dispatch_send(UI_DISPATCH_EVT_SWITCH_HOME);
         break;
     case UI_SCREEN_AI_DOU:
+        ui_dispatch_request_activity();
         ui_dispatch_send(UI_DISPATCH_EVT_SWITCH_AI_DOU);
         break;
     case UI_SCREEN_STANDBY:

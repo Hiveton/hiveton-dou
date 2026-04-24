@@ -3,7 +3,7 @@
 
 #ifdef BSP_USING_LCD
 #define LCD_RESET_PIN           (0)         // GPIO_A00
-#define LCD_BL_PIN              (42)         // GPIO_A09
+#define LCD_BL_PIN              (42)         // GPIO_A42
 
 
 
@@ -16,6 +16,7 @@ void BSP_LCD_Reset(uint8_t high1_low0)
 
 void BSP_LCD_PowerDown(void)
 {
+    rt_kprintf("bl_trace: BSP_LCD_PowerDown\n");
     // TODO: LCD power down
     BSP_GPIO_Set(LCD_BL_PIN, 0, 1);
     BSP_GPIO_Set(32, 1, 1);
@@ -24,7 +25,6 @@ void BSP_LCD_PowerDown(void)
     BSP_GPIO_Set(21, 0, 1);
 
     HAL_PIN_Set(PAD_PA00, GPIO_A0, PIN_PULLDOWN, 1);
-    HAL_PIN_Set(PAD_PA01, GPIO_A1, PIN_PULLDOWN, 1);
     HAL_PIN_Set(PAD_PA02, GPIO_A2, PIN_PULLDOWN, 1);
     HAL_PIN_Set(PAD_PA03, GPIO_A3, PIN_PULLDOWN, 1);
     HAL_PIN_Set(PAD_PA04, GPIO_A4, PIN_PULLDOWN, 1);
@@ -36,6 +36,7 @@ void BSP_LCD_PowerDown(void)
 
 void BSP_LCD_PowerUp(void)
 {
+    rt_kprintf("bl_trace: BSP_LCD_PowerUp\n");
     // TODO: LCD power up
     BSP_GPIO_Set(LCD_BL_PIN, 1, 1);
     BSP_GPIO_Set(LCD_RESET_PIN, 1, 1);

@@ -1101,18 +1101,30 @@ static rt_err_t drv_pwm_control(struct rt_device_pwm *device, int cmd, void *arg
             && (rt_strcmp(pwm->name, "pwm2") == 0)
             && (configuration->channel == 4))
     {
+        uint32_t dbg_pclk = HAL_RCC_GetPCLKFreq(pwm->tim_handle.core, 1);
+        uint32_t dbg_psc = pwm->tim_handle.Instance->PSC;
+        uint32_t dbg_arr = pwm->tim_handle.Instance->ARR;
         switch (cmd)
         {
         case PWM_CMD_ENABLE:
-            rt_kprintf("bl_trace: drv_pwm pwm2 ch4 ENABLE\n");
+            rt_kprintf("bl_trace: drv_pwm pwm2 ch4 ENABLE pclk=%u psc=%u arr=%u\n",
+                       dbg_pclk,
+                       dbg_psc,
+                       dbg_arr);
             break;
         case PWM_CMD_DISABLE:
-            rt_kprintf("bl_trace: drv_pwm pwm2 ch4 DISABLE\n");
+            rt_kprintf("bl_trace: drv_pwm pwm2 ch4 DISABLE pclk=%u psc=%u arr=%u\n",
+                       dbg_pclk,
+                       dbg_psc,
+                       dbg_arr);
             break;
         case PWM_CMD_SET:
-            rt_kprintf("bl_trace: drv_pwm pwm2 ch4 SET period=%u pulse=%u\n",
+            rt_kprintf("bl_trace: drv_pwm pwm2 ch4 SET period=%u pulse=%u pclk=%u psc=%u arr=%u\n",
                        configuration->period,
-                       configuration->pulse);
+                       configuration->pulse,
+                       dbg_pclk,
+                       dbg_psc,
+                       dbg_arr);
             break;
         default:
             break;

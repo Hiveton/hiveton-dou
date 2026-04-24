@@ -26,6 +26,7 @@ static const ui_screen_id_t s_ui_rotation_sequence[] = {
     UI_SCREEN_BLUETOOTH_CONFIG,
     UI_SCREEN_NETWORK_MODE,
     UI_SCREEN_WALLPAPER,
+    UI_SCREEN_AI_WEATHER_SETTINGS,
 };
 
 ui_screen_id_t ui_rotation_next_screen(ui_screen_id_t current)
@@ -67,6 +68,7 @@ void ui_init( void )
 void ui_destroy( void )
 {
     ui_Wallpaper_screen_destroy();
+    ui_AI_Weather_Settings_screen_destroy();
     ui_Network_Mode_screen_destroy();
     ui_Standby_screen_destroy();
     ui_Bluetooth_Config_screen_destroy();

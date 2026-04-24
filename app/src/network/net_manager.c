@@ -1,10 +1,8 @@
 #include "network/net_manager.h"
 
-#include <dfs_posix.h>
-#include <fcntl.h>
-#include <sys/stat.h>
 #include <string.h>
 
+#include "config/app_config.h"
 #include "ui/ui_dispatch.h"
 #include "ui/ui_helpers.h"
 #include "app_watchdog.h"
@@ -26,9 +24,6 @@
 
 #define NET_MANAGER_EVENT_REFRESH     (1U << 0)
 #define NET_MANAGER_REGISTER_EVENT_RUN (1U << 0)
-#define NET_MANAGER_CONFIG_DIR_NAME   "config"
-#define NET_MANAGER_CONFIG_FILE_NAME  "network_mode.cfg"
-#define NET_MANAGER_FORCE_4G_ON_BOOT  1U
 #define NET_MANAGER_CLOSE_RETRY_MS    3000U
 #define NET_MANAGER_BT_CLOSE_GUARD_MS 3500U
 #define NET_MANAGER_POLL_MS           500U
@@ -74,7 +69,7 @@ static volatile rt_uint8_t s_cat1_ready = 0U;
 static volatile rt_uint8_t s_initialized = 0U;
 static volatile rt_uint8_t s_bt_stack_ready = 0U;
 static volatile rt_uint8_t s_bt_enabled = 0U;
-static volatile rt_uint8_t s_4g_enabled = 1U;
+static volatile rt_uint8_t s_4g_enabled = 0U;
 static rt_uint8_t s_bt_applied = 0U;
 static rt_uint8_t s_4g_applied = 0U;
 static rt_uint8_t s_bt_core_requested = 0U;
@@ -112,6 +107,7 @@ static volatile rt_uint8_t s_pending_mode_valid = 0U;
 static volatile rt_uint8_t s_pending_mode_save = 0U;
 static volatile net_manager_mode_t s_pending_mode = NET_MANAGER_MODE_NONE;
 static rt_tick_t s_xiaozhi_network_resume_last_tick = 0U;
+static rt_uint8_t s_boot_auto_connect_hold = 0U;
 static net_manager_link_t s_active_link = NET_MANAGER_LINK_NONE;
 static net_manager_service_state_t s_service_state = NET_MANAGER_SERVICE_OFFLINE;
 static net_manager_mode_t s_desired_mode = NET_MANAGER_MODE_4G;
@@ -195,146 +191,19 @@ static rt_bool_t net_manager_bt_close_ready_locked(void)
             s_pan_connect_pending != 0U) ? RT_TRUE : RT_FALSE;
 }
 
-static const char *const s_net_manager_config_dir_candidates[] = {
-    "/config",
-    "/tf/config",
-    "/sd/config",
-    "/sd0/config",
-    "config",
-};
-
-static bool net_manager_dir_exists(const char *path)
+static net_manager_mode_t net_manager_mode_from_config(int mode)
 {
-    struct stat info;
-
-    if (path == RT_NULL)
-    {
-        return false;
-    }
-
-    if (stat(path, &info) != 0)
-    {
-        return false;
-    }
-
-    return (info.st_mode & S_IFDIR) != 0;
-}
-
-static bool net_manager_build_config_path(char *buffer, size_t buffer_size, bool ensure_dir)
-{
-    rt_size_t i;
-    const char *config_dir = RT_NULL;
-
-    if (buffer == RT_NULL || buffer_size == 0U)
-    {
-        return false;
-    }
-
-    for (i = 0; i < sizeof(s_net_manager_config_dir_candidates) / sizeof(s_net_manager_config_dir_candidates[0]); ++i)
-    {
-        if (net_manager_dir_exists(s_net_manager_config_dir_candidates[i]))
-        {
-            config_dir = s_net_manager_config_dir_candidates[i];
-            break;
-        }
-    }
-
-    if (config_dir == RT_NULL)
-    {
-        if (!ensure_dir)
-        {
-            buffer[0] = '\0';
-            return false;
-        }
-
-        mkdir("/" NET_MANAGER_CONFIG_DIR_NAME, 0);
-        config_dir = "/" NET_MANAGER_CONFIG_DIR_NAME;
-    }
-
-    rt_snprintf(buffer, buffer_size, "%s/%s", config_dir, NET_MANAGER_CONFIG_FILE_NAME);
-    return true;
-}
-
-static void net_manager_save_mode_config(net_manager_mode_t mode)
-{
-    int fd;
-    char config_path[64];
-    const char *value = NULL;
-
     if (mode == NET_MANAGER_MODE_BT)
     {
-        value = "bt\n";
+        return NET_MANAGER_MODE_BT;
     }
-    else if (mode == NET_MANAGER_MODE_4G)
+
+    if (mode == NET_MANAGER_MODE_4G)
     {
-        value = "4g\n";
-    }
-    else
-    {
-        return;
+        return NET_MANAGER_MODE_4G;
     }
 
-    if (!net_manager_build_config_path(config_path, sizeof(config_path), true))
-    {
-        return;
-    }
-
-    fd = open(config_path, O_WRONLY | O_CREAT | O_TRUNC, 0);
-    if (fd < 0)
-    {
-        return;
-    }
-
-    (void)write(fd, value, rt_strlen(value));
-    close(fd);
-}
-
-static void net_manager_load_mode_config(void)
-{
-    int fd;
-    int length;
-    char buffer[16];
-    char config_path[64];
-
-#if NET_MANAGER_FORCE_4G_ON_BOOT
-    s_desired_mode = NET_MANAGER_MODE_4G;
-    s_saved_mode_before_sleep = NET_MANAGER_MODE_4G;
-    net_manager_apply_desired_mode_locked();
-    net_manager_save_mode_config(NET_MANAGER_MODE_4G);
-    return;
-#endif
-
-    if (!net_manager_build_config_path(config_path, sizeof(config_path), false))
-    {
-        return;
-    }
-
-    fd = open(config_path, O_RDONLY, 0);
-    if (fd < 0)
-    {
-        return;
-    }
-
-    length = read(fd, buffer, sizeof(buffer) - 1);
-    close(fd);
-    if (length <= 0)
-    {
-        return;
-    }
-
-    buffer[length] = '\0';
-    if (rt_strncmp(buffer, "bt", 2) == 0)
-    {
-        s_desired_mode = NET_MANAGER_MODE_BT;
-        s_saved_mode_before_sleep = NET_MANAGER_MODE_BT;
-    }
-    else if (rt_strncmp(buffer, "4g", 2) == 0)
-    {
-        s_desired_mode = NET_MANAGER_MODE_4G;
-        s_saved_mode_before_sleep = NET_MANAGER_MODE_4G;
-    }
-
-    net_manager_apply_desired_mode_locked();
+    return NET_MANAGER_MODE_4G;
 }
 
 static void net_manager_request_status_refresh_if_needed(net_manager_mode_t previous_desired_mode,
@@ -390,6 +259,18 @@ static net_manager_mode_t net_manager_get_runtime_mode_locked(void)
 static void net_manager_apply_desired_mode_locked(void)
 {
     if (s_radios_suspended)
+    {
+        s_bt_enabled = 0U;
+        s_4g_enabled = 0U;
+        s_pan_connect_pending = 0U;
+        s_pan_connect_due_tick = 0U;
+        net_manager_enforce_mutual_exclusion_locked();
+        return;
+    }
+
+    if (s_boot_auto_connect_hold &&
+        (s_desired_mode == NET_MANAGER_MODE_BT ||
+         s_desired_mode == NET_MANAGER_MODE_4G))
     {
         s_bt_enabled = 0U;
         s_4g_enabled = 0U;
@@ -903,6 +784,13 @@ static void net_manager_apply_requested_mode(net_manager_mode_t mode, rt_uint8_t
     rt_uint8_t previous_bt_enabled = s_bt_enabled;
     rt_uint8_t previous_4g_enabled = s_4g_enabled;
 
+    if (save_config && (mode == NET_MANAGER_MODE_BT || mode == NET_MANAGER_MODE_4G))
+    {
+        app_config_set_boot_network_mode(mode);
+        app_config_save();
+        s_boot_auto_connect_hold = 0U;
+    }
+
     if (s_radios_suspended && mode != NET_MANAGER_MODE_SLEEP)
     {
         if (mode == NET_MANAGER_MODE_BT ||
@@ -913,11 +801,6 @@ static void net_manager_apply_requested_mode(net_manager_mode_t mode, rt_uint8_t
         }
         net_manager_update_runtime_state();
         return;
-    }
-
-    if (save_config)
-    {
-        net_manager_save_mode_config(mode);
     }
 
     s_desired_mode = mode;
@@ -1145,21 +1028,37 @@ static void net_manager_thread_entry(void *parameter)
 rt_err_t net_manager_init(void)
 {
     rt_err_t result;
+    int boot_network_mode;
+    rt_uint8_t boot_auto_connect;
+    net_manager_mode_t desired_mode;
 
     if (s_initialized)
     {
         return RT_EOK;
     }
 
-    net_manager_load_mode_config();
-#if NET_MANAGER_FORCE_4G_ON_BOOT
-    s_desired_mode = NET_MANAGER_MODE_4G;
-    s_saved_mode_before_sleep = NET_MANAGER_MODE_4G;
+    boot_network_mode = app_config_get_boot_network_mode();
+    boot_auto_connect = (app_config_get_boot_auto_connect() != 0) ? 1U : 0U;
+    desired_mode = net_manager_mode_from_config(boot_network_mode);
+    s_desired_mode = desired_mode;
+    s_saved_mode_before_sleep = desired_mode;
+    s_boot_auto_connect_hold = (boot_auto_connect == 0U) ? 1U : 0U;
     s_bt_enabled = 0U;
-    s_4g_enabled = 1U;
-    s_bt_close_guard_pending = 1U;
-    s_bt_close_guard_tick = rt_tick_get();
-#endif
+    s_4g_enabled = 0U;
+    s_bt_applied = 0U;
+    s_4g_applied = 0U;
+    s_bt_close_guard_pending = 0U;
+    s_bt_close_guard_tick = 0U;
+
+    if (boot_auto_connect != 0U)
+    {
+        net_manager_apply_desired_mode_locked();
+        if (desired_mode == NET_MANAGER_MODE_4G)
+        {
+            s_bt_close_guard_pending = 1U;
+            s_bt_close_guard_tick = rt_tick_get();
+        }
+    }
 
     if (s_net_manager_event == RT_NULL)
     {

@@ -43,6 +43,7 @@
 #include "xiaozhi_websocket.h"
 #include "xiaozhi_audio.h"
 #include "network/network_mem.h"
+#include "../config/app_config.h"
 #include "log.h"
 #include "app_watchdog.h"
 
@@ -1132,13 +1133,8 @@ void xz_audio_init()
         udp_remove(udp_pcb);
         udp_pcb = NULL;
     }
-    {
-        int volume = audio_server_get_private_volume(AUDIO_TYPE_LOCAL_MUSIC);
-        if (volume < 12)
-        {
-            audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC, 12);
-        }
-    }
+    audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC,
+                                    (int)app_config_get_audio_music_volume());
     xz_audio_decoder_encoder_open(0);
     if (!xz_audio.inited)
     {
@@ -1165,13 +1161,8 @@ void xz_audio_init(void)
 {
     xz_audio_watchdog_heartbeat();
     rt_kprintf("xz_audio_init\n");
-    {
-        int volume = audio_server_get_private_volume(AUDIO_TYPE_LOCAL_MUSIC);
-        if (volume < 12)
-        {
-            audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC, 12);
-        }
-    }
+    audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC,
+                                    (int)app_config_get_audio_music_volume());
     xz_audio_decoder_encoder_open(0);
     if (!xz_audio.inited)
     {

@@ -20,6 +20,8 @@
 #include "bt_connection_manager.h"
 #include "audio_manager.h"
 #include "app_buttons.h"
+#include "config/app_config.h"
+#include "audio_server.h"
 #include "app_watchdog.h"
 #include "bf0_pm.h"
 #include "gui_app_pm.h"
@@ -148,6 +150,8 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
 
 static void set_panel_brightness(rt_uint8_t brightness)
 {
+    rt_device_t lcd_device;
+
     if (brightness > BACKLIGHT_LEVEL_MAX)
     {
         brightness = BACKLIGHT_LEVEL_MAX;
@@ -158,7 +162,11 @@ static void set_panel_brightness(rt_uint8_t brightness)
     }
 
     s_backlight_target_brightness = brightness;
-    board_backlight_set_level(brightness);
+    lcd_device = rt_device_find(LCD_DEVICE_NAME);
+    if (lcd_device != RT_NULL)
+    {
+        rt_device_control(lcd_device, RTGRAPHIC_CTRL_SET_BRIGHTNESS, &brightness);
+    }
 }
 
 void app_set_panel_brightness(rt_uint8_t brightness)
@@ -316,6 +324,28 @@ static rt_err_t tf_try_mount(const char *device_name, const char *mount_path)
     return -RT_ERROR;
 }
 
+static void tf_try_boot_mount_for_config(void)
+{
+    const char *device_name;
+    rt_uint32_t retry;
+
+    for (retry = 0; retry < TF_MOUNT_RETRY_COUNT; ++retry)
+    {
+        device_name = tf_find_device_name();
+        if (device_name != RT_NULL)
+        {
+            if (tf_try_mount(device_name, "/") == RT_EOK)
+            {
+                s_tf_storage_ready = 1U;
+                s_tf_card_present = 1U;
+                return;
+            }
+        }
+
+        rt_thread_mdelay(TF_MOUNT_RETRY_DELAY_MS);
+    }
+}
+
 static void tf_det_irq_handler(void *args)
 {
     (void)args;
@@ -451,11 +481,22 @@ static void tf_mount_thread_entry(void *parameter)
 #endif
                 if (tf_try_mount(device_name, "/") == RT_EOK)
                 {
-                    if (s_tf_storage_ready == 0U)
+                    rt_uint8_t first_ready = (s_tf_storage_ready == 0U) ? 1U : 0U;
+
+                    s_tf_storage_ready = 1U;
+                    if (!app_config_is_loaded_from_file())
+                    {
+                        (void)app_config_load();
+                        if (!app_config_is_loaded_from_file())
+                        {
+                            (void)app_config_save();
+                        }
+                    }
+
+                    if (first_ready != 0U)
                     {
                         ui_font_manager_notify_storage_ready();
                     }
-                    s_tf_storage_ready = 1U;
                     break;
                 }
             }
@@ -518,7 +559,7 @@ static void ui_thread_entry(void *parameter)
     gui_pm_init(lcd_device, pm_event_handler);
 #endif
 
-    set_panel_brightness(s_backlight_target_brightness);
+    set_panel_brightness(app_config_get_display_brightness());
     rt_kprintf("ui: before ui_init\n");
     ui_init();
     rt_kprintf("ui: after ui_init\n");
@@ -528,6 +569,8 @@ static void ui_thread_entry(void *parameter)
     ui_font_manager_notify_storage_ready();
     bq27220_monitor_start();
     rt_kprintf("ui: xz_ui thread ready, ai_dou loaded\n");
+    app_watchdog_heartbeat(APP_WDT_MODULE_UI);
+    app_watchdog_set_mode(APP_WDT_MODE_ACTIVE);
     petgame_init();
     petgame_set_reading_active(false);
 
@@ -706,10 +749,14 @@ int main(void)
 
     check_poweron_reason();
     set_pinmux();
+    tf_try_boot_mount_for_config();
+    app_config_init();
+    app_config_load();
+    audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC,
+                                    (int)app_config_get_audio_music_volume());
     xiaozhi_time_use_china_timezone();
     xz_prepare_tls_allocator();
     app_buttons_init();
-    board_backlight_set(0U);
     aw32001_debug_ensure_charge_enabled();
     rt_kprintf("ui: boot\n");
 
@@ -752,8 +799,6 @@ int main(void)
     {
         return 0;
     }
-
-    app_watchdog_set_mode(APP_WDT_MODE_ACTIVE);
 
     while (1)
     {

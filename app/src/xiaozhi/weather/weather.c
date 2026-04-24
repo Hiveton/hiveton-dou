@@ -17,6 +17,7 @@
 #include "cat1_modem.h"
 #include "network/net_manager.h"
 #include "network/net_http_lock.h"
+#include "../../config/app_config.h"
 #include "littlevgl2rtt.h"
 #include "ui.h"
 #include "ui/ui_dispatch.h"
@@ -187,6 +188,11 @@ static bool weather_is_same_local_day(time_t lhs, time_t rhs)
 
 static bool weather_auto_refresh_due(void)
 {
+    if (!app_config_get_weather_auto_refresh())
+    {
+        return false;
+    }
+
     time_t now = time(RT_NULL);
     struct tm now_tm_storage;
     struct tm last_tm_storage;

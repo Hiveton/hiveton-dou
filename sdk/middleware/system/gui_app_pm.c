@@ -19,14 +19,14 @@
  * Non-EPD displays default to the original close/open behavior.
  */
 #ifndef GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
-#if defined(BSP_LCDC_USING_EPD_8BIT)
+#if defined(BSP_LCDC_USING_EPD_8BIT) || defined(LCD_USING_ST7789_GTM024_08_SPI8P)
 #define GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP 1
 #else
 #define GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP 0
 #endif
 #endif
 
-#if defined(BSP_LCDC_USING_EPD_8BIT) && !GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
+#if (defined(BSP_LCDC_USING_EPD_8BIT) || defined(LCD_USING_ST7789_GTM024_08_SPI8P)) && !GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP
 #error "EPD targets must keep display content on sleep; do not clear or power off the panel."
 #endif
 
@@ -148,6 +148,12 @@ void gui_set_idle_mode(bool idle_mode)
 }
 void close_display(void)
 {
+    LOG_I("close_display enter: lcd=%p opened=%d idle=%d keep_epd=%d state=%s",
+          s_gui_ctx.lcd,
+          s_gui_ctx.lcd_opened ? 1 : 0,
+          s_gui_ctx.idle_mode ? 1 : 0,
+          GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP,
+          gui_state_to_name(s_gui_ctx.state));
     gui_pm_enter_critical();
     if (s_gui_ctx.lcd && s_gui_ctx.lcd_opened)
     {
@@ -193,6 +199,12 @@ void open_display(void)
 {
     uint16_t cf;
 
+    LOG_I("open_display enter: lcd=%p opened=%d idle=%d keep_epd=%d state=%s",
+          s_gui_ctx.lcd,
+          s_gui_ctx.lcd_opened ? 1 : 0,
+          s_gui_ctx.idle_mode ? 1 : 0,
+          GUI_PM_KEEP_EPD_CONTENT_ON_SLEEP,
+          gui_state_to_name(s_gui_ctx.state));
     gui_pm_enter_critical();
 #ifdef RT_USING_PM
     rt_pm_request(PM_SLEEP_MODE_IDLE);

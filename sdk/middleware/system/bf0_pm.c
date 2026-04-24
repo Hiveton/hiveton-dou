@@ -2081,6 +2081,25 @@ L1_RET_CODE_SECT(sifli_pm_run, __WEAK void sifli_pm_run(struct rt_pm *pm, uint8_
 
 #if defined(BSP_PM_FREQ_SCALING)
 
+#ifdef SOC_BF0_HCPU
+static volatile rt_bool_t g_pm_pwm_clock_hold = RT_FALSE;
+
+void sifli_pm_pwm_clock_hold(rt_bool_t hold)
+{
+    g_pm_pwm_clock_hold = hold ? RT_TRUE : RT_FALSE;
+}
+
+static rt_bool_t sifli_pm_pwm_clock_is_held(void)
+{
+    return g_pm_pwm_clock_hold;
+}
+#else
+static rt_bool_t sifli_pm_pwm_clock_is_held(void)
+{
+    return RT_FALSE;
+}
+#endif /* SOC_BF0_HCPU */
+
 L1_RET_CODE_SECT(sifli_deep_wfi, static void sifli_deep_wfi(void))
 {
 #ifdef PM_HW_DEEP_WFI_SUPPORT
@@ -2164,6 +2183,7 @@ L1_RET_CODE_SECT(sifli_enter_idle, static void sifli_enter_idle(struct rt_pm *pm
 #ifndef PM_HW_DEEP_WFI_SUPPORT
             && (-1 == pm_freq_scaling_param.sys_clk_src)
 #endif /* !PM_HW_DEEP_WFI_SUPPORT */
+            && !sifli_pm_pwm_clock_is_held()
             && freq_scaling_enabled)
     {
 #ifdef PM_METRICS_ENABLED

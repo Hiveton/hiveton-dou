@@ -13,6 +13,7 @@
 #include "kws/app_recorder_process.h"
 #include "xiaozhi_client_public.h"
 #include "network/net_manager.h"
+#include "../config/app_config.h"
 #include "audio_manager.h"
 #include "mem_section.h"
 #include "app_watchdog.h"
@@ -73,6 +74,7 @@ static bool s_last_network_ready = false;
 
 static void set_state(xz_service_state_t new_state);
 static void xiaozhi_service_try_pending_greeting(void);
+static void xiaozhi_service_attempt_reconnect(bool automatic);
 
 static void clear_waiting_server_reply(void)
 {
@@ -177,7 +179,9 @@ static void xiaozhi_service_sync_network_notice(bool network_ready, bool force_n
         {
             if (s_ui_cbs.on_chat_output)
             {
-                s_ui_cbs.on_chat_output("网络已恢复，正在自动重连小智...");
+                s_ui_cbs.on_chat_output(app_config_get_ai_auto_resume() ?
+                                        "网络已恢复，正在自动重连小智..." :
+                                        "网络已恢复，请手动连接小智");
             }
         }
 
@@ -289,6 +293,81 @@ static void xiaozhi_service_fail_connect_attempt(const char *reason,
     }
 }
 
+static void xiaozhi_service_attempt_reconnect(bool automatic)
+{
+    rt_tick_t now = rt_tick_get();
+    bool force_notice = automatic ? false : true;
+
+    if (!net_manager_can_run_ai())
+    {
+        xiaozhi_service_sync_network_notice(false, force_notice);
+        return;
+    }
+
+    if (xz_websocket_is_connected())
+    {
+        return;
+    }
+
+    if (s_connect_in_progress)
+    {
+        xiaozhi_service_notice_connecting(force_notice);
+        return;
+    }
+
+    xiaozhi_service_notice_connecting(force_notice);
+
+    if (automatic &&
+        (s_last_reconnect_tick != 0) &&
+        (now - s_last_reconnect_tick) <
+            rt_tick_from_millisecond(XZ_SERVICE_RECONNECT_INTERVAL_MS))
+    {
+        return;
+    }
+
+    s_last_reconnect_tick = now;
+    LOG_I(automatic ? "Attempting websocket auto reconnect" :
+                      "Attempting websocket reconnect");
+    xiaozhi_service_mark_connect_attempt(force_notice);
+
+    if (xz_websocket_connect() == 0)
+    {
+        if (xz_websocket_get_session_id() != NULL)
+        {
+            if (automatic)
+            {
+                LOG_I("Auto reconnect succeeded");
+            }
+            else
+            {
+                LOG_I("Reconnect succeeded");
+            }
+            reset_reconnect_state();
+            clear_waiting_server_reply();
+            set_state(XZ_SERVICE_READY);
+            xiaozhi_service_try_pending_greeting();
+            if (automatic && s_ui_cbs.on_chat_output)
+            {
+                s_ui_cbs.on_chat_output("小智已自动重连");
+            }
+        }
+        else
+        {
+            LOG_I(automatic ? "Auto reconnect connected, waiting for session" :
+                              "Reconnect connected, waiting for session");
+            s_session_wait_start_tick = rt_tick_get();
+            xiaozhi_service_notice_connecting(force_notice);
+        }
+    }
+    else
+    {
+        xiaozhi_service_fail_connect_attempt(automatic ?
+                                             "小智连接失败，将稍后自动重试" :
+                                             "小智连接失败，请稍后重试",
+                                             !automatic);
+    }
+}
+
 static void xiaozhi_service_watchdog_tick(void)
 {
     rt_tick_t now = rt_tick_get();
@@ -393,43 +472,12 @@ static void xiaozhi_service_watchdog_tick(void)
         return;
     }
 
-    xiaozhi_service_notice_connecting(false);
-
-    if ((s_last_reconnect_tick != 0) &&
-        (now - s_last_reconnect_tick) <
-            rt_tick_from_millisecond(XZ_SERVICE_RECONNECT_INTERVAL_MS))
+    if (!app_config_get_ai_auto_resume())
     {
         return;
     }
 
-    s_last_reconnect_tick = now;
-    LOG_I("Attempting websocket auto reconnect");
-    xiaozhi_service_mark_connect_attempt(false);
-
-    if (xz_websocket_connect() == 0)
-    {
-        if (xz_websocket_get_session_id() != NULL)
-        {
-            LOG_I("Auto reconnect succeeded");
-            reset_reconnect_state();
-            clear_waiting_server_reply();
-            set_state(XZ_SERVICE_READY);
-            xiaozhi_service_try_pending_greeting();
-            if (s_ui_cbs.on_chat_output) {
-                s_ui_cbs.on_chat_output("小智已自动重连");
-            }
-        }
-        else
-        {
-            LOG_I("Auto reconnect connected, waiting for session");
-            s_session_wait_start_tick = rt_tick_get();
-            xiaozhi_service_notice_connecting(false);
-        }
-    }
-    else
-    {
-        xiaozhi_service_fail_connect_attempt("小智连接失败，将稍后自动重试", false);
-    }
+    xiaozhi_service_attempt_reconnect(true);
 }
 
 /* 设置状态 */
@@ -803,7 +851,7 @@ static void xiaozhi_service_thread(void *parameter)
             }
 
             if (evt & XZ_EVT_RECONNECT) {
-                xiaozhi_service_watchdog_tick();
+                xiaozhi_service_attempt_reconnect(false);
             }
         }
         else

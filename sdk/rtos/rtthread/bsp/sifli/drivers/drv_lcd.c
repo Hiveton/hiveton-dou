@@ -2322,7 +2322,6 @@ static void lcd_task(void *param)
             case LCD_MSG_SET_BRIGHTNESS:
             {
                 lcd_set_brightness(msg.content.brightness);
-                lcd_display_on();
             }
             break;
 
@@ -2800,31 +2799,15 @@ static uint8_t lcd_backlight_level;       // save local bl, check previous level
 #endif
 static rt_size_t backligt_get(rt_device_t dev, rt_off_t pos, void *buffer, rt_size_t size)
 {
+    (void)dev;
+    (void)pos;
+    (void)size;
+
     if (buffer != NULL)
     {
-        *((uint8_t *) buffer)  =  lcd_backlight_level;
-
-        struct rt_device_pwm *backlight_device = (struct rt_device_pwm *)rt_device_find(LCD_PWM_BACKLIGHT_INTERFACE_NAME);
-        if (!backlight_device)
-        {
-            RT_ASSERT(0);
-        }
-        else
-        {
-
-            struct rt_pwm_configuration configuration = {0};
-            configuration.channel = LCD_PWM_BACKLIGHT_CHANEL_NUM;
-            if (RT_EOK == rt_device_control(&backlight_device->parent, PWM_CMD_GET, &configuration))
-            {
-                LOG_I("pwm_config ch=%d,peroid=%d,pulse=%d",
-                      configuration.channel,
-                      configuration.period,
-                      configuration.pulse);
-            }
-        }
-
-        LOG_I("backligt_get %d%", lcd_backlight_level);
-
+        *((uint8_t *) buffer) = drv_lcd.brightness;
+        lcd_backlight_level = drv_lcd.brightness;
+        LOG_I("backligt_get proxy %d%", lcd_backlight_level);
         return 1;
     }
 
@@ -2833,18 +2816,18 @@ static rt_size_t backligt_get(rt_device_t dev, rt_off_t pos, void *buffer, rt_si
 
 static rt_size_t backligt_set(rt_device_t dev, rt_off_t pos, const void *buffer, rt_size_t size)
 {
+    (void)dev;
+    (void)pos;
+    (void)size;
+
     if (buffer != NULL)
     {
         uint8_t percent = *((uint8_t *) buffer);
 
         if (percent > 100) percent = 100;
-        /*
-         * Keep lcdlight readable for diagnostics, but stop this generic path
-         * from driving the board backlight PWM while the board layer owns PA01.
-         */
-        LOG_I("backligt_set bypass pwm %d%", percent);
-
         lcd_backlight_level = percent;
+        LOG_I("backligt_set proxy %d%", percent);
+        lcd_set_brightness(percent);
 
         return 1;
     }

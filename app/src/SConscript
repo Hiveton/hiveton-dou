@@ -15,6 +15,8 @@ src = [
     os.path.join(cwd, 'sleep_manager.c'),
     os.path.join(cwd, 'petgame_reducer.c'),
     os.path.join(cwd, 'petgame_storage.c'),
+    os.path.join(cwd, 'config', 'app_config.c'),
+    os.path.join(cwd, 'config', 'app_config_storage.c'),
     os.path.join(cwd, 'network', 'net_manager.c'),
     os.path.join(cwd, 'network', 'net_http_lock.c'),
     os.path.join(cwd, 'network', 'network_mem.c'),
@@ -33,6 +35,7 @@ src.extend(Glob(os.path.join(cwd, 'ui', 'screens', '*.c')))
 cpppath = [
     cwd,
     os.path.join(cwd, 'board'),
+    os.path.join(cwd, 'config'),
     os.path.join(cwd, 'reading'),
     os.path.join(cwd, 'network'),
     os.path.join(cwd, 'ui'),

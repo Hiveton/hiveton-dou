@@ -21,6 +21,7 @@
 #include "../sleep_manager.h"
 #include "../bq27220_monitor.h"
 #include "../network/net_manager.h"
+#include "../config/app_config.h"
 #include "cat1_modem.h"
 #include "../xiaozhi/weather/weather.h"
 
@@ -491,25 +492,27 @@ static void ui_status_bar_refresh_thread_entry(void *parameter)
 
 static bool ui_status_backlight_read(uint8_t *brightness)
 {
-    rt_size_t read_size;
+    rt_err_t result;
 
     if (brightness == NULL)
     {
         return false;
     }
 
-    if (s_status_panel.lcd_backlight_device == RT_NULL)
+    if (s_status_panel.lcd_device == RT_NULL)
     {
-        s_status_panel.lcd_backlight_device = rt_device_find(LCD_BACKLIGHT_DEVICE_NAME);
+        s_status_panel.lcd_device = rt_device_find(LCD_DEVICE_NAME);
     }
 
-    if (s_status_panel.lcd_backlight_device == RT_NULL)
+    if (s_status_panel.lcd_device == RT_NULL)
     {
         return false;
     }
 
-    read_size = rt_device_read(s_status_panel.lcd_backlight_device, 0, brightness, 1);
-    return read_size == 1;
+    result = rt_device_control(s_status_panel.lcd_device,
+                               RTGRAPHIC_CTRL_GET_BRIGHTNESS,
+                               brightness);
+    return result == RT_EOK;
 }
 
 static void ui_status_backlight_write(uint8_t brightness)
@@ -519,14 +522,16 @@ static void ui_status_backlight_write(uint8_t brightness)
         brightness = 100U;
     }
 
-    if (s_status_panel.lcd_backlight_device == RT_NULL)
+    if (s_status_panel.lcd_device == RT_NULL)
     {
-        s_status_panel.lcd_backlight_device = rt_device_find(LCD_BACKLIGHT_DEVICE_NAME);
+        s_status_panel.lcd_device = rt_device_find(LCD_DEVICE_NAME);
     }
 
-    if (s_status_panel.lcd_backlight_device != RT_NULL)
+    if (s_status_panel.lcd_device != RT_NULL)
     {
-        rt_device_write(s_status_panel.lcd_backlight_device, 0, &brightness, 1);
+        rt_device_control(s_status_panel.lcd_device,
+                          RTGRAPHIC_CTRL_SET_BRIGHTNESS,
+                          &brightness);
     }
 }
 
@@ -2111,33 +2116,16 @@ static void ui_status_slider_event_cb(lv_event_t *e)
     if (kind == UI_STATUS_SLIDER_BRIGHTNESS)
     {
         uint8_t actual;
-        bool wrote_backlight;
 
         value = ui_status_slider_step_from_touch(slider, indev, 1U, 5U);
         actual = ui_status_steps_to_brightness(value);
         s_status_panel.brightness_steps = value;
         s_status_pending_brightness = actual;
-        wrote_backlight = false;
-        if (s_status_panel.lcd_backlight_device == RT_NULL)
+        ui_status_backlight_write(actual);
+        app_config_set_display_brightness(actual);
+        if (code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED)
         {
-            s_status_panel.lcd_backlight_device = rt_device_find(LCD_BACKLIGHT_DEVICE_NAME);
-        }
-        if (s_status_panel.lcd_backlight_device != RT_NULL)
-        {
-            ui_status_backlight_write(actual);
-            wrote_backlight = true;
-        }
-
-        if (!wrote_backlight)
-        {
-            if (s_status_panel.lcd_device == RT_NULL)
-            {
-                s_status_panel.lcd_device = rt_device_find(LCD_DEVICE_NAME);
-            }
-            if (s_status_panel.lcd_device != RT_NULL)
-            {
-                rt_device_control(s_status_panel.lcd_device, RTGRAPHIC_CTRL_SET_BRIGHTNESS, &actual);
-            }
+            (void)app_config_save();
         }
     }
     else
@@ -2149,6 +2137,11 @@ static void ui_status_slider_event_cb(lv_event_t *e)
         s_status_panel.volume_steps = value;
         s_status_pending_volume = actual;
         audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC, actual);
+        app_config_set_audio_music_volume(actual);
+        if (code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED)
+        {
+            (void)app_config_save();
+        }
     }
 
     ui_status_request_detail_rebuild();
