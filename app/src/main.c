@@ -21,6 +21,7 @@
 #include "audio_manager.h"
 #include "app_buttons.h"
 #include "config/app_config.h"
+#include "reading/reading_state.h"
 #include "audio_server.h"
 #include "app_watchdog.h"
 #include "bf0_pm.h"
@@ -47,7 +48,7 @@
 #define XZ_UI_THREAD_TICK 10
 
 #define BACKLIGHT_STEP_DELAY_MS 20
-#define BACKLIGHT_LEVEL_MIN 50U
+#define BACKLIGHT_LEVEL_MIN 0U
 #define BACKLIGHT_LEVEL_MAX 100U
 #define TF_MOUNT_THREAD_STACK_SIZE 4096
 #define TF_MOUNT_THREAD_PRIORITY 18
@@ -752,6 +753,7 @@ int main(void)
     tf_try_boot_mount_for_config();
     app_config_init();
     app_config_load();
+    (void)reading_state_init();
     audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC,
                                     (int)app_config_get_audio_music_volume());
     xiaozhi_time_use_china_timezone();

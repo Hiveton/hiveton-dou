@@ -50,25 +50,33 @@ extern const lv_image_dsc_t home_reading;
 extern const lv_image_dsc_t home_record;
 extern const lv_image_dsc_t home_settings;
 extern const lv_image_dsc_t home_weather;
+extern const lv_image_dsc_t home_wallpaper;
 
 typedef struct
 {
     const lv_image_dsc_t *icon;
     const char *label_zh;
     const char *label_en;
+    const char *subtitle_zh;
+    const char *subtitle_en;
     ui_screen_id_t target;
+    int icon_x;
+    int icon_y;
+    int icon_w;
+    int icon_h;
 } ui_home_tile_t;
 
 static const ui_home_tile_t s_home_tiles[] = {
-    {&home_reading, "阅读", "Reading", UI_SCREEN_READING_LIST},
-    {&home_pet, "陪伴成长", "Companion Growth", UI_SCREEN_PET},
-    {&home_ai, "AI小豆", "AI Dou", UI_SCREEN_AI_DOU},
-    {&home_clock, "时间管理", "Time", UI_SCREEN_TIME_MANAGE},
-    {&home_weather, "天气", "Weather", UI_SCREEN_WEATHER},
-    {&home_calendar, "日历", "Calendar", UI_SCREEN_CALENDAR},
-    {&home_record, "录音", "Recorder", UI_SCREEN_RECORDER},
-    {&home_music, "音乐", "Music", UI_SCREEN_MUSIC_LIST},
-    {&home_settings, "设置", "Settings", UI_SCREEN_SETTINGS},
+    {&home_reading, "阅读", "Reading", "继续上次阅读", "Continue reading", UI_SCREEN_READING_LIST, 30, 26, 100, 86},
+    {&home_pet, "成长小游戏", "Growth Game", "快乐成长", "Grow happily", UI_SCREEN_PET, 32, 29, 92, 68},
+    {&home_ai, "AI小豆", "AI Dou", "智能助手", "Smart assistant", UI_SCREEN_AI_DOU, 34, 18, 86, 86},
+    {&home_clock, "番茄时间", "Pomodoro", "专注计时", "Focus timer", UI_SCREEN_POMODORO, 34, 18, 86, 86},
+    {&home_weather, "天气", "Weather", "查看天气", "View weather", UI_SCREEN_WEATHER, 34, 28, 88, 78},
+    {&home_calendar, "日历", "Calendar", "日程安排", "Schedule", UI_SCREEN_CALENDAR, 34, 14, 86, 90},
+    {&home_record, "录音", "Recorder", "录音与转写", "Record and transcribe", UI_SCREEN_RECORDER, 39, 12, 78, 90},
+    {&home_music, "音乐", "Music", "音乐播放", "Music playback", UI_SCREEN_MUSIC_LIST, 39, 14, 78, 86},
+    {&home_wallpaper, "壁纸", "Wallpaper", "壁纸设置", "Wallpaper settings", UI_SCREEN_WALLPAPER, 34, 19, 88, 74},
+    {&home_settings, "设置", "Settings", "系统与个性化", "System and personalization", UI_SCREEN_SETTINGS, 39, 12, 78, 86},
 };
 
 #if UI_HOME_ENABLE_4G_TEST_PANEL
@@ -326,21 +334,54 @@ static lv_obj_t *create_home_hotspot(lv_obj_t *parent,
                                      int y,
                                      int w,
                                      int h,
-                                     ui_screen_id_t target)
+                                     ui_screen_id_t target,
+                                     int radius)
 {
     lv_obj_t *zone = lv_obj_create(parent);
 
     lv_obj_remove_flag(zone, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_pos(zone, ui_px_x(x), ui_px_y(y));
     lv_obj_set_size(zone, ui_px_w(w), ui_px_h(h));
-    lv_obj_set_style_bg_opa(zone, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(zone, 0, 0);
-    lv_obj_set_style_radius(zone, 0, 0);
+    lv_obj_set_style_bg_color(zone, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(zone, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(zone, lv_color_black(), 0);
+    lv_obj_set_style_border_width(zone, 2, 0);
+    lv_obj_set_style_radius(zone, ui_px_x(radius), 0);
     lv_obj_set_style_shadow_width(zone, 0, 0);
     lv_obj_set_style_outline_width(zone, 0, 0);
     lv_obj_set_style_pad_all(zone, 0, 0);
     ui_attach_nav_event(zone, target);
     return zone;
+}
+
+static void ui_home_add_tile_text(lv_obj_t *card,
+                                  const ui_home_tile_t *tile,
+                                  int card_w,
+                                  int card_h)
+{
+    const int title_y = card_h - 58;
+    const int subtitle_y = card_h - 29;
+
+    ui_create_label(card,
+                    ui_i18n_pick(tile->label_zh, tile->label_en),
+                    0,
+                    title_y,
+                    card_w,
+                    32,
+                    25,
+                    LV_TEXT_ALIGN_CENTER,
+                    false,
+                    false);
+    ui_create_label(card,
+                    ui_i18n_pick(tile->subtitle_zh, tile->subtitle_en),
+                    0,
+                    subtitle_y,
+                    card_w,
+                    24,
+                    17,
+                    LV_TEXT_ALIGN_CENTER,
+                    false,
+                    false);
 }
 
 const xiaozhi_home_screen_refs_t *ui_home_screen_refs_get(void)
@@ -353,8 +394,9 @@ void ui_Home_screen_init(void)
     lv_obj_t *section;
     size_t i;
     size_t visible_index = 0U;
-    static const int home_tile_x_positions[3] = {18, 186, 354};
-    static const int home_tile_y_positions[3] = {18, 220, 422};
+    static const int home_tile_x_positions[3] = {20, 188, 353};
+    static const int home_tile_y_positions[3] = {156, 336, 516};
+    static const int home_tile_heights[3] = {168, 168, 168};
 
     if (ui_Home != NULL)
     {
@@ -372,8 +414,8 @@ void ui_Home_screen_init(void)
     lv_obj_remove_flag(section, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(section, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(section, 0, 0);
-    lv_obj_set_pos(section, 0, ui_px_y(68));
-    lv_obj_set_size(section, ui_px_w(528), ui_px_h(724));
+    lv_obj_set_pos(section, 0, ui_px_y(84));
+    lv_obj_set_size(section, ui_px_w(528), ui_px_h(708));
 
 #if UI_HOME_ENABLE_4G_TEST_PANEL
     ui_home_create_4g_test_panel(section);
@@ -384,36 +426,76 @@ void ui_Home_screen_init(void)
         const ui_home_tile_t *tile = &s_home_tiles[i];
         int x;
         int y;
+        int h;
         lv_obj_t *zone;
         lv_obj_t *icon;
 
-        if (tile->target == UI_SCREEN_WEATHER &&
-            !xiaozhi_weather_is_home_entry_enabled())
+        if (i == 0U)
         {
+            zone = create_home_hotspot(section,
+                                       20,
+                                       16,
+                                       488,
+                                       132,
+                                       tile->target,
+                                       12);
+            icon = ui_create_image_slot(zone,
+                                        tile->icon_x,
+                                        tile->icon_y,
+                                        tile->icon_w,
+                                        tile->icon_h);
+            ui_img_set_src(icon, tile->icon);
+            ui_create_label(zone,
+                            ui_i18n_pick(tile->label_zh, tile->label_en),
+                            160,
+                            31,
+                            160,
+                            42,
+                            34,
+                            LV_TEXT_ALIGN_LEFT,
+                            false,
+                            false);
+            ui_create_label(zone,
+                            ui_i18n_pick(tile->subtitle_zh, tile->subtitle_en),
+                            160,
+                            80,
+                            180,
+                            30,
+                            22,
+                            LV_TEXT_ALIGN_LEFT,
+                            false,
+                            false);
+            ui_create_label(zone,
+                            ">",
+                            424,
+                            42,
+                            42,
+                            42,
+                            40,
+                            LV_TEXT_ALIGN_CENTER,
+                            false,
+                            false);
             continue;
         }
 
         x = home_tile_x_positions[visible_index % 3U];
         y = home_tile_y_positions[visible_index / 3U];
+        h = home_tile_heights[visible_index / 3U];
         zone = create_home_hotspot(section,
-                                             x,
-                                             y,
-                                             156,
-                                             198,
-                                             tile->target);
-        icon = ui_create_image_slot(zone, 38, 24, 80, 80);
+                                   x,
+                                   y,
+                                   156,
+                                   h,
+                                   tile->target,
+                                   8);
+        icon = ui_create_image_slot(zone,
+                                    tile->icon_x,
+                                    tile->icon_y,
+                                    tile->icon_w,
+                                    tile->icon_h);
 
         ui_img_set_src(icon, tile->icon);
-        ui_create_label(zone,
-                        ui_i18n_pick(tile->label_zh, tile->label_en),
-                        0,
-                        126,
-                        156,
-                        30,
-                        26,
-                        LV_TEXT_ALIGN_CENTER,
-                        false,
-                        false);
+        ui_home_add_tile_text(zone, tile, 156, h);
         ++visible_index;
     }
 

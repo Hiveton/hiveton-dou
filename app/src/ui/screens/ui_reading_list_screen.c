@@ -8,6 +8,7 @@
 #include "dfs_posix.h"
 #include "rtdevice.h"
 #include "rtthread.h"
+#include "reading/reading_state.h"
 #include "ui.h"
 #include "ui_i18n.h"
 #include "ui_helpers.h"
@@ -18,6 +19,11 @@
 #define UI_READING_MAX_NAME_LEN 96U
 #define UI_READING_MAX_PATH_LEN 192U
 #define UI_READING_BOOKS_DIRECTORY "books"
+#define UI_READING_TAB_X 24
+#define UI_READING_TAB_Y 14
+#define UI_READING_TAB_WIDTH 160
+#define UI_READING_TAB_HEIGHT 48
+#define UI_READING_CARD_HEIGHT 104
 
 typedef enum
 {
@@ -27,9 +33,18 @@ typedef enum
     UI_READING_SCAN_NO_FILES,
 } ui_reading_scan_state_t;
 
+typedef enum
+{
+    UI_READING_TAB_ALL = 0,
+    UI_READING_TAB_RECENT,
+    UI_READING_TAB_FAVORITES,
+    UI_READING_TAB_COUNT,
+} ui_reading_tab_t;
+
 typedef struct
 {
     char name[UI_READING_MAX_NAME_LEN];
+    char path[UI_READING_MAX_PATH_LEN];
     uint32_t size_bytes;
     uint8_t file_type;
 } ui_reading_file_entry_t;
@@ -46,17 +61,18 @@ typedef struct
     lv_obj_t *title_label;
     lv_obj_t *meta_label;
     char title_text[UI_READING_MAX_NAME_LEN];
-    char meta_text[80];
+    char meta_text[128];
 } ui_reading_card_refs_t;
 
 lv_obj_t *ui_Reading_List = NULL;
 
-static const int s_card_y_positions[UI_READING_VISIBLE_COUNT] = {40, 179, 318, 457};
+static const int s_card_y_positions[UI_READING_VISIBLE_COUNT] = {96, 218, 340, 462};
 static const char *const s_reading_device_candidates[] = {"sd0", "sd1", "sd2", "sdio0"};
 static const char *const s_reading_mount_candidates[] = {"/", "/tf", "/sd", "/sd0"};
 
 static ui_reading_file_entry_t s_reading_files[UI_READING_MAX_FILES];
 static ui_reading_card_refs_t s_reading_cards[UI_READING_VISIBLE_COUNT];
+static lv_obj_t *s_reading_tab_buttons[UI_READING_TAB_COUNT];
 static lv_obj_t *s_reading_status_label = NULL;
 static lv_obj_t *s_reading_prev_button = NULL;
 static lv_obj_t *s_reading_next_button = NULL;
@@ -69,6 +85,7 @@ static uint16_t s_reading_selected_index = 0;
 static bool s_reading_has_selection = false;
 static bool s_reading_open_detail_pending = false;
 static ui_reading_scan_state_t s_reading_scan_state = UI_READING_SCAN_NO_CARD;
+static ui_reading_tab_t s_reading_active_tab = UI_READING_TAB_ALL;
 static char s_reading_mount_path[32];
 static char s_reading_books_path[UI_READING_MAX_PATH_LEN];
 static char s_reading_selected_name[UI_READING_MAX_NAME_LEN];
@@ -121,6 +138,7 @@ void ui_reading_list_hardware_next_page(void)
 typedef struct
 {
     ui_reading_scan_state_t state;
+    ui_reading_tab_t tab;
     uint16_t file_count;
     char mount_path[sizeof(s_reading_mount_path)];
 } ui_reading_snapshot_t;
@@ -130,6 +148,7 @@ static ui_reading_snapshot_t ui_reading_capture_snapshot(void)
     ui_reading_snapshot_t snapshot;
 
     snapshot.state = s_reading_scan_state;
+    snapshot.tab = s_reading_active_tab;
     snapshot.file_count = s_reading_file_count;
     rt_snprintf(snapshot.mount_path, sizeof(snapshot.mount_path), "%s", s_reading_mount_path);
     return snapshot;
@@ -144,8 +163,65 @@ static bool ui_reading_snapshot_changed(const ui_reading_snapshot_t *before,
     }
 
     return before->state != after->state ||
+           before->tab != after->tab ||
            before->file_count != after->file_count ||
            strcmp(before->mount_path, after->mount_path) != 0;
+}
+
+static const char *ui_reading_tab_title(ui_reading_tab_t tab)
+{
+    switch (tab)
+    {
+    case UI_READING_TAB_RECENT:
+        return ui_i18n_pick("最近阅读", "Recent");
+    case UI_READING_TAB_FAVORITES:
+        return ui_i18n_pick("我的收藏", "Favorites");
+    case UI_READING_TAB_ALL:
+    default:
+        return ui_i18n_pick("全部图书", "All Books");
+    }
+}
+
+static const char *ui_reading_path_basename(const char *path)
+{
+    const char *slash;
+
+    if (path == NULL || path[0] == '\0')
+    {
+        return "";
+    }
+
+    slash = strrchr(path, '/');
+    return slash != NULL ? slash + 1 : path;
+}
+
+static void ui_reading_update_tab_styles(void)
+{
+    uint16_t i;
+
+    for (i = 0; i < UI_READING_TAB_COUNT; ++i)
+    {
+        lv_obj_t *button = s_reading_tab_buttons[i];
+        lv_obj_t *label = NULL;
+        bool active = (ui_reading_tab_t)i == s_reading_active_tab;
+
+        if (button == NULL)
+        {
+            continue;
+        }
+
+        lv_obj_set_style_bg_color(button, lv_color_hex(active ? 0x000000 : 0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_width(button, 2, LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_border_color(button, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_text_color(button, lv_color_hex(active ? 0xFFFFFF : 0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+        lv_obj_set_style_opa(button, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+        label = lv_obj_get_child(button, 0);
+        if (label != NULL)
+        {
+            lv_obj_set_style_text_color(label, lv_color_hex(active ? 0xFFFFFF : 0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+            lv_obj_set_style_text_color(label, lv_color_hex(active ? 0xFFFFFF : 0x000000), LV_PART_MAIN | LV_STATE_PRESSED);
+        }
+    }
 }
 
 static void ui_reading_join_path(char *buffer,
@@ -281,8 +357,7 @@ static void ui_reading_copy_path(char *buffer, size_t buffer_size, const char *p
 static void ui_reading_update_selected_cache(void)
 {
     if (!s_reading_has_selection ||
-        s_reading_selected_index >= s_reading_file_count ||
-        s_reading_books_path[0] == '\0')
+        s_reading_selected_index >= s_reading_file_count)
     {
         s_reading_selected_name[0] = '\0';
         s_reading_selected_path[0] = '\0';
@@ -293,10 +368,86 @@ static void ui_reading_update_selected_cache(void)
                 sizeof(s_reading_selected_name),
                 "%s",
                 s_reading_files[s_reading_selected_index].name);
+    if (s_reading_files[s_reading_selected_index].path[0] != '\0')
+    {
+        ui_reading_copy_path(s_reading_selected_path,
+                             sizeof(s_reading_selected_path),
+                             s_reading_files[s_reading_selected_index].path);
+        return;
+    }
+
+    if (s_reading_books_path[0] == '\0')
+    {
+        s_reading_selected_path[0] = '\0';
+        return;
+    }
+
     ui_reading_join_path(s_reading_selected_path,
                          sizeof(s_reading_selected_path),
                          s_reading_books_path,
                          s_reading_files[s_reading_selected_index].name);
+}
+
+static bool ui_reading_get_file_path(uint16_t file_index, char *buffer, size_t buffer_size)
+{
+    if (buffer == NULL || buffer_size == 0U || file_index >= s_reading_file_count)
+    {
+        return false;
+    }
+
+    if (s_reading_files[file_index].path[0] != '\0')
+    {
+        ui_reading_copy_path(buffer, buffer_size, s_reading_files[file_index].path);
+        return buffer[0] != '\0';
+    }
+
+    if (s_reading_books_path[0] == '\0')
+    {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    ui_reading_join_path(buffer,
+                         buffer_size,
+                         s_reading_books_path,
+                         s_reading_files[file_index].name);
+    return buffer[0] != '\0';
+}
+
+static void ui_reading_format_progress(uint16_t file_index, char *buffer, size_t buffer_size)
+{
+    char path[UI_READING_MAX_PATH_LEN];
+    reading_book_state_t state;
+
+    if (buffer == NULL || buffer_size == 0U)
+    {
+        return;
+    }
+
+    buffer[0] = '\0';
+    if (!ui_reading_get_file_path(file_index, path, sizeof(path)) ||
+        !reading_state_get(path, &state) ||
+        state.open_count == 0U)
+    {
+        rt_snprintf(buffer, buffer_size, "%s", ui_i18n_pick("未阅读", "Unread"));
+        return;
+    }
+
+    if (s_reading_files[file_index].file_type == UI_READING_FILE_TYPE_EPUB ||
+        state.type == READING_BOOK_TYPE_EPUB)
+    {
+        rt_snprintf(buffer,
+                    buffer_size,
+                    ui_i18n_pick("第%u章 第%u页", "Chapter %u Page %u"),
+                    (unsigned int)state.chapter_index + 1U,
+                    (unsigned int)state.page_index + 1U);
+        return;
+    }
+
+    rt_snprintf(buffer,
+                buffer_size,
+                ui_i18n_pick("第%u页", "Page %u"),
+                (unsigned int)state.page_index + 1U);
 }
 
 static bool ui_reading_try_mount_device(const char *device_name,
@@ -424,6 +575,9 @@ static bool ui_reading_scan_directory(const char *directory_path)
                     sizeof(s_reading_files[s_reading_file_count].name),
                     "%s",
                     entry->d_name);
+        ui_reading_copy_path(s_reading_files[s_reading_file_count].path,
+                             sizeof(s_reading_files[s_reading_file_count].path),
+                             full_path);
         s_reading_files[s_reading_file_count].size_bytes = (uint32_t)stat_buffer.st_size;
         s_reading_files[s_reading_file_count].file_type = ui_reading_detect_file_type(entry->d_name);
         ++s_reading_file_count;
@@ -447,56 +601,36 @@ static bool ui_reading_scan_directory(const char *directory_path)
     return true;
 }
 
-static void ui_reading_refresh_files(void)
+static void ui_reading_restore_selection(bool had_selection,
+                                         const char *previous_path,
+                                         const char *previous_name)
 {
-    char previous_name[UI_READING_MAX_NAME_LEN];
-    bool had_device = false;
-    bool had_selection;
     uint16_t i;
 
-    had_selection = s_reading_has_selection && s_reading_selected_name[0] != '\0';
-    rt_snprintf(previous_name, sizeof(previous_name), "%s", s_reading_selected_name);
-
-    memset(s_reading_files, 0, sizeof(s_reading_files));
-    s_reading_file_count = 0;
-    s_reading_page_offset = 0;
-    s_reading_mount_path[0] = '\0';
-    s_reading_books_path[0] = '\0';
-
-    if (!ui_reading_resolve_storage_root(s_reading_mount_path, sizeof(s_reading_mount_path), &had_device))
-    {
-        s_reading_scan_state = had_device ? UI_READING_SCAN_MOUNT_FAILED : UI_READING_SCAN_NO_CARD;
-        s_reading_has_selection = false;
-        s_reading_selected_index = 0U;
-        ui_reading_update_selected_cache();
-        return;
-    }
-
-    ui_reading_join_path(s_reading_books_path,
-                         sizeof(s_reading_books_path),
-                         s_reading_mount_path,
-                         UI_READING_BOOKS_DIRECTORY);
-
-    if (!ui_reading_scan_directory(s_reading_books_path))
-    {
-        s_reading_scan_state = UI_READING_SCAN_MOUNT_FAILED;
-        s_reading_has_selection = false;
-        s_reading_selected_index = 0U;
-        ui_reading_update_selected_cache();
-        return;
-    }
-
-    s_reading_scan_state = s_reading_file_count > 0U ? UI_READING_SCAN_OK : UI_READING_SCAN_NO_FILES;
+    s_reading_has_selection = false;
+    s_reading_selected_index = 0U;
 
     if (s_reading_file_count == 0U)
     {
-        s_reading_has_selection = false;
-        s_reading_selected_index = 0U;
         ui_reading_update_selected_cache();
         return;
     }
 
-    if (had_selection)
+    if (had_selection && previous_path != NULL && previous_path[0] != '\0')
+    {
+        for (i = 0; i < s_reading_file_count; ++i)
+        {
+            if (strcmp(previous_path, s_reading_files[i].path) == 0)
+            {
+                s_reading_selected_index = i;
+                s_reading_has_selection = true;
+                ui_reading_update_selected_cache();
+                return;
+            }
+        }
+    }
+
+    if (had_selection && previous_name != NULL && previous_name[0] != '\0')
     {
         for (i = 0; i < s_reading_file_count; ++i)
         {
@@ -510,13 +644,134 @@ static void ui_reading_refresh_files(void)
         }
     }
 
-    if (!s_reading_has_selection || s_reading_selected_index >= s_reading_file_count)
+    s_reading_selected_index = 0U;
+    s_reading_has_selection = true;
+    ui_reading_update_selected_cache();
+}
+
+static void ui_reading_refresh_all_files(void)
+{
+    bool had_device = false;
+
+    if (!ui_reading_resolve_storage_root(s_reading_mount_path, sizeof(s_reading_mount_path), &had_device))
     {
-        s_reading_selected_index = 0U;
-        s_reading_has_selection = true;
+        s_reading_scan_state = had_device ? UI_READING_SCAN_MOUNT_FAILED : UI_READING_SCAN_NO_CARD;
+        return;
     }
 
-    ui_reading_update_selected_cache();
+    ui_reading_join_path(s_reading_books_path,
+                         sizeof(s_reading_books_path),
+                         s_reading_mount_path,
+                         UI_READING_BOOKS_DIRECTORY);
+
+    if (!ui_reading_scan_directory(s_reading_books_path))
+    {
+        s_reading_scan_state = UI_READING_SCAN_MOUNT_FAILED;
+        return;
+    }
+
+    s_reading_scan_state = s_reading_file_count > 0U ? UI_READING_SCAN_OK : UI_READING_SCAN_NO_FILES;
+}
+
+static bool ui_reading_add_state_record(const reading_book_state_t *record)
+{
+    const char *path;
+    const char *name;
+    struct stat stat_buffer;
+
+    if (record == NULL || s_reading_file_count >= UI_READING_MAX_FILES)
+    {
+        return false;
+    }
+
+    path = record->path;
+    name = ui_reading_path_basename(path);
+    if (path == NULL || path[0] == '\0' || !ui_reading_is_listable_file(name))
+    {
+        return false;
+    }
+
+    if (stat(path, &stat_buffer) != 0 || !S_ISREG(stat_buffer.st_mode))
+    {
+        return false;
+    }
+
+    rt_snprintf(s_reading_files[s_reading_file_count].name,
+                sizeof(s_reading_files[s_reading_file_count].name),
+                "%s",
+                name);
+    ui_reading_copy_path(s_reading_files[s_reading_file_count].path,
+                         sizeof(s_reading_files[s_reading_file_count].path),
+                         path);
+    s_reading_files[s_reading_file_count].size_bytes = (uint32_t)stat_buffer.st_size;
+    s_reading_files[s_reading_file_count].file_type = ui_reading_detect_file_type(name);
+    ++s_reading_file_count;
+    return true;
+}
+
+static void ui_reading_refresh_state_files(ui_reading_tab_t tab)
+{
+    reading_book_state_t records[UI_READING_MAX_FILES];
+    size_t record_count;
+    size_t i;
+
+    memset(records, 0, sizeof(records));
+    if (tab == UI_READING_TAB_FAVORITES)
+    {
+        record_count = reading_state_collect_favorites(records, UI_READING_MAX_FILES);
+    }
+    else
+    {
+        record_count = reading_state_collect_recent(records, UI_READING_MAX_FILES);
+    }
+    if (record_count > UI_READING_MAX_FILES)
+    {
+        record_count = UI_READING_MAX_FILES;
+    }
+
+    for (i = 0; i < record_count && s_reading_file_count < UI_READING_MAX_FILES; ++i)
+    {
+        ui_reading_add_state_record(&records[i]);
+    }
+
+    s_reading_scan_state = s_reading_file_count > 0U ? UI_READING_SCAN_OK : UI_READING_SCAN_NO_FILES;
+}
+
+static void ui_reading_refresh_files(bool reset_offset)
+{
+    char previous_name[UI_READING_MAX_NAME_LEN];
+    char previous_path[UI_READING_MAX_PATH_LEN];
+    bool had_selection;
+
+    had_selection = s_reading_has_selection &&
+                    (s_reading_selected_name[0] != '\0' || s_reading_selected_path[0] != '\0');
+    rt_snprintf(previous_name, sizeof(previous_name), "%s", s_reading_selected_name);
+    rt_snprintf(previous_path, sizeof(previous_path), "%s", s_reading_selected_path);
+
+    memset(s_reading_files, 0, sizeof(s_reading_files));
+    s_reading_file_count = 0;
+    if (reset_offset)
+    {
+        s_reading_page_offset = 0;
+    }
+    s_reading_mount_path[0] = '\0';
+    s_reading_books_path[0] = '\0';
+
+    if (s_reading_active_tab == UI_READING_TAB_ALL)
+    {
+        ui_reading_refresh_all_files();
+    }
+    else
+    {
+        ui_reading_refresh_state_files(s_reading_active_tab);
+    }
+
+    if (s_reading_page_offset >= s_reading_file_count)
+    {
+        s_reading_page_offset = 0;
+    }
+
+    ui_reading_restore_selection(had_selection, previous_path, previous_name);
 }
 
 static void ui_reading_refresh_timer_cb(lv_timer_t *timer)
@@ -532,7 +787,7 @@ static void ui_reading_refresh_timer_cb(lv_timer_t *timer)
     }
 
     before = ui_reading_capture_snapshot();
-    ui_reading_refresh_files();
+    ui_reading_refresh_files(false);
     after = ui_reading_capture_snapshot();
 
     if (ui_reading_snapshot_changed(&before, &after))
@@ -568,6 +823,28 @@ static void ui_reading_open_timer_cb(lv_timer_t *timer)
                                      sizeof(s_reading_status_text),
                                      ui_i18n_pick("正在打开阅读详情...", "Opening reading detail..."));
     ui_reading_open_selected_detail();
+}
+
+static void ui_reading_tab_event_cb(lv_event_t *e)
+{
+    ui_reading_tab_t tab;
+
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    tab = (ui_reading_tab_t)(uintptr_t)lv_event_get_user_data(e);
+    if (tab >= UI_READING_TAB_COUNT || tab == s_reading_active_tab)
+    {
+        return;
+    }
+
+    s_reading_active_tab = tab;
+    s_reading_page_offset = 0;
+    s_reading_open_detail_pending = false;
+    ui_reading_refresh_files(true);
+    ui_reading_list_render();
 }
 
 static void ui_reading_set_button_enabled(lv_obj_t *button, bool enabled)
@@ -618,6 +895,12 @@ static void ui_reading_show_card(uint16_t slot_index,
                                      refs->meta_text,
                                      sizeof(refs->meta_text),
                                      meta);
+    lv_obj_set_style_bg_color(refs->card, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_color(refs->card, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(refs->title_label, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(refs->title_label, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(refs->meta_label, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(refs->meta_label, lv_color_hex(0x000000), LV_PART_MAIN | LV_STATE_PRESSED);
 
     if (clickable)
     {
@@ -713,11 +996,11 @@ static void ui_reading_create_card(lv_obj_t *parent, uint16_t slot_index, int y)
 {
     ui_reading_card_refs_t *refs = &s_reading_cards[slot_index];
 
-    refs->card = ui_create_card(parent, 24, y, 480, 121, UI_SCREEN_NONE, false, 0);
+    refs->card = ui_create_card(parent, 24, y, 480, UI_READING_CARD_HEIGHT, UI_SCREEN_NONE, false, 0);
     refs->title_label = ui_create_label(refs->card,
                                         "",
                                         22,
-                                        31,
+                                        22,
                                         436,
                                         31,
                                         28,
@@ -727,7 +1010,7 @@ static void ui_reading_create_card(lv_obj_t *parent, uint16_t slot_index, int y)
     refs->meta_label = ui_create_label(refs->card,
                                        "",
                                        22,
-                                       71,
+                                       62,
                                        436,
                                        20,
                                        19,
@@ -740,20 +1023,34 @@ static void ui_reading_create_card(lv_obj_t *parent, uint16_t slot_index, int y)
                         (void *)(uintptr_t)slot_index);
 }
 
+static void ui_reading_create_tab_button(lv_obj_t *parent, ui_reading_tab_t tab)
+{
+    s_reading_tab_buttons[tab] = ui_create_button(parent,
+                                                  UI_READING_TAB_X + (int)tab * UI_READING_TAB_WIDTH,
+                                                  UI_READING_TAB_Y,
+                                                  UI_READING_TAB_WIDTH,
+                                                  UI_READING_TAB_HEIGHT,
+                                                  ui_reading_tab_title(tab),
+                                                  22,
+                                                  UI_SCREEN_NONE,
+                                                  false);
+    lv_obj_add_event_cb(s_reading_tab_buttons[tab],
+                        ui_reading_tab_event_cb,
+                        LV_EVENT_CLICKED,
+                        (void *)(uintptr_t)tab);
+}
+
 static void ui_reading_list_render(void)
 {
     uint16_t visible_index;
     bool can_prev;
     bool can_next;
-    char status_text[80];
+    char status_text[128];
     char page_text[16];
     uint16_t total_pages = s_reading_file_count == 0U ? 0U : (uint16_t)((s_reading_file_count + UI_READING_VISIBLE_COUNT - 1U) / UI_READING_VISIBLE_COUNT);
     uint16_t current_page = total_pages == 0U ? 0U : (uint16_t)(s_reading_page_offset / UI_READING_VISIBLE_COUNT + 1U);
 
-    if (s_reading_status_label == NULL)
-    {
-        return;
-    }
+    ui_reading_update_tab_styles();
 
     can_prev = s_reading_page_offset > 0U;
     can_next = (uint16_t)(s_reading_page_offset + UI_READING_VISIBLE_COUNT) < s_reading_file_count;
@@ -767,11 +1064,22 @@ static void ui_reading_list_render(void)
 
     if (s_reading_scan_state == UI_READING_SCAN_OK)
     {
-        rt_snprintf(status_text,
-                    sizeof(status_text),
-                    ui_i18n_pick("扫描 %s · 共 %u 个文件", "Scan %s · %u files"),
-                    s_reading_books_path,
-                    (unsigned int)s_reading_file_count);
+        if (s_reading_active_tab == UI_READING_TAB_ALL)
+        {
+            rt_snprintf(status_text,
+                        sizeof(status_text),
+                        ui_i18n_pick("扫描 %s · 共 %u 个文件", "Scan %s · %u files"),
+                        s_reading_books_path,
+                        (unsigned int)s_reading_file_count);
+        }
+        else
+        {
+            rt_snprintf(status_text,
+                        sizeof(status_text),
+                        ui_i18n_pick("%s · 共 %u 本", "%s · %u books"),
+                        ui_reading_tab_title(s_reading_active_tab),
+                        (unsigned int)s_reading_file_count);
+        }
         ui_reading_set_label_text_static(s_reading_status_label,
                                          s_reading_status_text,
                                          sizeof(s_reading_status_text),
@@ -781,6 +1089,7 @@ static void ui_reading_list_render(void)
         {
             uint16_t file_index = (uint16_t)(s_reading_page_offset + visible_index);
             char meta_text[48];
+            char progress_text[64];
 
             if (file_index >= s_reading_file_count)
             {
@@ -789,11 +1098,13 @@ static void ui_reading_list_render(void)
             }
 
             ui_reading_format_size(s_reading_files[file_index].size_bytes, meta_text, sizeof(meta_text));
+            ui_reading_format_progress(file_index, progress_text, sizeof(progress_text));
             rt_snprintf(status_text,
                         sizeof(status_text),
-                        ui_i18n_pick("%s · %s · 点击查看", "%s · %s · Tap to open"),
+                        "%s · %s · %s",
                         ui_reading_file_type_label(s_reading_files[file_index].file_type),
-                        meta_text);
+                        meta_text,
+                        progress_text);
             ui_reading_show_card(visible_index,
                                  s_reading_files[file_index].name,
                                  status_text,
@@ -805,19 +1116,46 @@ static void ui_reading_list_render(void)
 
     if (s_reading_scan_state == UI_READING_SCAN_NO_FILES)
     {
-        rt_snprintf(status_text,
-                    sizeof(status_text),
-                    ui_i18n_pick("扫描 %s · 当前没有文件", "Scan %s · No files"),
-                    s_reading_books_path[0] != '\0' ? s_reading_books_path : "/books");
-        ui_reading_set_label_text_static(s_reading_status_label,
-                                         s_reading_status_text,
-                                         sizeof(s_reading_status_text),
-                                         status_text);
-        ui_reading_show_card(0,
-                             ui_i18n_pick("TF 卡里还没有可显示文件", "No readable files on TF card"),
-                             ui_i18n_pick("请将书籍文件复制到 TF 卡的 /books 目录后等待列表自动刷新。",
-                                          "Copy book files to the TF card /books directory and wait for the list to refresh."),
-                             false);
+        if (s_reading_active_tab == UI_READING_TAB_RECENT)
+        {
+            ui_reading_set_label_text_static(s_reading_status_label,
+                                             s_reading_status_text,
+                                             sizeof(s_reading_status_text),
+                                             ui_i18n_pick("最近阅读 · 暂无记录", "Recent · No records"));
+            ui_reading_show_card(0,
+                                 ui_i18n_pick("还没有阅读记录", "No reading history yet"),
+                                 ui_i18n_pick("打开一本书后，最近阅读会显示在这里。",
+                                              "Open a book and it will appear here."),
+                                 false);
+        }
+        else if (s_reading_active_tab == UI_READING_TAB_FAVORITES)
+        {
+            ui_reading_set_label_text_static(s_reading_status_label,
+                                             s_reading_status_text,
+                                             sizeof(s_reading_status_text),
+                                             ui_i18n_pick("我的收藏 · 暂无图书", "Favorites · No books"));
+            ui_reading_show_card(0,
+                                 ui_i18n_pick("还没有收藏图书", "No favorite books yet"),
+                                 ui_i18n_pick("在阅读详情里收藏图书后会显示在这里。",
+                                              "Favorite books from the reading detail page will appear here."),
+                                 false);
+        }
+        else
+        {
+            rt_snprintf(status_text,
+                        sizeof(status_text),
+                        ui_i18n_pick("扫描 %s · 当前没有文件", "Scan %s · No files"),
+                        s_reading_books_path[0] != '\0' ? s_reading_books_path : "/books");
+            ui_reading_set_label_text_static(s_reading_status_label,
+                                             s_reading_status_text,
+                                             sizeof(s_reading_status_text),
+                                             status_text);
+            ui_reading_show_card(0,
+                                 ui_i18n_pick("TF 卡里还没有可显示文件", "No readable files on TF card"),
+                                 ui_i18n_pick("请将书籍文件复制到 TF 卡的 /books 目录后等待列表自动刷新。",
+                                              "Copy book files to the TF card /books directory and wait for the list to refresh."),
+                                 false);
+        }
     }
     else if (s_reading_scan_state == UI_READING_SCAN_MOUNT_FAILED)
     {
@@ -874,7 +1212,7 @@ bool ui_reading_list_prepare_selected_file(void)
         return true;
     }
 
-    ui_reading_refresh_files();
+    ui_reading_refresh_files(true);
 
     if (s_reading_file_count == 0U)
     {
@@ -921,24 +1259,19 @@ void ui_Reading_List_screen_init(void)
     }
 
     memset(s_reading_cards, 0, sizeof(s_reading_cards));
+    memset(s_reading_tab_buttons, 0, sizeof(s_reading_tab_buttons));
+    s_reading_active_tab = UI_READING_TAB_ALL;
 
     ui_Reading_List = ui_create_screen_base();
     ui_build_standard_screen(&page, ui_Reading_List, ui_i18n_pick("在线阅读", "Reading"), UI_SCREEN_HOME);
 
-    s_reading_status_label = ui_create_label(page.content,
-                                             ui_i18n_pick("正在扫描 TF 卡...", "Scanning TF card..."),
-                                             24,
-                                             14,
-                                             360,
-                                             18,
-                                             18,
-                                             LV_TEXT_ALIGN_LEFT,
-                                             false,
-                                             false);
-    ui_reading_set_label_text_static(s_reading_status_label,
-                                     s_reading_status_text,
-                                     sizeof(s_reading_status_text),
-                                     ui_i18n_pick("正在扫描 TF 卡...", "Scanning TF card..."));
+    s_reading_status_label = NULL;
+    s_reading_status_text[0] = '\0';
+
+    for (i = 0; i < UI_READING_TAB_COUNT; ++i)
+    {
+        ui_reading_create_tab_button(page.content, (ui_reading_tab_t)i);
+    }
 
     for (i = 0; i < UI_READING_VISIBLE_COUNT; ++i)
     {
@@ -960,7 +1293,7 @@ void ui_Reading_List_screen_init(void)
     lv_obj_add_event_cb(s_reading_prev_button, ui_reading_prev_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_reading_next_button, ui_reading_next_event_cb, LV_EVENT_CLICKED, NULL);
 
-    ui_reading_refresh_files();
+    ui_reading_refresh_files(true);
     ui_reading_list_render();
 
     if (s_reading_refresh_timer == NULL)
@@ -995,6 +1328,7 @@ void ui_Reading_List_screen_destroy(void)
     }
 
     memset(s_reading_cards, 0, sizeof(s_reading_cards));
+    memset(s_reading_tab_buttons, 0, sizeof(s_reading_tab_buttons));
     s_reading_status_label = NULL;
     s_reading_prev_button = NULL;
     s_reading_next_button = NULL;
@@ -1009,6 +1343,6 @@ void ui_reading_list_refresh(void)
         return;
     }
 
-    ui_reading_refresh_files();
+    ui_reading_refresh_files(true);
     ui_reading_list_render();
 }

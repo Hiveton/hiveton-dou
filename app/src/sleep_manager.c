@@ -31,14 +31,60 @@
 
 #define SLEEP_MANAGER_NETWORK_SETUP_GRACE_MS 180000U
 
+extern void app_set_panel_brightness(rt_uint8_t brightness);
+
 static bool s_sleeping = false;
 static bool s_standby_pending = false;
+static bool s_backlight_off_for_standby = false;
+static rt_uint8_t s_backlight_restore_brightness = 0U;
 static ui_screen_id_t s_last_source_screen = UI_SCREEN_HOME;
 static rt_alarm_t s_minute_alarm = RT_NULL;
 static bool s_activity_reported = false;
 static rt_tick_t s_last_activity_tick = 0;
 
 static void sleep_manager_ensure_alarm(void);
+
+static rt_uint8_t sleep_manager_get_configured_brightness(void)
+{
+    uint32_t brightness = app_config_get_display_brightness();
+
+    if (brightness > 100U)
+    {
+        brightness = 100U;
+    }
+
+    return (rt_uint8_t)brightness;
+}
+
+static void sleep_manager_turn_backlight_off(void)
+{
+    if (!s_backlight_off_for_standby)
+    {
+        s_backlight_restore_brightness = sleep_manager_get_configured_brightness();
+        s_backlight_off_for_standby = true;
+    }
+
+    app_set_panel_brightness(0U);
+}
+
+static void sleep_manager_restore_backlight(void)
+{
+    rt_uint8_t brightness;
+
+    if (!s_backlight_off_for_standby)
+    {
+        return;
+    }
+
+    brightness = s_backlight_restore_brightness;
+    if (brightness == 0U)
+    {
+        brightness = sleep_manager_get_configured_brightness();
+    }
+
+    s_backlight_off_for_standby = false;
+    app_set_panel_brightness(brightness);
+}
 
 static bool sleep_manager_is_idle_exempt_screen(ui_screen_id_t screen_id)
 {
@@ -57,6 +103,7 @@ static void sleep_manager_begin_sleep_cycle(void)
     s_sleeping = true;
     app_watchdog_set_mode(APP_WDT_MODE_SLEEP);
     s_standby_pending = false;
+    sleep_manager_turn_backlight_off();
     sleep_manager_ensure_alarm();
     if (s_minute_alarm != RT_NULL)
     {
@@ -83,6 +130,7 @@ static void sleep_manager_minute_alarm_cb(rt_alarm_t alarm, time_t timestamp)
         gui_pm_fsm(GUI_PM_ACTION_WAKEUP);
     }
     ui_dispatch_request_standby_refresh();
+    sleep_manager_turn_backlight_off();
 }
 
 static uint32_t sleep_manager_get_report_idle_ms(void)
@@ -170,6 +218,8 @@ void sleep_manager_on_enter_standby(ui_screen_id_t from_screen)
         s_last_source_screen = from_screen;
     }
 
+    sleep_manager_turn_backlight_off();
+
     if (s_sleeping)
     {
         s_standby_pending = false;
@@ -184,6 +234,7 @@ void sleep_manager_on_exit_standby(ui_screen_id_t target_screen)
     (void)target_screen;
 
     s_standby_pending = false;
+    sleep_manager_restore_backlight();
     if (!s_sleeping)
     {
         return;

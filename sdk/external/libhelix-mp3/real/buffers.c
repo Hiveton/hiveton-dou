@@ -48,7 +48,11 @@
 //#include "hlxclib/stdlib.h"		/* for malloc, free */ 
 #include <stdlib.h>
 #include <string.h>
+#include "audio_mem.h"
 #include "coder.h"
+
+#define MP3_MALLOC(size) audio_mem_malloc((uint32_t)(size))
+#define MP3_FREE(ptr)    audio_mem_free(ptr)
 
 /**************************************************************************************
  * Function:    ClearBuffer
@@ -102,18 +106,18 @@ MP3DecInfo *AllocateBuffers(void)
 	IMDCTInfo *mi;
 	SubbandInfo *sbi;
 
-	mp3DecInfo = (MP3DecInfo *)malloc(sizeof(MP3DecInfo));
+	mp3DecInfo = (MP3DecInfo *)MP3_MALLOC(sizeof(MP3DecInfo));
 	if (!mp3DecInfo)
 		return 0;
 	ClearBuffer(mp3DecInfo, sizeof(MP3DecInfo));
 	
-	fh =  (FrameHeader *)     malloc(sizeof(FrameHeader));
-	si =  (SideInfo *)        malloc(sizeof(SideInfo));
-	sfi = (ScaleFactorInfo *) malloc(sizeof(ScaleFactorInfo));
-	hi =  (HuffmanInfo *)     malloc(sizeof(HuffmanInfo));
-	di =  (DequantInfo *)     malloc(sizeof(DequantInfo));
-	mi =  (IMDCTInfo *)       malloc(sizeof(IMDCTInfo));
-	sbi = (SubbandInfo *)     malloc(sizeof(SubbandInfo));
+	fh =  (FrameHeader *)     MP3_MALLOC(sizeof(FrameHeader));
+	si =  (SideInfo *)        MP3_MALLOC(sizeof(SideInfo));
+	sfi = (ScaleFactorInfo *) MP3_MALLOC(sizeof(ScaleFactorInfo));
+	hi =  (HuffmanInfo *)     MP3_MALLOC(sizeof(HuffmanInfo));
+	di =  (DequantInfo *)     MP3_MALLOC(sizeof(DequantInfo));
+	mi =  (IMDCTInfo *)       MP3_MALLOC(sizeof(IMDCTInfo));
+	sbi = (SubbandInfo *)     MP3_MALLOC(sizeof(SubbandInfo));
 
 	mp3DecInfo->FrameHeaderPS =     (void *)fh;
 	mp3DecInfo->SideInfoPS =        (void *)si;
@@ -140,7 +144,7 @@ MP3DecInfo *AllocateBuffers(void)
 	return mp3DecInfo;
 }
 
-#define SAFE_FREE(x)	{if (x)	free(x);	(x) = 0;}	/* helper macro */
+#define SAFE_FREE(x)	{if (x)	MP3_FREE(x);	(x) = 0;}	/* helper macro */
 
 /**************************************************************************************
  * Function:    FreeBuffers

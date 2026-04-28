@@ -13,6 +13,7 @@
     #include "dfs_posix.h"
 #endif
 #include "audio_mp3ctrl.h"
+#include "audio_mem.h"
 #include "sifli_resample.h"
 #ifdef SOLUTION_WATCH
     #include "app_mem.h"
@@ -151,20 +152,6 @@ typedef struct ID3v2
     char flag;          //
     char size[4];       // size, not include id3v2_t
 } id3v2_t;
-
-#undef audio_mem_malloc
-#undef audio_mem_free
-#undef audio_mem_calloc
-
-#ifdef SOLUTION_WATCH
-    #define audio_mem_malloc    app_malloc
-    #define audio_mem_free      app_free
-    #define audio_mem_calloc    app_calloc
-#else
-    #define audio_mem_malloc    rt_malloc
-    #define audio_mem_free      rt_free
-    #define audio_mem_calloc    rt_calloc
-#endif
 
 static uint32_t wav_read_header(mp3ctrl_handle ctrl);
 static int get_frame_info(mp3ctrl_handle ctrl, MP3FrameInfo *mp3FrameInfo);
@@ -1464,6 +1451,11 @@ static int get_frame_info(mp3ctrl_handle ctrl, MP3FrameInfo *mp3FrameInfo)
     int err_cnt = 0;
     MP3FrameInfo temp = {0};
     HMP3Decoder hMP3Decoder = MP3InitDecoder();
+    if (!hMP3Decoder)
+    {
+        LOG_E("mp3 decoder init failed");
+        return ret;
+    }
     temp.nChans = 1;
     //used MP3Decode & MP3GetLastFrameInfo?
     while (1)
@@ -1547,7 +1539,12 @@ static mp3ctrl_handle mp3ctrl_open_real(audio_type_t type,
     {
         LOG_I("mp3 open %s", filename);
         struct stat stat_buf;
-        stat(filename, &stat_buf);
+        if (stat(filename, &stat_buf) != 0)
+        {
+            LOG_E("mp3 stat %s error", filename);
+            audio_mem_free(handle);
+            return NULL;
+        }
         file_size = stat_buf.st_size;
         handle->mp3_data_len = 0; //fileszie ?
         handle->fd = open(filename, O_RDONLY | O_BINARY);
@@ -1609,7 +1606,20 @@ static mp3ctrl_handle mp3ctrl_open_real(audio_type_t type,
     }
     else
     {
-        LOG_I("get frame info error");
+        LOG_E("get frame info error, reject invalid audio %s", handle->is_file ? filename : "<buffer>");
+#if RT_USING_DFS
+        if (handle->is_file)
+        {
+            if (handle->fd >= 0)
+                close(handle->fd);
+        }
+#endif
+        if (handle->cache_ptr)
+        {
+            audio_mem_free(handle->cache_ptr);
+        }
+        audio_mem_free(handle);
+        return NULL;
     }
 #if RT_USING_DFS
     if (handle->is_file)
@@ -2310,4 +2320,3 @@ MSH_CMD_EXPORT(id3, id3 commnad);
 #endif //SOLUTION_WATCH
 
 #endif //RT_USING_FINSH
-

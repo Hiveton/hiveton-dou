@@ -15,7 +15,7 @@
 #include "cat1_modem.h"
 #include "../xiaozhi/weather/weather.h"
 
-#define UI_STATUS_BAR_HEIGHT 68
+#define UI_STATUS_BAR_HEIGHT 84
 #define UI_STATUS_BAR_REFRESH_THREAD_STACK_SIZE 1024
 #define UI_STATUS_BAR_REFRESH_THREAD_PRIORITY 22
 #define UI_STATUS_BAR_REFRESH_THREAD_TICK 10
@@ -103,7 +103,7 @@ static void ui_status_bar_apply_basic_object_style(lv_obj_t *obj,
 static const char *ui_status_bar_weekday_from_index(int weekday)
 {
     static const char *const k_weekdays[] = {
-        "星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"
+        "周日", "周一", "周二", "周三", "周四", "周五", "周六"
     };
 
     if (weekday >= 0 && weekday < (int)(sizeof(k_weekdays) / sizeof(k_weekdays[0])))
@@ -111,7 +111,7 @@ static const char *ui_status_bar_weekday_from_index(int weekday)
         return k_weekdays[weekday];
     }
 
-    return "星期一";
+    return "周一";
 }
 
 static void ui_status_bar_set_label_text(lv_obj_t *label, const char *text)
@@ -417,12 +417,10 @@ static bool ui_status_bar_snapshot_equal(const ui_status_bar_snapshot_t *lhs,
 static void ui_status_bar_refresh_datetime(void)
 {
     date_time_t current_time;
-    weather_info_t current_weather = {0};
-    bool weather_available = false;
     bool use_fallback_time = false;
     const char *weekday_label = NULL;
     char time_text[16];
-    char meta_text[48];
+    char meta_text[32];
     size_t i;
 
     memset(&current_time, 0, sizeof(current_time));
@@ -453,53 +451,16 @@ static void ui_status_bar_refresh_datetime(void)
         current_time.minute = 1;
         current_time.second = 0;
         current_time.weekday = 4;
-        weekday_label = ui_status_bar_weekday_from_index(current_time.weekday);
-    }
-    else
-    {
-        const char *raw_weekday = current_time.weekday_str;
-
-        if (raw_weekday != NULL &&
-            raw_weekday[0] != '\0' &&
-            strchr(raw_weekday, '?') == NULL)
-        {
-            weekday_label = ui_i18n_translate_weekday_label(raw_weekday);
-        }
-
-        if (weekday_label == NULL || weekday_label[0] == '\0' || strchr(weekday_label, '?') != NULL)
-        {
-            weekday_label = ui_status_bar_weekday_from_index(current_time.weekday);
-        }
     }
 
-    if (xiaozhi_weather_peek(&current_weather) == RT_EOK && current_weather.last_update > 0)
-    {
-        weather_available = true;
-    }
-
+    weekday_label = ui_status_bar_weekday_from_index(current_time.weekday);
     rt_snprintf(time_text, sizeof(time_text), "%02d:%02d", current_time.hour, current_time.minute);
-
-    if (weather_available)
-    {
-        rt_snprintf(meta_text,
-                    sizeof(meta_text),
-                    "%04d/%02d/%02d\n%s %d°C",
-                    current_time.year,
-                    current_time.month,
-                    current_time.day,
-                    weekday_label,
-                    current_weather.temperature);
-    }
-    else
-    {
-        rt_snprintf(meta_text,
-                    sizeof(meta_text),
-                    "%04d/%02d/%02d\n%s",
-                    current_time.year,
-                    current_time.month,
-                    current_time.day,
-                    weekday_label);
-    }
+    rt_snprintf(meta_text,
+                sizeof(meta_text),
+                "%02d/%02d %s",
+                current_time.month,
+                current_time.day,
+                weekday_label);
 
     for (i = 0; i < sizeof(s_status_bar_refs) / sizeof(s_status_bar_refs[0]); ++i)
     {
@@ -521,6 +482,7 @@ static void ui_status_bar_refresh_datetime(void)
         }
     }
 }
+
 
 static void ui_status_bar_refresh_connection_icons(bool force)
 {
@@ -558,9 +520,7 @@ static void ui_status_bar_refresh_connection_icons(bool force)
         {
             ui_img_set_src(refs->bluetooth_icon, &ble_icon_img);
             ui_status_bar_set_object_hidden(refs->bluetooth_icon, false);
-            lv_obj_set_style_opa(refs->bluetooth_icon,
-                                 bt_enabled ? LV_OPA_COVER : LV_OPA_50,
-                                 0);
+            lv_obj_set_style_opa(refs->bluetooth_icon, LV_OPA_COVER, 0);
         }
 
         if (refs->network_icon != NULL)
@@ -764,23 +724,21 @@ static void ui_status_bar_ensure_refresh_thread(void)
     }
 }
 
+
 void ui_status_bar_component_build(lv_obj_t *parent,
                                    xiaozhi_home_screen_refs_t *refs,
                                    bool enable_detail_touch,
                                    lv_event_cb_t detail_touch_cb)
 {
     lv_obj_t *bar;
-    lv_obj_t *right_box;
+    lv_obj_t *divider;
     lv_obj_t *bar_touch_zone;
     lv_obj_t *time_label;
     lv_obj_t *meta_label;
     lv_obj_t *battery_label;
-    lv_obj_t *battery_fill;
     lv_obj_t *battery_body;
     lv_obj_t *battery_cap;
-    lv_obj_t *charge_icon;
     lv_obj_t *bluetooth_img;
-    lv_obj_t *network_img;
     lv_coord_t screen_width;
 
     if (parent == NULL)
@@ -792,114 +750,69 @@ void ui_status_bar_component_build(lv_obj_t *parent,
 
     bar = lv_obj_create(parent);
     ui_status_bar_apply_basic_object_style(bar, false, 0, 0);
-    lv_obj_set_style_border_side(bar, LV_BORDER_SIDE_BOTTOM, 0);
-    lv_obj_set_style_border_width(bar, 2, 0);
+    lv_obj_set_style_border_width(bar, 0, 0);
     lv_obj_set_pos(bar, 0, 0);
     lv_obj_set_size(bar, screen_width, ui_px_h(UI_STATUS_BAR_HEIGHT));
 
-    charge_icon = lv_obj_create(bar);
-    ui_status_bar_apply_basic_object_style(charge_icon, false, 0, 0);
-    lv_obj_set_pos(charge_icon, ui_px_x(446), ui_px_y(18));
-    lv_obj_set_size(charge_icon, ui_px_w(18), ui_px_h(28));
-    lv_obj_set_style_border_width(charge_icon, 0, 0);
-    lv_obj_set_style_bg_opa(charge_icon, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(charge_icon, 0, 0);
-    {
-        lv_obj_t *part = lv_obj_create(charge_icon);
-        ui_status_bar_apply_basic_object_style(part, true, 0, 0);
-        lv_obj_set_style_border_width(part, 0, 0);
-        lv_obj_set_pos(part, ui_px_x(7), ui_px_y(0));
-        lv_obj_set_size(part, ui_px_w(7), ui_px_h(8));
-    }
-    {
-        lv_obj_t *part = lv_obj_create(charge_icon);
-        ui_status_bar_apply_basic_object_style(part, true, 0, 0);
-        lv_obj_set_style_border_width(part, 0, 0);
-        lv_obj_set_pos(part, ui_px_x(4), ui_px_y(7));
-        lv_obj_set_size(part, ui_px_w(7), ui_px_h(8));
-    }
-    {
-        lv_obj_t *part = lv_obj_create(charge_icon);
-        ui_status_bar_apply_basic_object_style(part, true, 0, 0);
-        lv_obj_set_style_border_width(part, 0, 0);
-        lv_obj_set_pos(part, ui_px_x(8), ui_px_y(14));
-        lv_obj_set_size(part, ui_px_w(7), ui_px_h(8));
-    }
-    {
-        lv_obj_t *part = lv_obj_create(charge_icon);
-        ui_status_bar_apply_basic_object_style(part, true, 0, 0);
-        lv_obj_set_style_border_width(part, 0, 0);
-        lv_obj_set_pos(part, ui_px_x(5), ui_px_y(20));
-        lv_obj_set_size(part, ui_px_w(7), ui_px_h(8));
-    }
-    lv_obj_add_flag(charge_icon, LV_OBJ_FLAG_HIDDEN);
-
-    time_label = ui_create_label(bar, "15:30", 14, 12, 100, 40, 34, LV_TEXT_ALIGN_LEFT, false, false);
-    meta_label = ui_create_label(bar,
-                                 ui_i18n_pick("2026/01/14\n星期三 23°C", "2026/01/14\nWed 23C"),
-                                 116,
-                                 14,
-                                 178,
-                                 38,
-                                 18,
+    time_label = ui_create_label(bar,
+                                 "20:38",
+                                 22,
+                                 11,
+                                 145,
+                                 60,
+                                 50,
                                  LV_TEXT_ALIGN_LEFT,
                                  false,
-                                 true);
+                                 false);
+    lv_obj_set_style_text_line_space(time_label, 0, 0);
+    lv_obj_set_style_text_letter_space(time_label, 0, 0);
+
+    meta_label = ui_create_label(bar,
+                                 "04/28 周二",
+                                 154,
+                                 37,
+                                 220,
+                                 30,
+                                 22,
+                                 LV_TEXT_ALIGN_CENTER,
+                                 false,
+                                 false);
     lv_obj_set_style_text_line_space(meta_label, 0, 0);
+    lv_obj_set_style_text_letter_space(meta_label, 0, 0);
 
-    right_box = lv_obj_create(bar);
-    ui_status_bar_apply_basic_object_style(right_box, false, 0, 0);
-    lv_obj_set_style_bg_opa(right_box, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(right_box, 0, 0);
-    lv_obj_set_style_pad_all(right_box, 0, 0);
-    lv_obj_set_pos(right_box, ui_px_x(386), ui_px_y(12));
-    lv_obj_set_size(right_box, ui_px_w(128), ui_px_h(42));
-
-    bluetooth_img = ui_create_image_slot(right_box, 0, 6, 24, 24);
+    bluetooth_img = ui_create_image_slot(bar, 397, 24, 30, 38);
     ui_img_set_src(bluetooth_img, &ble_icon_img);
-    lv_obj_add_flag(bluetooth_img, LV_OBJ_FLAG_HIDDEN);
 
-    network_img = ui_create_image_slot(right_box, 30, 6, 24, 24);
-    ui_img_set_src(network_img, &network_icon_img);
-    lv_obj_add_flag(network_img, LV_OBJ_FLAG_HIDDEN);
-
-    battery_body = lv_obj_create(right_box);
-    ui_status_bar_apply_basic_object_style(battery_body, true, ui_px_x(6), 0);
-    lv_obj_set_style_bg_opa(battery_body, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(battery_body, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_border_width(battery_body, 2, 0);
-    lv_obj_set_style_border_color(battery_body, lv_color_hex(0x000000), 0);
+    battery_body = lv_obj_create(bar);
+    ui_status_bar_apply_basic_object_style(battery_body, false, ui_px_x(5), 2);
     lv_obj_set_style_pad_all(battery_body, 0, 0);
-    lv_obj_set_pos(battery_body, ui_px_x(62), ui_px_y(5));
+    lv_obj_set_pos(battery_body, ui_px_x(444), ui_px_y(31));
     lv_obj_set_size(battery_body, ui_px_w(54), ui_px_h(30));
 
-    battery_fill = lv_obj_create(battery_body);
-    ui_status_bar_apply_basic_object_style(battery_fill, true, 0, 0);
-    lv_obj_set_style_radius(battery_fill, ui_px_x(3), 0);
-    lv_obj_set_style_border_width(battery_fill, 0, 0);
-    lv_obj_set_style_bg_opa(battery_fill, LV_OPA_20, 0);
-    lv_obj_set_style_bg_color(battery_fill, lv_color_hex(0x000000), 0);
-    lv_obj_set_pos(battery_fill, ui_px_x(3), ui_px_y(23));
-    lv_obj_set_size(battery_fill, ui_px_w(16), ui_px_h(4));
-
-    battery_cap = lv_obj_create(right_box);
+    battery_cap = lv_obj_create(bar);
     ui_status_bar_apply_basic_object_style(battery_cap, true, ui_px_x(2), 0);
-    lv_obj_set_style_border_width(battery_cap, 0, 0);
-    lv_obj_set_pos(battery_cap, ui_px_x(116), ui_px_y(14));
-    lv_obj_set_size(battery_cap, ui_px_w(6), ui_px_h(12));
+    lv_obj_set_pos(battery_cap, ui_px_x(498), ui_px_y(40));
+    lv_obj_set_size(battery_cap, ui_px_w(8), ui_px_h(12));
 
     battery_label = ui_create_label(battery_body,
-                                    "80%",
+                                    "90%",
                                     0,
-                                    4,
+                                    3,
                                     54,
-                                    20,
-                                    18,
+                                    24,
+                                    21,
                                     LV_TEXT_ALIGN_CENTER,
                                     false,
                                     false);
     lv_obj_set_style_text_color(battery_label, lv_color_hex(0x000000), 0);
     lv_obj_set_style_text_align(battery_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(battery_label);
+
+    divider = lv_obj_create(bar);
+    ui_status_bar_apply_basic_object_style(divider, true, 0, 0);
+    lv_obj_set_style_border_width(divider, 0, 0);
+    lv_obj_set_pos(divider, ui_px_x(20), ui_px_y(81));
+    lv_obj_set_size(divider, ui_px_w(488), ui_px_h(2));
 
     bar_touch_zone = lv_obj_create(bar);
     ui_status_bar_apply_basic_object_style(bar_touch_zone, false, 0, 0);
@@ -922,11 +835,11 @@ void ui_status_bar_component_build(lv_obj_t *parent,
         refs->time_label = time_label;
         refs->meta_label = meta_label;
         refs->bluetooth_icon = bluetooth_img;
-        refs->network_icon = network_img;
+        refs->network_icon = NULL;
         refs->ec800_status_label = NULL;
-        refs->battery_arc = battery_fill;
+        refs->battery_arc = NULL;
         refs->battery_percent_label = battery_label;
-        refs->standby_charging_icon = charge_icon;
+        refs->standby_charging_icon = NULL;
 
         ui_status_bar_apply_basic_object_style(hidden_refs, false, 0, 0);
         lv_obj_set_size(hidden_refs, 1, 1);
@@ -942,6 +855,7 @@ void ui_status_bar_component_build(lv_obj_t *parent,
     ui_status_bar_ensure_refresh_thread();
     ui_status_bar_component_force_refresh();
 }
+
 
 const xiaozhi_home_screen_refs_t *ui_status_bar_component_refs_get(lv_obj_t *screen)
 {

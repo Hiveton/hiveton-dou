@@ -29,6 +29,7 @@ src = [
     os.path.join(cwd, 'ui', 'ui_status_bar.c'),
     os.path.join(cwd, 'ui', 'ui_runtime_adapter.c'),
     os.path.join(cwd, 'reading', 'reading_epub.c'),
+    os.path.join(cwd, 'reading', 'reading_state.c'),
 ]
 src.extend(Glob(os.path.join(cwd, 'ui', 'screens', '*.c')))
 

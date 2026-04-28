@@ -113,7 +113,7 @@ static rt_uint8_t ui_brightness_step_down(rt_uint8_t brightness)
     {
         return 0U;
     }
-    if (brightness <= 50U)
+    if (brightness <= 10U)
     {
         return 0U;
     }
@@ -124,7 +124,7 @@ static rt_uint8_t ui_brightness_step_up(rt_uint8_t brightness)
 {
     if (brightness == 0U)
     {
-        return 50U;
+        return 10U;
     }
     if (brightness >= 100U)
     {

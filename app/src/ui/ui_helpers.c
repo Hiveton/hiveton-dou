@@ -30,7 +30,7 @@
 #define UI_STANDARD_NAV_FONT_SIZE 28
 #define UI_STANDARD_NAV_HEIGHT 58
 #define UI_STANDARD_NAV_BUTTON_WIDTH 84
-#define UI_STATUS_BAR_HEIGHT 68
+#define UI_STATUS_BAR_HEIGHT 84
 #define UI_STANDARD_SIDE_MARGIN 18
 #define UI_STATUS_BAR_CALENDAR_TOUCH_W 320
 #define UI_STATUS_BAR_DETAIL_TOUCH_X 320
@@ -42,6 +42,9 @@
 #define UI_STATUS_BAR_REFRESH_THREAD_STACK_SIZE 1024
 #define UI_STATUS_BAR_REFRESH_THREAD_PRIORITY 22
 #define UI_STATUS_BAR_REFRESH_THREAD_TICK 10
+#define UI_STATUS_BRIGHTNESS_STEP_MIN 0U
+#define UI_STATUS_BRIGHTNESS_STEP_MAX 10U
+#define UI_STATUS_BRIGHTNESS_PERCENT_PER_STEP 10U
 #ifndef UI_EXTERNAL_TTF_DATA_FALLBACK_MAX_BYTES
 #define UI_EXTERNAL_TTF_DATA_FALLBACK_MAX_BYTES (2U * 1024U * 1024U)
 #endif
@@ -75,6 +78,8 @@ extern const lv_image_dsc_t home_volume;
 extern const lv_image_dsc_t network_icon_img;
 extern const lv_image_dsc_t network_icon_img_close;
 void ui_Status_Detail_screen_set_return_target(ui_screen_id_t target);
+extern void app_set_panel_brightness(rt_uint8_t brightness);
+extern rt_uint8_t app_get_panel_brightness(void);
 
 typedef struct
 {
@@ -492,27 +497,20 @@ static void ui_status_bar_refresh_thread_entry(void *parameter)
 
 static bool ui_status_backlight_read(uint8_t *brightness)
 {
-    rt_err_t result;
+    rt_uint8_t current;
 
     if (brightness == NULL)
     {
         return false;
     }
 
-    if (s_status_panel.lcd_device == RT_NULL)
+    current = app_get_panel_brightness();
+    if (current > 100U)
     {
-        s_status_panel.lcd_device = rt_device_find(LCD_DEVICE_NAME);
+        current = 100U;
     }
-
-    if (s_status_panel.lcd_device == RT_NULL)
-    {
-        return false;
-    }
-
-    result = rt_device_control(s_status_panel.lcd_device,
-                               RTGRAPHIC_CTRL_GET_BRIGHTNESS,
-                               brightness);
-    return result == RT_EOK;
+    *brightness = current;
+    return true;
 }
 
 static void ui_status_backlight_write(uint8_t brightness)
@@ -522,17 +520,7 @@ static void ui_status_backlight_write(uint8_t brightness)
         brightness = 100U;
     }
 
-    if (s_status_panel.lcd_device == RT_NULL)
-    {
-        s_status_panel.lcd_device = rt_device_find(LCD_DEVICE_NAME);
-    }
-
-    if (s_status_panel.lcd_device != RT_NULL)
-    {
-        rt_device_control(s_status_panel.lcd_device,
-                          RTGRAPHIC_CTRL_SET_BRIGHTNESS,
-                          &brightness);
-    }
+    app_set_panel_brightness(brightness);
 }
 
 static lv_font_t *ui_font_cache_get(ui_font_cache_entry_t *cache,
@@ -949,15 +937,15 @@ static void ui_nav_event_cb(lv_event_t *e)
 
 static uint8_t ui_status_brightness_to_steps(uint8_t brightness)
 {
-    uint8_t steps = (uint8_t)((brightness + 19U) / 20U);
+    uint8_t steps = (uint8_t)((brightness + 5U) / UI_STATUS_BRIGHTNESS_PERCENT_PER_STEP);
 
-    if (steps < 1U)
+    if (steps < UI_STATUS_BRIGHTNESS_STEP_MIN)
     {
-        steps = 1U;
+        steps = UI_STATUS_BRIGHTNESS_STEP_MIN;
     }
-    if (steps > 5U)
+    if (steps > UI_STATUS_BRIGHTNESS_STEP_MAX)
     {
-        steps = 5U;
+        steps = UI_STATUS_BRIGHTNESS_STEP_MAX;
     }
 
     return steps;
@@ -965,16 +953,16 @@ static uint8_t ui_status_brightness_to_steps(uint8_t brightness)
 
 static uint8_t ui_status_steps_to_brightness(uint8_t steps)
 {
-    if (steps < 1U)
+    if (steps < UI_STATUS_BRIGHTNESS_STEP_MIN)
     {
-        steps = 1U;
+        steps = UI_STATUS_BRIGHTNESS_STEP_MIN;
     }
-    if (steps > 5U)
+    if (steps > UI_STATUS_BRIGHTNESS_STEP_MAX)
     {
-        steps = 5U;
+        steps = UI_STATUS_BRIGHTNESS_STEP_MAX;
     }
 
-    return (uint8_t)(steps * 20U);
+    return (uint8_t)(steps * UI_STATUS_BRIGHTNESS_PERCENT_PER_STEP);
 }
 
 static uint8_t ui_status_volume_to_steps(uint8_t volume)
@@ -1623,7 +1611,11 @@ static void ui_status_update_panel_visuals(void)
 
     if (s_status_panel.brightness_value_label != NULL)
     {
-        rt_snprintf(value_text, sizeof(value_text), "%u / 5", s_status_panel.brightness_steps);
+        rt_snprintf(value_text,
+                    sizeof(value_text),
+                    "%u / %u",
+                    s_status_panel.brightness_steps,
+                    UI_STATUS_BRIGHTNESS_STEP_MAX);
         lv_label_set_text(s_status_panel.brightness_value_label, value_text);
     }
 
@@ -1636,8 +1628,8 @@ static void ui_status_update_panel_visuals(void)
     ui_status_update_slider_visual(s_status_panel.brightness_track,
                                    s_status_panel.brightness_fill,
                                    s_status_panel.brightness_knob,
-                                   1U,
-                                   5U,
+                                   UI_STATUS_BRIGHTNESS_STEP_MIN,
+                                   UI_STATUS_BRIGHTNESS_STEP_MAX,
                                    s_status_panel.brightness_steps);
     ui_status_update_slider_visual(s_status_panel.volume_track,
                                    s_status_panel.volume_fill,
@@ -1810,8 +1802,10 @@ static void ui_status_close_panel(void)
 static void ui_status_sync_timer_cb(lv_timer_t *timer)
 {
     int pending;
-    uint8_t brightness = 50U;
-    uint8_t volume = 8U;
+    uint32_t saved_brightness = app_config_get_display_brightness();
+    uint32_t saved_volume = app_config_get_audio_music_volume();
+    uint8_t brightness = (saved_brightness > 100U) ? 100U : (uint8_t)saved_brightness;
+    uint8_t volume = (saved_volume > 15U) ? 15U : (uint8_t)saved_volume;
     bool bt_connected;
 
     LV_UNUSED(timer);
@@ -2101,10 +2095,14 @@ static void ui_status_slider_event_cb(lv_event_t *e)
     lv_event_code_t code = lv_event_get_code(e);
 
     if ((code != LV_EVENT_PRESSED) &&
-        (code != LV_EVENT_PRESSING) &&
-        (code != LV_EVENT_RELEASED) &&
-        (code != LV_EVENT_CLICKED))
+        (code != LV_EVENT_RELEASED))
     {
+        return;
+    }
+
+    if (code == LV_EVENT_RELEASED)
+    {
+        (void)app_config_save();
         return;
     }
 
@@ -2117,16 +2115,15 @@ static void ui_status_slider_event_cb(lv_event_t *e)
     {
         uint8_t actual;
 
-        value = ui_status_slider_step_from_touch(slider, indev, 1U, 5U);
+        value = ui_status_slider_step_from_touch(slider,
+                                                 indev,
+                                                 UI_STATUS_BRIGHTNESS_STEP_MIN,
+                                                 UI_STATUS_BRIGHTNESS_STEP_MAX);
         actual = ui_status_steps_to_brightness(value);
         s_status_panel.brightness_steps = value;
         s_status_pending_brightness = actual;
         ui_status_backlight_write(actual);
         app_config_set_display_brightness(actual);
-        if (code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED)
-        {
-            (void)app_config_save();
-        }
     }
     else
     {
@@ -2337,9 +2334,7 @@ static void ui_status_create_slider_visual(lv_obj_t *parent,
                                                            NULL,
                                                            NULL);
         lv_obj_add_event_cb(touch_zone, ui_status_slider_event_cb, LV_EVENT_PRESSED, (void *)(uintptr_t)kind);
-        lv_obj_add_event_cb(touch_zone, ui_status_slider_event_cb, LV_EVENT_PRESSING, (void *)(uintptr_t)kind);
         lv_obj_add_event_cb(touch_zone, ui_status_slider_event_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)kind);
-        lv_obj_add_event_cb(touch_zone, ui_status_slider_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)kind);
         lv_obj_move_foreground(touch_zone);
     }
 }
@@ -2419,7 +2414,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                     false,
                     false);
     s_status_panel.brightness_value_label = ui_create_label(panel,
-                                                            "3 / 5",
+                                                            "5 / 10",
                                                             value_x,
                                                             74,
                                                             92,
@@ -2433,8 +2428,8 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                                    inner_x,
                                    108,
                                    slider_w,
-                                   1U,
-                                   5U,
+                                   UI_STATUS_BRIGHTNESS_STEP_MIN,
+                                   UI_STATUS_BRIGHTNESS_STEP_MAX,
                                    s_status_panel.brightness_steps,
                                    UI_STATUS_SLIDER_BRIGHTNESS);
 
@@ -2630,6 +2625,8 @@ static void ui_status_build_overlay(lv_obj_t *screen)
     lv_obj_add_flag(s_status_panel.mask, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(s_status_panel.mask, ui_status_mask_event_cb, LV_EVENT_CLICKED, NULL);
 
+    ui_status_sync_now();
+
     ui_status_build_panel_widgets(s_status_panel.root,
                                   s_status_panel.root,
                                   0,
@@ -2708,8 +2705,22 @@ void ui_helpers_init(void)
     s_status_last_net_4g_enabled = false;
     s_status_last_network_text[0] = '\0';
     ui_refresh_metrics();
-    s_status_panel.brightness_steps = 3U;
-    s_status_panel.volume_steps = 5U;
+    {
+        uint32_t saved_brightness = app_config_get_display_brightness();
+        uint32_t saved_volume = app_config_get_audio_music_volume();
+
+        if (saved_brightness > 100U)
+        {
+            saved_brightness = 100U;
+        }
+        if (saved_volume > 15U)
+        {
+            saved_volume = 15U;
+        }
+
+        s_status_panel.brightness_steps = ui_status_brightness_to_steps((uint8_t)saved_brightness);
+        s_status_panel.volume_steps = ui_status_volume_to_steps((uint8_t)saved_volume);
+    }
     s_status_panel.toast_timer = lv_timer_create(ui_status_toast_timer_cb,
                                                  UI_STATUS_TOAST_DURATION_MS,
                                                  NULL);
@@ -3081,8 +3092,8 @@ void ui_build_standard_screen_ex(ui_screen_scaffold_t *scaffold,
 
     section = lv_obj_create(screen);
     ui_apply_basic_object_style(section, false, 0, 0);
-    lv_obj_set_pos(section, 0, ui_px_y(68));
-    lv_obj_set_size(section, s_screen_width, s_screen_height - ui_px_y(68));
+    lv_obj_set_pos(section, 0, ui_px_y(UI_STATUS_BAR_HEIGHT));
+    lv_obj_set_size(section, s_screen_width, s_screen_height - ui_px_y(UI_STATUS_BAR_HEIGHT));
 
     title_bar = lv_obj_create(section);
     ui_apply_basic_object_style(title_bar, false, 0, 0);
@@ -3120,7 +3131,7 @@ void ui_build_standard_screen_ex(ui_screen_scaffold_t *scaffold,
     content = lv_obj_create(section);
     ui_apply_basic_object_style(content, false, 0, 0);
     lv_obj_set_pos(content, 0, ui_px_y(UI_STANDARD_NAV_HEIGHT));
-    lv_obj_set_size(content, s_screen_width, s_screen_height - ui_px_y(68 + UI_STANDARD_NAV_HEIGHT));
+    lv_obj_set_size(content, s_screen_width, s_screen_height - ui_px_y(UI_STATUS_BAR_HEIGHT + UI_STANDARD_NAV_HEIGHT));
 
     scaffold->content = content;
 }
