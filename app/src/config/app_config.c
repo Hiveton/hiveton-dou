@@ -684,8 +684,8 @@ rt_err_t app_config_load(void)
     if (found)
     {
         if (!app_config_copy_string_checked(s_storage_path,
-                                            sizeof(s_storage_path),
-                                            s_storage_temp_path))
+                                             sizeof(s_storage_path),
+                                             s_storage_temp_path))
         {
             app_config_unlock();
             return -RT_EFULL;
@@ -696,8 +696,8 @@ rt_err_t app_config_load(void)
         s_storage_path[0] = '\0';
     }
 
-    app_config_unlock();
     app_config_storage_cleanup_legacy_files();
+    app_config_unlock();
     return RT_EOK;
 }
 
@@ -867,16 +867,16 @@ rt_err_t app_config_save(void)
     }
 
     if (!app_config_copy_string_checked(s_storage_path,
-                                        sizeof(s_storage_path),
-                                        s_storage_temp_path))
+                                         sizeof(s_storage_path),
+                                         s_storage_temp_path))
     {
         app_config_unlock();
         return -RT_EFULL;
     }
     s_loaded_from_file = true;
     s_dirty = false;
-    app_config_unlock();
     app_config_storage_cleanup_legacy_files();
+    app_config_unlock();
     return RT_EOK;
 }
 
