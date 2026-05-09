@@ -96,13 +96,6 @@ static rt_uint8_t s_tf_mount_thread_stack[TF_MOUNT_THREAD_STACK_SIZE]
 static volatile rt_uint8_t s_ui_debug_open_reading = 0U;
 static volatile rt_uint8_t s_xiaozhi_registered = 0U;
 static volatile rt_uint8_t s_xiaozhi_registering = 0U;
-static volatile rt_uint8_t s_tf_card_present = 0U;
-static volatile rt_uint8_t s_tf_det_irq_pending = 0U;
-static volatile rt_uint8_t s_tf_det_available = 0U;
-static volatile rt_uint8_t s_tf_mount_sem_ready = 0U;
-static volatile rt_uint8_t s_tf_storage_ready = 0U;
-static rt_uint8_t s_backlight_target_brightness = 0U;
-static rt_tick_t s_petgame_reading_last_tick = 0;
 static rt_tick_t s_xiaozhi_register_last_try = 0;
 static rt_tick_t s_tf_last_no_device_log_tick = 0;
 static rt_tick_t s_tf_last_mount_fail_log_tick = 0;

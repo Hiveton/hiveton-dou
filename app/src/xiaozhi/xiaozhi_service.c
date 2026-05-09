@@ -891,15 +891,44 @@ int xiaozhi_service_init(void)
     }
     
     /* 创建线程（首次） */
-    if (s_service_thread.stat == RT_THREAD_INIT) {
-        result = rt_thread_init(&s_service_thread, "xz_svc",
-                               xiaozhi_service_thread, NULL,
-                               s_thread_stack, XZ_SERVICE_THREAD_STACK_SIZE,
-                               XZ_SERVICE_THREAD_PRIORITY, 10);
-        if (result != RT_EOK) {
-            LOG_E("Failed to init thread: %d", result);
-            return result;
+    {
+        struct rt_thread *existing = rt_thread_get_by_name("xz_svc");
+        if (existing != RT_NULL)
+        {
+            LOG_I("Service thread already exists, skipping startup");
+            s_initialized = true;
+            rt_event_send(s_event, XZ_EVT_INIT);
+            return 0;
         }
+    }
+    
+    result = rt_thread_init(&s_service_thread, "xz_svc",
+                            xiaozhi_service_thread, NULL,
+                            s_thread_stack, XZ_SERVICE_THREAD_STACK_SIZE,
+                            XZ_SERVICE_THREAD_PRIORITY, 10);
+    if (result != RT_EOK)
+    {
+        LOG_E("Failed to init thread: %d", result);
+        return result;
+    }
+    
+    result = rt_thread_startup(&s_service_thread);
+    if (result != RT_EOK)
+    {
+        LOG_E("Failed to start thread: %d", result);
+        return result;
+    }
+    }
+    
+    result = rt_thread_init(&s_service_thread, "xz_svc",
+                           xiaozhi_service_thread, NULL,
+                           s_thread_stack, XZ_SERVICE_THREAD_STACK_SIZE,
+                           XZ_SERVICE_THREAD_PRIORITY, 10);
+    if (result != RT_EOK)
+    {
+        LOG_E("Failed to init thread: %d", result);
+        return result;
+    }
         
         result = rt_thread_startup(&s_service_thread);
         if (result != RT_EOK) {
