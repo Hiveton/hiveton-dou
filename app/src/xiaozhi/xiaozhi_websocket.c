@@ -57,6 +57,8 @@
 #define XZ_OTA_RETRY_MAX 3U
 #define XZ_RETRY_BACKOFF_INITIAL_MS 500U
 #define XZ_RETRY_BACKOFF_MAX_MS 1500U
+#define XZ_WS_OTA_URL_MAX_LEN 512U
+#define XZ_WS_OTA_TOKEN_MAX_LEN 1024U
 
 #ifndef XZ_WS_DEBUG_LOG
 #define XZ_WS_DEBUG_LOG 0
@@ -140,6 +142,82 @@ static int parse_ota_response(const char *response,
                               websocket_context_t *websocket,
                               char *server_message,
                               size_t server_message_size);
+
+static void xz_ws_set_parse_error(char *server_message,
+                                  size_t server_message_size,
+                                  const char *message)
+{
+    if (server_message != RT_NULL && server_message_size > 0U)
+    {
+        rt_snprintf(server_message, server_message_size, "%s", message);
+    }
+}
+
+static char *xz_ws_dup_bounded_string(const char *value, size_t max_len)
+{
+    char *copy;
+    size_t len;
+
+    if (value == RT_NULL)
+    {
+        return RT_NULL;
+    }
+
+    len = strlen(value);
+    if (len == 0U || len > max_len)
+    {
+        return RT_NULL;
+    }
+
+    copy = (char *)network_mem_malloc((uint32_t)(len + 1U));
+    if (copy == RT_NULL)
+    {
+        return RT_NULL;
+    }
+
+    memcpy(copy, value, len + 1U);
+    return copy;
+}
+
+static bool xz_ws_copy_fixed_string(char *dst, size_t dst_size, const char *value)
+{
+    size_t len;
+
+    if (dst == RT_NULL || dst_size == 0U || value == RT_NULL)
+    {
+        return false;
+    }
+
+    len = strlen(value);
+    if (len >= dst_size)
+    {
+        dst[0] = '\0';
+        return false;
+    }
+
+    memcpy(dst, value, len + 1U);
+    return true;
+}
+
+static bool xz_ws_copy_session_id(char *dst, size_t dst_size, const char *session_id)
+{
+    size_t len;
+
+    if (dst == RT_NULL || dst_size == 0U || session_id == RT_NULL)
+    {
+        return false;
+    }
+
+    len = strlen(session_id);
+    if (len == 0U || len >= dst_size)
+    {
+        dst[0] = '\0';
+        return false;
+    }
+
+    memcpy(dst, session_id, len + 1U);
+    return true;
+}
 
 static uint32_t xz_retry_backoff_ms(uint32_t attempt)
 {
@@ -357,8 +435,9 @@ static int xz_wait_for_activation_completion(rt_bool_t interactive,
 
         if (strncmp(last_code, g_activation_context.code, sizeof(last_code)) != 0)
         {
-            rt_snprintf(last_code, sizeof(last_code), "%s",
-                        g_activation_context.code);
+            (void)xz_ws_copy_fixed_string(last_code,
+                                          sizeof(last_code),
+                                          g_activation_context.code);
             xz_show_activation_prompt(interactive);
         }
         else if (interactive)
@@ -650,12 +729,20 @@ void ws_send_speak_abort(void *ws, char *session_id, int reason)
         return;
     }
 
-    rt_snprintf(message, 256, "{\"session_id\":\"%s\",\"type\":\"abort\"",
-                active_session_id);
     if (reason)
-        strcat(message, ",\"reason\":\"wake_word_detected\"}");
+    {
+        rt_snprintf(message,
+                    sizeof(message),
+                    "{\"session_id\":\"%s\",\"type\":\"abort\",\"reason\":\"wake_word_detected\"}",
+                    active_session_id);
+    }
     else
-        strcat(message, "}");
+    {
+        rt_snprintf(message,
+                    sizeof(message),
+                    "{\"session_id\":\"%s\",\"type\":\"abort\"}",
+                    active_session_id);
+    }
 
     xz_ws_send_text_message(message);
 }
@@ -1036,8 +1123,15 @@ void parse_helLo(const u8_t *data, u16_t len)
         XZ_WS_LOG("session_id received\n");
         g_xz_ws.sample_rate = (uint32_t)sample_rate;
         g_xz_ws.frame_duration = (uint32_t)duration;
-        rt_snprintf(g_xz_ws.session_id, sizeof(g_xz_ws.session_id), "%s",
-                    session_id);
+        if (!xz_ws_copy_session_id(g_xz_ws.session_id,
+                                   sizeof(g_xz_ws.session_id),
+                                   session_id))
+        {
+            rt_kprintf("websocket hello session_id too long or empty\n");
+            cJSON_Delete(root);
+            return;
+        }
+
         web_g_state = kDeviceStateIdle;
         
 #ifndef CONFIG_IOT_PROTOCOL_MCP
@@ -1294,8 +1388,12 @@ static int xiaozhi_ws_connect_internal(rt_bool_t interactive)
     memset(&endpoint, 0, sizeof(endpoint));
     endpoint.ssl_enabled = 1;
     endpoint.port = LWIP_IANA_PORT_HTTPS;
-    rt_snprintf(endpoint.host, sizeof(endpoint.host), "%s", XIAOZHI_HOST);
-    rt_snprintf(endpoint.path, sizeof(endpoint.path), "%s", XIAOZHI_WSPATH);
+    if (!xz_ws_copy_fixed_string(endpoint.host, sizeof(endpoint.host), XIAOZHI_HOST) ||
+        !xz_ws_copy_fixed_string(endpoint.path, sizeof(endpoint.path), XIAOZHI_WSPATH))
+    {
+        rt_kprintf("WebSocket fixed endpoint too long\n");
+        return -RT_EFULL;
+    }
 
     if (g_websocket_context.url != RT_NULL && g_websocket_context.url[0] != '\0')
     {
@@ -1459,25 +1557,33 @@ static int parse_ota_response(const char *response,
         cJSON *url_item = cJSON_GetObjectItem(websocket_obj, "url");
         if (url_item && cJSON_IsString(url_item))
         {
-            size_t url_len = strlen(url_item->valuestring) + 1;
-            websocket->url = (char *)network_mem_malloc((uint32_t)url_len);
-            if (websocket->url)
+            websocket->url = xz_ws_dup_bounded_string(url_item->valuestring,
+                                                      XZ_WS_OTA_URL_MAX_LEN);
+            if (websocket->url != RT_NULL)
             {
-                strncpy(websocket->url, url_item->valuestring, url_len);
                 XZ_WS_LOG("Websocket URL from OTA present (ignored for connect)\n");
+            }
+            else
+            {
+                rt_kprintf("OTA websocket url empty, too long, or alloc failed\n");
             }
         }
 
         cJSON *token_item = cJSON_GetObjectItem(websocket_obj, "token");
         if (token_item && cJSON_IsString(token_item))
         {
-            size_t token_len = strlen(token_item->valuestring) + 1;
-            websocket->token = (char *)network_mem_malloc((uint32_t)token_len);
-            if (websocket->token)
+            websocket->token = xz_ws_dup_bounded_string(token_item->valuestring,
+                                                        XZ_WS_OTA_TOKEN_MAX_LEN);
+            if (websocket->token != RT_NULL)
             {
-                strncpy(websocket->token, token_item->valuestring, token_len);
                 XZ_WS_LOG("Websocket token received\n");
                 has_ws_token = RT_TRUE;
+            }
+            else
+            {
+                xz_ws_set_parse_error(server_message,
+                                      server_message_size,
+                                      "小智服务器返回的 websocket token 无效");
             }
         }
     }
@@ -1489,8 +1595,17 @@ static int parse_ota_response(const char *response,
         cJSON *code_item = cJSON_GetObjectItem(activation_obj, "code");
         if (code_item && cJSON_IsString(code_item))
         {
-            strncpy(active->code, code_item->valuestring,
-                    sizeof(active->code) - 1);
+            size_t code_len = strlen(code_item->valuestring);
+            if (code_len == 0U || code_len >= sizeof(active->code))
+            {
+                xz_ws_set_parse_error(server_message,
+                                      server_message_size,
+                                      "小智服务器返回的激活码无效");
+                cJSON_Delete(root);
+                return -RT_ERROR;
+            }
+
+            memcpy(active->code, code_item->valuestring, code_len + 1U);
             active->is_activated = true;
             XZ_WS_LOG("Activation code received\n");
         }

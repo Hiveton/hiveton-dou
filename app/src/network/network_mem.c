@@ -4,6 +4,7 @@
 
 #include "network_mem.h"
 
+#include <rthw.h>
 #include <rtthread.h>
 #include <string.h>
 #include "mem_section.h"
@@ -38,15 +39,22 @@ ALIGN(4) static uint8_t s_network_psram_heap_pool[NETWORK_PSRAM_HEAP_SIZE]
 
 static void network_mem_ensure_ready(void)
 {
+    rt_base_t level;
+
     if (s_network_psram_heap_ready)
     {
         return;
     }
 
-    rt_memheap_init(&s_network_psram_heap, "net_psram",
-                    s_network_psram_heap_pool,
-                    sizeof(s_network_psram_heap_pool));
-    s_network_psram_heap_ready = RT_TRUE;
+    level = rt_hw_interrupt_disable();
+    if (!s_network_psram_heap_ready)
+    {
+        rt_memheap_init(&s_network_psram_heap, "net_psram",
+                        s_network_psram_heap_pool,
+                        sizeof(s_network_psram_heap_pool));
+        s_network_psram_heap_ready = RT_TRUE;
+    }
+    rt_hw_interrupt_enable(level);
 }
 
 static rt_bool_t network_mem_total_size(uint32_t size, rt_size_t *total_size)

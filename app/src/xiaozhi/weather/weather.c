@@ -139,13 +139,175 @@ extern const lv_image_dsc_t w99;  // 未知天气
 #define WEATHER_LOCATION "ip"      // 默认城市，可以是城市名或经纬度
 #define WEATHER_LANGUAGE "zh-Hans" // 中文简体
 #define WEATHER_HEADER_BUFSZ 1024
-#define WEATHER_RESP_BUFSZ 1024
+#define WEATHER_RESP_INITIAL_BUFSZ 1024
+#define WEATHER_RESP_MAX_BUFSZ 4096
 #define WEATHER_URL_LEN_MAX 512
+#define WEATHER_HTTP_TIMEOUT_MS 8000
+#define WEATHER_HTTP_LOCK_TIMEOUT_MS 1000
 
 
 rt_device_t g_rtc_device = RT_NULL;
 date_time_t g_current_time = {0};
 weather_info_t g_current_weather = {0};
+static struct rt_mutex g_weather_data_mutex;
+static bool g_weather_data_mutex_ready = false;
+
+static bool weather_info_same_payload(const weather_info_t *lhs,
+                                      const weather_info_t *rhs);
+
+static bool weather_response_ensure_capacity(char **buffer,
+                                             int *capacity,
+                                             int needed)
+{
+    char *grown;
+    int new_capacity;
+
+    if (buffer == RT_NULL || capacity == RT_NULL || *buffer == RT_NULL || needed <= 0)
+    {
+        return false;
+    }
+
+    if (needed <= *capacity)
+    {
+        return true;
+    }
+
+    if (needed > WEATHER_RESP_MAX_BUFSZ)
+    {
+        return false;
+    }
+
+    new_capacity = *capacity;
+    while (new_capacity < needed)
+    {
+        new_capacity *= 2;
+        if (new_capacity > WEATHER_RESP_MAX_BUFSZ)
+        {
+            new_capacity = WEATHER_RESP_MAX_BUFSZ;
+        }
+    }
+
+    grown = (char *)rt_realloc(*buffer, (rt_size_t)new_capacity);
+    if (grown == RT_NULL)
+    {
+        return false;
+    }
+
+    memset(grown + *capacity, 0, (size_t)(new_capacity - *capacity));
+    *buffer = grown;
+    *capacity = new_capacity;
+    return true;
+}
+
+static bool weather_sync_try_begin(void)
+{
+    bool started = false;
+
+    rt_enter_critical();
+    if (!g_weather_sync_in_progress)
+    {
+        g_weather_sync_in_progress = 1;
+        started = true;
+    }
+    rt_exit_critical();
+
+    return started;
+}
+
+static void weather_sync_end(void)
+{
+    rt_enter_critical();
+    g_weather_sync_in_progress = 0;
+    rt_exit_critical();
+}
+
+static rt_err_t weather_data_ensure_mutex(void)
+{
+    rt_err_t result = RT_EOK;
+
+    if (g_weather_data_mutex_ready)
+    {
+        return RT_EOK;
+    }
+
+    rt_enter_critical();
+    if (!g_weather_data_mutex_ready)
+    {
+        result = rt_mutex_init(&g_weather_data_mutex, "weather", RT_IPC_FLAG_PRIO);
+        if (result == RT_EOK)
+        {
+            g_weather_data_mutex_ready = true;
+        }
+    }
+    rt_exit_critical();
+
+    return result;
+}
+
+static bool weather_data_lock(void)
+{
+    if (weather_data_ensure_mutex() != RT_EOK)
+    {
+        return false;
+    }
+
+    return rt_mutex_take(&g_weather_data_mutex, RT_WAITING_FOREVER) == RT_EOK;
+}
+
+static void weather_data_unlock(void)
+{
+    if (g_weather_data_mutex_ready)
+    {
+        (void)rt_mutex_release(&g_weather_data_mutex);
+    }
+}
+
+static bool weather_current_snapshot(weather_info_t *weather_info)
+{
+    bool valid = false;
+
+    if (weather_info == RT_NULL)
+    {
+        return false;
+    }
+
+    if (!weather_data_lock())
+    {
+        *weather_info = g_current_weather;
+        return weather_info->last_update > 0;
+    }
+
+    *weather_info = g_current_weather;
+    valid = weather_info->last_update > 0;
+    weather_data_unlock();
+
+    return valid;
+}
+
+static bool weather_current_update_if_changed(const weather_info_t *latest_weather)
+{
+    bool changed = false;
+
+    if (latest_weather == RT_NULL)
+    {
+        return false;
+    }
+
+    if (!weather_data_lock())
+    {
+        changed = (g_current_weather.last_update <= 0) ||
+                  !weather_info_same_payload(&g_current_weather, latest_weather);
+        g_current_weather = *latest_weather;
+        return changed;
+    }
+
+    changed = (g_current_weather.last_update <= 0) ||
+              !weather_info_same_payload(&g_current_weather, latest_weather);
+    g_current_weather = *latest_weather;
+    weather_data_unlock();
+
+    return changed;
+}
 
 static bool xiaozhi_time_set_rtc_utc(time_t utc_time)
 {
@@ -188,6 +350,9 @@ static bool weather_is_same_local_day(time_t lhs, time_t rhs)
 
 static bool weather_auto_refresh_due(void)
 {
+    weather_info_t current_weather = {0};
+    bool has_weather;
+
     if (!app_config_get_weather_auto_refresh())
     {
         return false;
@@ -199,19 +364,21 @@ static bool weather_auto_refresh_due(void)
     struct tm *now_tm;
     struct tm *last_tm;
 
-    if (g_current_weather.last_update <= 0 || now <= 0)
+    has_weather = weather_current_snapshot(&current_weather);
+
+    if (!has_weather || now <= 0)
     {
         return true;
     }
 
     now_tm = localtime_r(&now, &now_tm_storage);
-    last_tm = localtime_r(&g_current_weather.last_update, &last_tm_storage);
+    last_tm = localtime_r(&current_weather.last_update, &last_tm_storage);
     if (now_tm == RT_NULL || last_tm == RT_NULL)
     {
         return true;
     }
 
-    if (!weather_is_same_local_day(g_current_weather.last_update, now))
+    if (!weather_is_same_local_day(current_weather.last_update, now))
     {
         return true;
     }
@@ -410,6 +577,36 @@ static bool weather_json_get_text(cJSON *object,
     return false;
 }
 
+static bool weather_json_get_bounded_string(cJSON *object,
+                                            const char *key,
+                                            char *buffer,
+                                            size_t buffer_size)
+{
+    cJSON *item = cJSON_GetObjectItem(object, key);
+    size_t len;
+
+    if (object == RT_NULL || key == RT_NULL || buffer == RT_NULL || buffer_size == 0U)
+    {
+        return false;
+    }
+
+    buffer[0] = '\0';
+
+    if (item == RT_NULL || !cJSON_IsString(item) || item->valuestring == RT_NULL)
+    {
+        return false;
+    }
+
+    len = strlen(item->valuestring);
+    if (len == 0U || len >= buffer_size)
+    {
+        return false;
+    }
+
+    memcpy(buffer, item->valuestring, len + 1U);
+    return true;
+}
+
 
 // 周几的字符串数组
 static const char *weekday_names[] = {"周日", "周一", "周二", "周三",
@@ -505,8 +702,7 @@ int xiaozhi_weather_peek(weather_info_t *weather_info)
         return -RT_EINVAL;
     }
 
-    *weather_info = g_current_weather;
-    return (g_current_weather.last_update > 0) ? RT_EOK : -RT_ERROR;
+    return weather_current_snapshot(weather_info) ? RT_EOK : -RT_ERROR;
 }
 
 bool xiaozhi_weather_is_home_entry_enabled(void)
@@ -752,28 +948,22 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
     if (!weather_info)
         return -RT_ERROR;
 
-
-
-        // 检查是否有同步正在进行中，避免并发调用
-    if (g_weather_sync_in_progress) {
+    // 检查是否有同步正在进行中，避免并发调用
+    if (!weather_sync_try_begin()) {
         LOG_W("Weather sync already in progress, skipping...");
         return -RT_EBUSY;
     }
 
-    // 设置同步进行标志
-    g_weather_sync_in_progress = 1;
-
-
     if (!weather_network_ready())
     {
-        g_weather_sync_in_progress = 0;
+        weather_sync_end();
         return -RT_ERROR;
     }
 
     if (net_http_should_defer_generic())
     {
         LOG_W("Weather sync deferred while Xiaozhi HTTPS is active");
-        g_weather_sync_in_progress = 0;
+        weather_sync_end();
         return -RT_EBUSY;
     }
 
@@ -786,7 +976,17 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
     int resp_status;
     int content_length = -1, bytes_read = 0;
     int content_pos = 0;
+    int buffer_capacity = 0;
+    bool content_truncated = false;
+    bool http_lock_taken = false;
 
+    if (net_http_lock_take(NET_HTTP_CLIENT_GENERIC, WEATHER_HTTP_LOCK_TIMEOUT_MS) != RT_EOK)
+    {
+        LOG_W("Weather sync skipped: HTTP client busy");
+        ret = -RT_EBUSY;
+        goto __exit;
+    }
+    http_lock_taken = true;
 
     // 分配URL缓冲区
     weather_url = rt_calloc(1, WEATHER_URL_LEN_MAX);
@@ -797,9 +997,17 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
     }
 
     // 拼接GET网址
-    rt_snprintf(weather_url, WEATHER_URL_LEN_MAX, "http://%s" WEATHER_API_URI,
-                WEATHER_API_HOST, WEATHER_API_KEY, WEATHER_LOCATION,
-                WEATHER_LANGUAGE);
+    if (rt_snprintf(weather_url,
+                   WEATHER_URL_LEN_MAX,
+                   "http://%s" WEATHER_API_URI,
+                   WEATHER_API_HOST,
+                   WEATHER_API_KEY,
+                   WEATHER_LOCATION,
+                   WEATHER_LANGUAGE) >= WEATHER_URL_LEN_MAX)
+    {
+        LOG_E("Weather URL buffer too small");
+        goto __exit;
+    }
 
 
     // 创建会话
@@ -809,6 +1017,7 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
         LOG_E("No memory for weather session!");
         goto __exit;
     }
+    (void)webclient_set_timeout(session, WEATHER_HTTP_TIMEOUT_MS);
 
     // 发送GET请求
     if ((resp_status = webclient_get(session, weather_url)) != 200)
@@ -818,7 +1027,8 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
     }
 
     // 分配接收缓冲区
-    buffer = rt_calloc(1, WEATHER_RESP_BUFSZ);
+    buffer_capacity = WEATHER_RESP_INITIAL_BUFSZ;
+    buffer = rt_calloc(1, (rt_size_t)buffer_capacity);
     if (buffer == RT_NULL)
     {
         LOG_E("No memory for weather response buffer!");
@@ -827,27 +1037,98 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
 
     // 读取响应内容
     content_length = webclient_content_length_get(session);
-    if (content_length > 0)
+    if (content_length == 0)
+    {
+        LOG_W("Weather response content-length is zero");
+    }
+    else if (content_length > 0)
+    {
+        if (!weather_response_ensure_capacity(&buffer, &buffer_capacity, content_length + 1))
+        {
+            content_truncated = true;
+        }
+
+        do
+        {
+            int read_size;
+
+            if (content_truncated)
+            {
+                break;
+            }
+
+            read_size = content_length - content_pos;
+            if (read_size > buffer_capacity - content_pos - 1)
+            {
+                read_size = buffer_capacity - content_pos - 1;
+            }
+            if (read_size <= 0)
+            {
+                content_truncated = true;
+                break;
+            }
+
+            bytes_read =
+                webclient_read(session, buffer + content_pos, read_size);
+            if (bytes_read <= 0)
+            {
+                if (content_pos < content_length)
+                {
+                    content_truncated = true;
+                }
+                break;
+            }
+            content_pos += bytes_read;
+        } while (content_pos < content_length);
+    }
+    else
     {
         do
         {
-            bytes_read =
-                webclient_read(session, buffer + content_pos,
-                               content_length - content_pos >
-                                       WEATHER_RESP_BUFSZ - content_pos - 1
-                                   ? WEATHER_RESP_BUFSZ - content_pos - 1
-                                   : content_length - content_pos);
+            int available = buffer_capacity - content_pos - 1;
+
+            if (available <= 0)
+            {
+                if (!weather_response_ensure_capacity(&buffer, &buffer_capacity, content_pos + 2))
+                {
+                    content_truncated = true;
+                    break;
+                }
+                available = buffer_capacity - content_pos - 1;
+            }
+
+            bytes_read = webclient_read(session, buffer + content_pos, available);
             if (bytes_read <= 0)
             {
                 break;
             }
+
             content_pos += bytes_read;
-        } while (content_pos < content_length &&
-                 content_pos < WEATHER_RESP_BUFSZ - 1);
+            if (content_pos >= WEATHER_RESP_MAX_BUFSZ - 1)
+            {
+                content_truncated = true;
+                break;
+            }
+        } while (true);
+    }
 
+    if (content_pos >= buffer_capacity)
+    {
+        buffer[buffer_capacity - 1] = '\0';
+    }
+    else
+    {
         buffer[content_pos] = '\0'; // 确保字符串结束
+    }
 
+    if (content_truncated)
+    {
+        LOG_W("Weather response truncated: expected=%d, buffered=%d, status=%d", content_length, content_pos, resp_status);
+        goto __exit;
+    }
 
+    if (content_pos > 0)
+    {
         // 解析JSON响应
         cJSON *root = cJSON_Parse(buffer);
         if (!root)
@@ -882,10 +1163,8 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
             cJSON *name = cJSON_GetObjectItem(location, "name");
             if (name && cJSON_IsString(name))
             {
-                strncpy(weather_info->location, name->valuestring,
-                        sizeof(weather_info->location) - 1);
-                weather_info->location[sizeof(weather_info->location) - 1] =
-                    '\0';
+                strncpy(weather_info->location, name->valuestring, sizeof(weather_info->location) - 1);
+                weather_info->location[sizeof(weather_info->location) - 1] = '\0';
             }
         }
 
@@ -902,18 +1181,17 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
         cJSON *text = cJSON_GetObjectItem(now, "text");
         if (text && cJSON_IsString(text))
         {
-            strncpy(weather_info->text, text->valuestring,
-                    sizeof(weather_info->text) - 1);
+            strncpy(weather_info->text, text->valuestring, sizeof(weather_info->text) - 1);
             weather_info->text[sizeof(weather_info->text) - 1] = '\0';
         }
 
         // 解析天气现象代码
-        cJSON *code = cJSON_GetObjectItem(now, "code");
-        if (code && cJSON_IsString(code))
+        if (!weather_json_get_bounded_string(now,
+                                             "code",
+                                             weather_info->code,
+                                             sizeof(weather_info->code)))
         {
-            strncpy(weather_info->code, code->valuestring,
-                    sizeof(weather_info->code) - 1);
-            weather_info->code[sizeof(weather_info->code) - 1] = '\0';
+            LOG_W("weather code missing or too long");
         }
 
         // 解析温度
@@ -972,12 +1250,17 @@ __exit:
         rt_free(buffer);
     }
 
+    if (http_lock_taken)
+    {
+        net_http_lock_release(NET_HTTP_CLIENT_GENERIC);
+    }
+
     if (ret != RT_EOK)
     {
         LOG_E("天气同步失败\n");
     }
     // 清除同步进行标志
-    g_weather_sync_in_progress = 0;
+    weather_sync_end();
 
     return ret;
 }
@@ -1100,6 +1383,8 @@ void weather_ui_update_callback(void)
     lv_obj_t *ui_Label_ip = refs != NULL ? refs->ui_Label_ip : NULL;
     lv_obj_t *last_time = refs != NULL ? refs->last_time : NULL;
     lv_obj_t *weather_icon = refs != NULL ? refs->weather_icon : NULL;
+    weather_info_t current_weather = {0};
+    bool has_weather = false;
 
     if (ui_status_panel_is_visible())
     {
@@ -1107,26 +1392,27 @@ void weather_ui_update_callback(void)
     }
 
     ui_dispatch_request_status_refresh();
+    has_weather = weather_current_snapshot(&current_weather);
 
     // 更新天气信息
     // 更新温度显示 (使用新UI中的ui_Label_ip对象)
     if (ui_Label_ip) {
-        LOG_W("location%d\n",g_current_weather.location);
         char temp_text[32];
         // 根据天气结构体中的城市和温度信息显示
-        snprintf(temp_text, sizeof(temp_text), "%.10s.%d°C", 
-                 g_current_weather.location, g_current_weather.temperature);
+        snprintf(temp_text, sizeof(temp_text), "%.10s.%d°C",
+                 has_weather ? current_weather.location : "--",
+                 has_weather ? current_weather.temperature : 0);
         lv_label_set_text(ui_Label_ip, temp_text);
     }
     
     // 更新天气图标 (根据天气代码更新图标)
     if (weather_icon) {
-        ui_img_set_src(weather_icon, weather_icon_from_code(g_current_weather.code));
+        ui_img_set_src(weather_icon, weather_icon_from_code(has_weather ? current_weather.code : RT_NULL));
     }
     
     // 更新上次更新时间显示 (使用新UI中的last_time对象)
-    if (last_time && g_current_weather.last_update > 0) {
-        struct tm *last_update_tm = localtime(&g_current_weather.last_update);
+    if (last_time && has_weather && current_weather.last_update > 0) {
+        struct tm *last_update_tm = localtime(&current_weather.last_update);
         if (last_update_tm) {
             char last_update_text[16];
             snprintf(last_update_text, sizeof(last_update_text), "%02d:%02d", 
@@ -1332,9 +1618,7 @@ void xiaozhi_time_weather(void)//获取最新时间和天气
         weather_result = xiaozhi_weather_get(&latest_weather);
         if (weather_result == RT_EOK) 
         {
-            weather_changed = (g_current_weather.last_update <= 0) ||
-                              !weather_info_same_payload(&g_current_weather, &latest_weather);
-            g_current_weather = latest_weather;
+            weather_changed = weather_current_update_if_changed(&latest_weather);
 
             if (weather_changed)
             {

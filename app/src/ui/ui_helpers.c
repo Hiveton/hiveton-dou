@@ -43,8 +43,8 @@
 #define UI_STATUS_BAR_REFRESH_THREAD_PRIORITY 22
 #define UI_STATUS_BAR_REFRESH_THREAD_TICK 10
 #define UI_STATUS_BRIGHTNESS_STEP_MIN 0U
-#define UI_STATUS_BRIGHTNESS_STEP_MAX 10U
-#define UI_STATUS_BRIGHTNESS_PERCENT_PER_STEP 10U
+#define UI_STATUS_BRIGHTNESS_STEP_MAX 50U
+#define UI_STATUS_BRIGHTNESS_PERCENT_PER_STEP 2U
 #ifndef UI_EXTERNAL_TTF_DATA_FALLBACK_MAX_BYTES
 #define UI_EXTERNAL_TTF_DATA_FALLBACK_MAX_BYTES (2U * 1024U * 1024U)
 #endif
@@ -225,6 +225,7 @@ static const char *ui_status_weekday_from_index(int weekday)
 static bool ui_status_accept_interaction(void);
 static void ui_status_request_detail_rebuild(void);
 static void ui_status_update_panel_visuals(void);
+static bool ui_status_panel_event_is_top_down_swipe(lv_event_t *e);
 static bool ui_accept_debounced_tick(rt_tick_t *last_tick, uint32_t debounce_ms);
 static bool ui_accept_navigation_interaction(void);
 static bool ui_status_detail_is_active(void);
@@ -299,9 +300,47 @@ static void ui_font_cache_log_failure_once(const char *path, const char *reason)
     }
 }
 
+static bool ui_font_cache_copy_path(char *buffer, size_t buffer_size, const char *path)
+{
+    size_t len;
+
+    if (buffer == NULL || buffer_size == 0U || path == NULL)
+    {
+        return false;
+    }
+
+    len = strlen(path);
+    if (len == 0U || len >= buffer_size)
+    {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    memcpy(buffer, path, len + 1U);
+    return true;
+}
+
 static void ui_status_panel_toggle_event_bridge(lv_event_t *e)
 {
-    ui_status_panel_toggle_event_cb(e);
+    ui_status_panel_handle_top_swipe(e);
+}
+
+static bool ui_status_panel_event_is_top_down_swipe(lv_event_t *e)
+{
+    lv_indev_t *indev;
+
+    if (e == NULL || lv_event_get_code(e) != LV_EVENT_GESTURE)
+    {
+        return false;
+    }
+
+    indev = lv_indev_get_act();
+    if (indev == NULL)
+    {
+        return false;
+    }
+
+    return lv_indev_get_gesture_dir(indev) == LV_DIR_BOTTOM;
 }
 
 static bool ui_bt_connection_active(void)
@@ -756,8 +795,13 @@ static lv_font_t *ui_font_cache_get_file(ui_font_cache_entry_t *cache,
             ui_font_cache_destroy_entry(&s_file_font_cache[i]);
         }
         ui_font_cache_release_shared_file_data();
-        rt_strncpy(s_file_font_cache_path, font_path, sizeof(s_file_font_cache_path) - 1U);
-        s_file_font_cache_path[sizeof(s_file_font_cache_path) - 1U] = '\0';
+        if (!ui_font_cache_copy_path(s_file_font_cache_path,
+                                     sizeof(s_file_font_cache_path),
+                                     font_path))
+        {
+            ui_font_cache_log_failure_once(font_path, "path");
+            return NULL;
+        }
     }
 
     for (i = 0; i < cache_count; ++i)
@@ -825,6 +869,8 @@ static lv_font_t *ui_font_cache_get_file(ui_font_cache_entry_t *cache,
 
 static bool ui_font_cache_make_lvgl_fs_path(const char *font_path, char *buffer, size_t buffer_size)
 {
+    int written;
+
     if (font_path == NULL || font_path[0] == '\0' || buffer == NULL || buffer_size < 5U)
     {
         return false;
@@ -832,14 +878,20 @@ static bool ui_font_cache_make_lvgl_fs_path(const char *font_path, char *buffer,
 
     if (font_path[0] == '/')
     {
-        rt_snprintf(buffer, buffer_size, "A:%s", font_path);
+        written = rt_snprintf(buffer, buffer_size, "A:%s", font_path);
     }
     else
     {
-        rt_snprintf(buffer, buffer_size, "A:/%s", font_path);
+        written = rt_snprintf(buffer, buffer_size, "A:/%s", font_path);
     }
 
-    return true;
+    if (written < 0 || (size_t)written >= buffer_size)
+    {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    return buffer[0] != '\0';
 }
 
 static void ui_register_screen_refs(lv_obj_t *screen,
@@ -935,9 +987,47 @@ static void ui_nav_event_cb(lv_event_t *e)
     ui_runtime_switch_to(target);
 }
 
+static void ui_nav_async_switch_cb(void *param)
+{
+    ui_screen_id_t target = (ui_screen_id_t)(uintptr_t)param;
+
+    if (target == UI_SCREEN_NONE)
+    {
+        return;
+    }
+
+    lv_display_trigger_activity(NULL);
+    ui_runtime_switch_to(target);
+}
+
+static void ui_nav_pressed_event_cb(lv_event_t *e)
+{
+    uintptr_t raw_target = (uintptr_t)lv_event_get_user_data(e);
+    ui_screen_id_t target = (ui_screen_id_t)raw_target;
+    lv_indev_t *indev;
+
+    if (lv_event_get_code(e) != LV_EVENT_PRESSED || target == UI_SCREEN_NONE)
+    {
+        return;
+    }
+
+    if (!ui_accept_navigation_interaction())
+    {
+        return;
+    }
+
+    indev = lv_indev_get_act();
+    if (indev != NULL)
+    {
+        lv_indev_wait_release(indev);
+    }
+
+    lv_async_call(ui_nav_async_switch_cb, (void *)(uintptr_t)target);
+}
+
 static uint8_t ui_status_brightness_to_steps(uint8_t brightness)
 {
-    uint8_t steps = (uint8_t)((brightness + 5U) / UI_STATUS_BRIGHTNESS_PERCENT_PER_STEP);
+    uint8_t steps = (uint8_t)((brightness + 1U) / UI_STATUS_BRIGHTNESS_PERCENT_PER_STEP);
 
     if (steps < UI_STATUS_BRIGHTNESS_STEP_MIN)
     {
@@ -1611,11 +1701,11 @@ static void ui_status_update_panel_visuals(void)
 
     if (s_status_panel.brightness_value_label != NULL)
     {
+        uint8_t brightness_percent = ui_status_steps_to_brightness(s_status_panel.brightness_steps);
         rt_snprintf(value_text,
                     sizeof(value_text),
-                    "%u / %u",
-                    s_status_panel.brightness_steps,
-                    UI_STATUS_BRIGHTNESS_STEP_MAX);
+                    "%u%%",
+                    brightness_percent);
         lv_label_set_text(s_status_panel.brightness_value_label, value_text);
     }
 
@@ -2414,7 +2504,7 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
                     false,
                     false);
     s_status_panel.brightness_value_label = ui_create_label(panel,
-                                                            "5 / 10",
+                                                            "50%",
                                                             value_x,
                                                             74,
                                                             92,
@@ -2639,9 +2729,10 @@ static void ui_status_build_overlay(lv_obj_t *screen)
 
 static void ui_status_panel_toggle_event_cb(lv_event_t *e)
 {
+    lv_indev_t *indev;
     lv_obj_t *screen;
 
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    if (!ui_status_panel_event_is_top_down_swipe(e))
     {
         return;
     }
@@ -2657,6 +2748,12 @@ static void ui_status_panel_toggle_event_cb(lv_event_t *e)
         return;
     }
 
+    indev = lv_indev_get_act();
+    if (indev != NULL)
+    {
+        lv_indev_wait_release(indev);
+    }
+
     ui_status_build_overlay(screen);
     if (s_status_panel.root == NULL)
     {
@@ -2670,10 +2767,11 @@ static void ui_status_panel_toggle_event_cb(lv_event_t *e)
         lv_obj_clear_flag(s_status_panel.root, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_status_panel.root);
     }
-    else
-    {
-        ui_status_close_panel();
-    }
+}
+
+void ui_status_panel_handle_top_swipe(lv_event_t *e)
+{
+    ui_status_panel_toggle_event_cb(e);
 }
 
 void ui_helpers_init(void)
@@ -3044,6 +3142,12 @@ void ui_attach_nav_event(lv_obj_t *obj, ui_screen_id_t target)
 {
     lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(obj, ui_nav_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)target);
+}
+
+void ui_attach_nav_pressed_event(lv_obj_t *obj, ui_screen_id_t target)
+{
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(obj, ui_nav_pressed_event_cb, LV_EVENT_PRESSED, (void *)(uintptr_t)target);
 }
 
 void ui_build_status_bar_ex(lv_obj_t *parent,

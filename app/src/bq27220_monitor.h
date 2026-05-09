@@ -12,6 +12,7 @@ typedef struct
     bool valid;
     uint8_t battery_percent;
     bool charging;
+    bool external_power;
     uint8_t aw_charge_state;
     uint8_t aw_fault_status;
     uint16_t battery_status;

@@ -11,3 +11,4 @@
 *.o
 *.tmp.c
 *.tmp.o
+books/

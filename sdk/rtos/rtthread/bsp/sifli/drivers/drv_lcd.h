@@ -185,5 +185,6 @@ void lcd_set_epd_gray4_experiment_region(rt_bool_t enabled,
                                          uint16_t y1);
 void lcd_set_epd_image_refresh_hint(rt_bool_t enabled);
 void lcd_request_epd_force_full_refresh_once(void);
+rt_bool_t lcd_epd_last_displayed_frame_has_gray(void);
 
 #endif

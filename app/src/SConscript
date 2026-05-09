@@ -13,6 +13,7 @@ src = [
     os.path.join(cwd, 'audio_manager.c'),
     os.path.join(cwd, 'music_service.c'),
     os.path.join(cwd, 'sleep_manager.c'),
+    os.path.join(cwd, 'touch_wakeup.c'),
     os.path.join(cwd, 'petgame_reducer.c'),
     os.path.join(cwd, 'petgame_storage.c'),
     os.path.join(cwd, 'config', 'app_config.c'),
@@ -26,9 +27,12 @@ src = [
     os.path.join(cwd, 'ui', 'ui_dispatch.c'),
     os.path.join(cwd, 'ui', 'ui_font_manager.c'),
     os.path.join(cwd, 'ui', 'ui_helpers.c'),
+    os.path.join(cwd, 'ui', 'ui_components.c'),
     os.path.join(cwd, 'ui', 'ui_status_bar.c'),
     os.path.join(cwd, 'ui', 'ui_runtime_adapter.c'),
+    os.path.join(cwd, 'ui', 'ui_epd_refresh_policy.c'),
     os.path.join(cwd, 'reading', 'reading_epub.c'),
+    os.path.join(cwd, 'reading', 'reading_cover_cache.c'),
     os.path.join(cwd, 'reading', 'reading_state.c'),
 ]
 src.extend(Glob(os.path.join(cwd, 'ui', 'screens', '*.c')))

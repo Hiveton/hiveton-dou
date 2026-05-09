@@ -127,6 +127,7 @@ int music_service_refresh(void)
 {
     DIR *dirp;
     struct dirent *entry;
+    int written;
 
     if (music_service_ensure_dir() != 0)
     {
@@ -154,11 +155,17 @@ int music_service_refresh(void)
         music_service_filename_to_title(entry->d_name,
                                         s_tracks[s_track_count].title,
                                         sizeof(s_tracks[s_track_count].title));
-        rt_snprintf(s_tracks[s_track_count].path,
-                    sizeof(s_tracks[s_track_count].path),
-                    "%s/%s",
-                    MUSIC_SERVICE_DIR,
-                    entry->d_name);
+        written = rt_snprintf(s_tracks[s_track_count].path,
+                              sizeof(s_tracks[s_track_count].path),
+                              "%s/%s",
+                              MUSIC_SERVICE_DIR,
+                              entry->d_name);
+        if (written < 0 || (size_t)written >= sizeof(s_tracks[s_track_count].path))
+        {
+            memset(&s_tracks[s_track_count], 0, sizeof(s_tracks[s_track_count]));
+            rt_kprintf("music: skip overlong path name=%s\n", entry->d_name);
+            continue;
+        }
         s_track_count++;
     }
 

@@ -12,6 +12,7 @@ static const char *const s_tf_devices[] = {"sd0", "sd1", "sd2", "sdio0"};
 
 #define PETGAME_PATH_BUF_SIZE 256U
 #define PETGAME_FILE_NAME "petgame.dat"
+#define PETGAME_TEMP_SUFFIX ".tmp"
 #define PETGAME_GAMES_DIR "games"
 #define PETGAME_DATA_DIR "petgame"
 #define PETGAME_MAX_FILE_SIZE 2048U
@@ -19,6 +20,7 @@ static const char *const s_tf_devices[] = {"sd0", "sd1", "sd2", "sdio0"};
 static bool petgame_storage_find_mount_root(char *buffer, size_t buffer_size)
 {
     size_t i;
+    int written;
 
     if (buffer == NULL || buffer_size == 0U)
     {
@@ -32,7 +34,12 @@ static bool petgame_storage_find_mount_root(char *buffer, size_t buffer_size)
 
         if (mounted != NULL && mounted[0] != '\0')
         {
-            rt_snprintf(buffer, buffer_size, "%s", mounted);
+            written = rt_snprintf(buffer, buffer_size, "%s", mounted);
+            if (written < 0 || (size_t)written >= buffer_size)
+            {
+                buffer[0] = '\0';
+                return false;
+            }
             return true;
         }
     }
@@ -46,6 +53,7 @@ static bool petgame_storage_join_path(char *buffer,
                                      const char *suffix)
 {
     size_t base_len;
+    int written;
 
     if (buffer == NULL || buffer_size == 0U || base == NULL || suffix == NULL)
     {
@@ -54,27 +62,43 @@ static bool petgame_storage_join_path(char *buffer,
 
     if (suffix[0] == '\0')
     {
-        rt_snprintf(buffer, buffer_size, "%s", base);
-        return true;
+        written = rt_snprintf(buffer, buffer_size, "%s", base);
+        if (written < 0 || (size_t)written >= buffer_size)
+        {
+            buffer[0] = '\0';
+            return false;
+        }
+        return buffer[0] != '\0';
     }
 
     if ((base[0] == '\0') || strcmp(base, "/") == 0)
     {
-        rt_snprintf(buffer, buffer_size, "/%s", suffix);
-        return true;
+        written = rt_snprintf(buffer, buffer_size, "/%s", suffix);
+        if (written < 0 || (size_t)written >= buffer_size)
+        {
+            buffer[0] = '\0';
+            return false;
+        }
+        return buffer[0] != '\0';
     }
 
     base_len = strlen(base);
     if (base[base_len - 1U] == '/')
     {
-        rt_snprintf(buffer, buffer_size, "%s%s", base, suffix);
+        written = rt_snprintf(buffer, buffer_size, "%s%s", base, suffix);
     }
     else
     {
-        rt_snprintf(buffer, buffer_size, "%s/%s", base, suffix);
+        written = rt_snprintf(buffer, buffer_size, "%s/%s", base, suffix);
     }
 
-    return true;
+    if (written < 0 || (size_t)written >= buffer_size)
+    {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    return buffer[0] != '\0';
 }
 
 static void petgame_storage_build_paths(char *games_dir,
@@ -87,6 +111,7 @@ static void petgame_storage_build_paths(char *games_dir,
     char mount_root[PETGAME_PATH_BUF_SIZE] = {0};
     char games_dir_path[PETGAME_PATH_BUF_SIZE] = {0};
     char data_dir_path[PETGAME_PATH_BUF_SIZE] = {0};
+    int written;
 
     if (games_dir == NULL || data_dir == NULL || data_file == NULL)
     {
@@ -101,31 +126,61 @@ static void petgame_storage_build_paths(char *games_dir,
         return;
     }
 
-    (void)petgame_storage_join_path(games_dir_path,
-                                    games_dir_size,
-                                    mount_root,
-                                    PETGAME_GAMES_DIR);
-    (void)petgame_storage_join_path(data_dir_path,
-                                    data_dir_size,
-                                    games_dir_path,
-                                    PETGAME_DATA_DIR);
-    (void)petgame_storage_join_path(data_file,
-                                    data_file_size,
-                                    data_dir_path,
-                                    PETGAME_FILE_NAME);
-    rt_snprintf(games_dir, games_dir_size, "%s", games_dir_path);
-    rt_snprintf(data_dir, data_dir_size, "%s", data_dir_path);
+    if (!petgame_storage_join_path(games_dir_path,
+                                   sizeof(games_dir_path),
+                                   mount_root,
+                                   PETGAME_GAMES_DIR) ||
+        !petgame_storage_join_path(data_dir_path,
+                                   sizeof(data_dir_path),
+                                   games_dir_path,
+                                   PETGAME_DATA_DIR) ||
+        !petgame_storage_join_path(data_file,
+                                   data_file_size,
+                                   data_dir_path,
+                                   PETGAME_FILE_NAME))
+    {
+        data_file[0] = '\0';
+        return;
+    }
+
+    written = rt_snprintf(games_dir, games_dir_size, "%s", games_dir_path);
+    if (written < 0 || (size_t)written >= games_dir_size)
+    {
+        games_dir[0] = '\0';
+        data_dir[0] = '\0';
+        data_file[0] = '\0';
+        return;
+    }
+
+    written = rt_snprintf(data_dir, data_dir_size, "%s", data_dir_path);
+    if (written < 0 || (size_t)written >= data_dir_size)
+    {
+        data_dir[0] = '\0';
+        data_file[0] = '\0';
+        return;
+    }
 }
 
 static bool petgame_storage_make_dir(const char *path)
 {
+    struct stat st;
+
     if (path == NULL || path[0] == '\0')
     {
         return false;
     }
 
-    mkdir(path, 0);
-    return true;
+    if (stat(path, &st) == 0)
+    {
+        return S_ISDIR(st.st_mode);
+    }
+
+    if (mkdir(path, 0) == 0)
+    {
+        return true;
+    }
+
+    return (stat(path, &st) == 0 && S_ISDIR(st.st_mode));
 }
 
 static bool petgame_parse_u32_line(const char *line, const char *key, uint32_t *value)
@@ -153,13 +208,19 @@ static bool petgame_storage_parse_state(const char *text, petgame_state_t *state
     char *token;
     char *save_ptr = NULL;
     bool parsed = false;
+    int written;
 
     if (text == NULL || state == NULL)
     {
         return false;
     }
 
-    rt_snprintf(local_copy, sizeof(local_copy), "%s", text);
+    written = rt_snprintf(local_copy, sizeof(local_copy), "%s", text);
+    if (written < 0 || (size_t)written >= sizeof(local_copy))
+    {
+        return false;
+    }
+
     token = strtok_r(local_copy, "\r\n", &save_ptr);
     while (token != NULL)
     {
@@ -215,9 +276,34 @@ static bool petgame_storage_parse_state(const char *text, petgame_state_t *state
             state->energy_level = (uint8_t)value;
             parsed = true;
         }
+        else if (petgame_parse_u32_line(token, "cleanliness_level", &value))
+        {
+            state->cleanliness_level = (uint8_t)value;
+            parsed = true;
+        }
         else if (petgame_parse_u32_line(token, "feed_balance", &value))
         {
             state->feed_balance = value;
+            parsed = true;
+        }
+        else if (petgame_parse_u32_line(token, "play_count", &value))
+        {
+            state->play_count = value;
+            parsed = true;
+        }
+        else if (petgame_parse_u32_line(token, "clean_count", &value))
+        {
+            state->clean_count = value;
+            parsed = true;
+        }
+        else if (petgame_parse_u32_line(token, "companion_days", &value))
+        {
+            state->companion_days = value;
+            parsed = true;
+        }
+        else if (petgame_parse_u32_line(token, "companion_elapsed_seconds", &value))
+        {
+            state->companion_elapsed_seconds = value;
             parsed = true;
         }
 
@@ -251,6 +337,28 @@ static bool petgame_storage_read_file(const char *path, char *buffer, size_t buf
     }
 
     buffer[read_size] = '\0';
+    return true;
+}
+
+static bool petgame_storage_write_all(int fd, const char *data, size_t size)
+{
+    size_t total = 0U;
+
+    if (data == NULL && size > 0U)
+    {
+        return false;
+    }
+
+    while (total < size)
+    {
+        ssize_t written = write(fd, data + total, size - total);
+        if (written <= 0)
+        {
+            return false;
+        }
+        total += (size_t)written;
+    }
+
     return true;
 }
 
@@ -293,9 +401,11 @@ bool petgame_storage_save(const petgame_state_t *state)
     char games_dir[PETGAME_PATH_BUF_SIZE] = {0};
     char data_dir[PETGAME_PATH_BUF_SIZE] = {0};
     char data_file[PETGAME_PATH_BUF_SIZE] = {0};
+    char temp_file[PETGAME_PATH_BUF_SIZE] = {0};
     char content[PETGAME_MAX_FILE_SIZE] = {0};
     int fd;
     int written;
+    size_t content_len;
 
     if (state == NULL)
     {
@@ -313,41 +423,83 @@ bool petgame_storage_save(const petgame_state_t *state)
         return false;
     }
 
-    (void)petgame_storage_make_dir(games_dir);
-    (void)petgame_storage_make_dir(data_dir);
+    if (!petgame_storage_make_dir(games_dir) ||
+        !petgame_storage_make_dir(data_dir))
+    {
+        return false;
+    }
 
-    rt_snprintf(content,
-                sizeof(content),
-                "version=%u\n"
-                "reading_seconds=%u\n"
-                "ai_interaction_count=%u\n"
-                "manual_feed_count=%u\n"
-                "affection_count=%u\n"
-                "growth_score=%u\n"
-                "growth_level=%u\n"
-                "mood_level=%u\n"
-                "hunger_level=%u\n"
-                "energy_level=%u\n"
-                "feed_balance=%u\n",
-                (unsigned int)state->version,
-                (unsigned int)state->reading_seconds,
-                (unsigned int)state->ai_interaction_count,
-                (unsigned int)state->manual_feed_count,
-                (unsigned int)state->affection_count,
-                (unsigned int)state->growth_score,
-                (unsigned int)state->growth_level,
-                (unsigned int)state->mood_level,
-                (unsigned int)state->hunger_level,
-                (unsigned int)state->energy_level,
-                (unsigned int)state->feed_balance);
+    written = rt_snprintf(content,
+                          sizeof(content),
+                          "version=%u\n"
+                          "reading_seconds=%u\n"
+                          "ai_interaction_count=%u\n"
+                          "manual_feed_count=%u\n"
+                          "affection_count=%u\n"
+                          "growth_score=%u\n"
+                          "growth_level=%u\n"
+                          "mood_level=%u\n"
+                          "hunger_level=%u\n"
+                          "energy_level=%u\n"
+                          "cleanliness_level=%u\n"
+                          "feed_balance=%u\n"
+                          "play_count=%u\n"
+                          "clean_count=%u\n"
+                          "companion_days=%u\n"
+                          "companion_elapsed_seconds=%u\n",
+                          (unsigned int)state->version,
+                          (unsigned int)state->reading_seconds,
+                          (unsigned int)state->ai_interaction_count,
+                          (unsigned int)state->manual_feed_count,
+                          (unsigned int)state->affection_count,
+                          (unsigned int)state->growth_score,
+                          (unsigned int)state->growth_level,
+                          (unsigned int)state->mood_level,
+                          (unsigned int)state->hunger_level,
+                          (unsigned int)state->energy_level,
+                          (unsigned int)state->cleanliness_level,
+                          (unsigned int)state->feed_balance,
+                          (unsigned int)state->play_count,
+                          (unsigned int)state->clean_count,
+                          (unsigned int)state->companion_days,
+                          (unsigned int)state->companion_elapsed_seconds);
+    if (written < 0 || (size_t)written >= sizeof(content))
+    {
+        return false;
+    }
+    content_len = (size_t)written;
 
-    fd = open(data_file, O_WRONLY | O_CREAT | O_TRUNC, 0);
+    written = rt_snprintf(temp_file, sizeof(temp_file), "%s%s", data_file, PETGAME_TEMP_SUFFIX);
+    if (written < 0 || (size_t)written >= sizeof(temp_file))
+    {
+        return false;
+    }
+
+    fd = open(temp_file, O_WRONLY | O_CREAT | O_TRUNC, 0);
     if (fd < 0)
     {
         return false;
     }
 
-    written = write(fd, content, strlen(content));
-    close(fd);
-    return (written > 0 && written == (int)strlen(content));
+    if (!petgame_storage_write_all(fd, content, content_len) ||
+        fsync(fd) != 0)
+    {
+        (void)close(fd);
+        (void)unlink(temp_file);
+        return false;
+    }
+
+    if (close(fd) != 0)
+    {
+        (void)unlink(temp_file);
+        return false;
+    }
+
+    if (rename(temp_file, data_file) == 0)
+    {
+        return true;
+    }
+
+    (void)unlink(temp_file);
+    return false;
 }

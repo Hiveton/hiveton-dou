@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "ui_i18n.h"
 #include "ui_helpers.h"
+#include "ui_runtime_adapter.h"
 #include "xiaozhi/xiaozhi_client_public.h"
 #include "xiaozhi/xiaozhi_service.h"
 #include "network/net_manager.h"
@@ -609,8 +610,6 @@ void ui_AI_Dou_screen_init(void)
                                           NULL);
     }
     
-    s_network_label = NULL;
-    
     face = ui_create_card(page.content, 174, 34, 180, 180, UI_SCREEN_NONE, false, 90);
     s_ai_face_container = face;
     lv_obj_set_style_border_width(face, 0, 0);
@@ -618,6 +617,18 @@ void ui_AI_Dou_screen_init(void)
     s_ai_face_img = lv_img_create(face);
     ai_set_face_if_changed(&funny2);
     lv_obj_center(s_ai_face_img);
+
+    s_network_label = ui_create_label(page.content,
+                                      "",
+                                      52,
+                                      220,
+                                      424,
+                                      24,
+                                      16,
+                                      LV_TEXT_ALIGN_CENTER,
+                                      false,
+                                      false);
+    lv_label_set_long_mode(s_network_label, LV_LABEL_LONG_DOT);
 
     dialog_card = ui_create_card(page.content, 24, 250, 480, 190, UI_SCREEN_NONE, false, 0);
     s_ai_mouth_label = ui_create_label(dialog_card,
@@ -630,6 +641,7 @@ void ui_AI_Dou_screen_init(void)
                                        LV_TEXT_ALIGN_CENTER,
                                        false,
                                        false);
+    lv_label_set_long_mode(s_ai_mouth_label, LV_LABEL_LONG_DOT);
     s_ai_copy_label = ui_create_label(dialog_card,
                                       ui_i18n_pick("正在启动AI服务...", "Starting AI service..."),
                                       24,
@@ -700,7 +712,10 @@ void ui_AI_Dou_screen_destroy(void)
         lv_timer_delete(s_ai_greeting_timer);
         s_ai_greeting_timer = NULL;
     }
-    xiaozhi_service_register_ui_callbacks(NULL);
+    if (ui_runtime_get_active_screen_id() == UI_SCREEN_AI_DOU)
+    {
+        xiaozhi_service_register_ui_callbacks(NULL);
+    }
     if (s_ai_sync_timer != NULL)
     {
         lv_timer_delete(s_ai_sync_timer);
@@ -709,6 +724,11 @@ void ui_AI_Dou_screen_destroy(void)
     ai_ui_pending_lock();
     memset(&s_ai_pending, 0, sizeof(s_ai_pending));
     ai_ui_pending_unlock();
+    if (s_ai_pending_mutex != RT_NULL)
+    {
+        rt_mutex_delete(s_ai_pending_mutex);
+        s_ai_pending_mutex = RT_NULL;
+    }
     s_stop_pending = false;
     s_ai_last_tts_tick = 0;
     s_ai_last_network_state = (net_manager_service_state_t)-1;

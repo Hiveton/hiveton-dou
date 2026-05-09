@@ -65,6 +65,10 @@ static struct rt_i2c_bus_device *ft_bus = NULL;
 static struct touch_drivers cst816_driver;
 extern void app_watchdog_touch_hint(void);
 
+RT_WEAK void app_touch_wakeup_notify_irq(void)
+{
+}
+
 static rt_bool_t cst816_use_dma(void)
 {
 #ifdef BSP_USING_BOARD_SF32LB52_LCD_N16R8
@@ -272,6 +276,7 @@ void cst816_irq_handler(void *arg)
 
     //LOG_D("cst816 touch_irq_handler\n");
 
+    app_touch_wakeup_notify_irq();
     rt_touch_irq_pin_enable(0);
 
     ret = rt_sem_release(cst816_driver.isr_sem);

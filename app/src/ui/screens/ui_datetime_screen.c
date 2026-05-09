@@ -492,7 +492,6 @@ static void ui_datetime_create_row(lv_obj_t *parent,
 
 void ui_Datetime_screen_init(void)
 {
-    ui_screen_scaffold_t page;
     lv_obj_t *reset_button;
     lv_obj_t *save_button;
 
@@ -504,9 +503,8 @@ void ui_Datetime_screen_init(void)
     ui_datetime_load_current();
 
     ui_Datetime = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Datetime, ui_i18n_pick("日期与时间", "Date & Time"), UI_SCREEN_TIME_MANAGE);
 
-    ui_create_label(page.content,
+    ui_create_label(ui_Datetime,
                     ui_i18n_pick("当前设备时间", "Current Device Time"),
                     20,
                     18,
@@ -517,7 +515,7 @@ void ui_Datetime_screen_init(void)
                     false,
                     false);
 
-    s_datetime_current_label = ui_create_label(page.content,
+    s_datetime_current_label = ui_create_label(ui_Datetime,
                                                "",
                                                20,
                                                48,
@@ -527,8 +525,9 @@ void ui_Datetime_screen_init(void)
                                                LV_TEXT_ALIGN_CENTER,
                                                false,
                                                false);
+    lv_label_set_long_mode(s_datetime_current_label, LV_LABEL_LONG_DOT);
 
-    s_datetime_status_label = ui_create_label(page.content,
+    s_datetime_status_label = ui_create_label(ui_Datetime,
                                               ui_i18n_pick("修改后点击保存时间", "Tap save to apply"),
                                               20,
                                               88,
@@ -538,9 +537,10 @@ void ui_Datetime_screen_init(void)
                                               LV_TEXT_ALIGN_CENTER,
                                               false,
                                               false);
+    lv_label_set_long_mode(s_datetime_status_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(s_datetime_status_label, lv_color_hex(0x666666), 0);
 
-    s_datetime_hint_label = ui_create_label(page.content,
+    s_datetime_hint_label = ui_create_label(ui_Datetime,
                                             ui_i18n_pick("点击行切换项目，T/B 直接调整当前项",
                                                          "Tap row to select, T/B adjusts"),
                                             20,
@@ -551,15 +551,16 @@ void ui_Datetime_screen_init(void)
                                             LV_TEXT_ALIGN_CENTER,
                                             false,
                                             false);
+    lv_label_set_long_mode(s_datetime_hint_label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_color(s_datetime_hint_label, lv_color_hex(0x666666), 0);
 
-    ui_datetime_create_row(page.content, 146, UI_DATETIME_FIELD_YEAR, ui_i18n_pick("年", "Year"));
-    ui_datetime_create_row(page.content, 230, UI_DATETIME_FIELD_MONTH, ui_i18n_pick("月", "Month"));
-    ui_datetime_create_row(page.content, 314, UI_DATETIME_FIELD_DAY, ui_i18n_pick("日", "Day"));
-    ui_datetime_create_row(page.content, 398, UI_DATETIME_FIELD_HOUR, ui_i18n_pick("时", "Hour"));
-    ui_datetime_create_row(page.content, 482, UI_DATETIME_FIELD_MINUTE, ui_i18n_pick("分", "Minute"));
+    ui_datetime_create_row(ui_Datetime, 146, UI_DATETIME_FIELD_YEAR, ui_i18n_pick("年", "Year"));
+    ui_datetime_create_row(ui_Datetime, 230, UI_DATETIME_FIELD_MONTH, ui_i18n_pick("月", "Month"));
+    ui_datetime_create_row(ui_Datetime, 314, UI_DATETIME_FIELD_DAY, ui_i18n_pick("日", "Day"));
+    ui_datetime_create_row(ui_Datetime, 398, UI_DATETIME_FIELD_HOUR, ui_i18n_pick("时", "Hour"));
+    ui_datetime_create_row(ui_Datetime, 482, UI_DATETIME_FIELD_MINUTE, ui_i18n_pick("分", "Minute"));
 
-    reset_button = ui_create_button(page.content,
+    reset_button = ui_create_button(ui_Datetime,
                                     86,
                                     576,
                                     156,
@@ -570,7 +571,7 @@ void ui_Datetime_screen_init(void)
                                     false);
     lv_obj_add_event_cb(reset_button, ui_datetime_reset_default_event_cb, LV_EVENT_CLICKED, NULL);
 
-    save_button = ui_create_button(page.content,
+    save_button = ui_create_button(ui_Datetime,
                                    286,
                                    576,
                                    156,

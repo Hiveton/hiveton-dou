@@ -3,6 +3,7 @@
 static struct rt_mutex s_net_http_mutex;
 static volatile rt_uint8_t s_net_http_mutex_ready = 0U;
 static volatile rt_uint8_t s_xiaozhi_active = 0U;
+static volatile rt_uint8_t s_owner_valid = 0U;
 static volatile net_http_client_t s_owner_client = NET_HTTP_CLIENT_GENERIC;
 
 static rt_err_t net_http_lock_ensure_ready(void)
@@ -96,6 +97,7 @@ rt_err_t net_http_lock_take(net_http_client_t client, rt_int32_t timeout_ms)
     }
 
     s_owner_client = client;
+    s_owner_valid = 1U;
     return RT_EOK;
 }
 
@@ -112,6 +114,21 @@ void net_http_lock_release(net_http_client_t client)
         return;
     }
 
+    if (s_owner_valid == 0U)
+    {
+        rt_kprintf("net_http: %s lock release ignored, no owner\n",
+                   net_http_client_name(client));
+        return;
+    }
+
+    if (s_owner_client != client)
+    {
+        rt_kprintf("net_http: %s lock release ignored, owner=%s\n",
+                   net_http_client_name(client),
+                   net_http_client_name(s_owner_client));
+        return;
+    }
+
     result = rt_mutex_release(&s_net_http_mutex);
     if (result != RT_EOK)
     {
@@ -119,6 +136,7 @@ void net_http_lock_release(net_http_client_t client)
                    net_http_client_name(client),
                    result,
                    net_http_client_name(s_owner_client));
+        return;
     }
 
     if (client == NET_HTTP_CLIENT_XIAOZHI)
@@ -127,6 +145,7 @@ void net_http_lock_release(net_http_client_t client)
     }
 
     s_owner_client = NET_HTTP_CLIENT_GENERIC;
+    s_owner_valid = 0U;
 }
 
 void net_http_set_xiaozhi_active(bool active)

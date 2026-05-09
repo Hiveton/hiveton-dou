@@ -9,7 +9,7 @@
 #include "ui/ui_dispatch.h"
 #include "xiaozhi/xiaozhi_ui.h"
 
-#define BQ27220_MONITOR_THREAD_STACK_SIZE 2048
+#define BQ27220_MONITOR_THREAD_STACK_SIZE 3072
 #define BQ27220_MONITOR_THREAD_PRIORITY 21
 #define BQ27220_MONITOR_THREAD_TICK 10
 #define BQ27220_MONITOR_POLL_MS 5000U
@@ -54,6 +54,7 @@ static bool bq27220_monitor_power_snapshot_equal(const bq27220_power_snapshot_t 
     return lhs->valid == rhs->valid &&
            lhs->battery_percent == rhs->battery_percent &&
            lhs->charging == rhs->charging &&
+           lhs->external_power == rhs->external_power &&
            lhs->battery_status == rhs->battery_status &&
            lhs->operation_status == rhs->operation_status &&
            lhs->voltage_mv == rhs->voltage_mv &&
@@ -67,35 +68,92 @@ static bool bq27220_monitor_power_snapshot_equal(const bq27220_power_snapshot_t 
            lhs->aw_fault_status == rhs->aw_fault_status;
 }
 
+static bool bq27220_monitor_aw_state_is_charging(uint8_t aw_charge_state)
+{
+    return (aw_charge_state == 1U) || (aw_charge_state == 2U);
+}
+
+static bool bq27220_monitor_aw_state_has_external_power(uint8_t aw_charge_state)
+{
+    return (aw_charge_state == 1U) || (aw_charge_state == 2U) || (aw_charge_state == 3U);
+}
+
+static void bq27220_monitor_copy_power_snapshot(bq27220_power_snapshot_t *snapshot, bool *valid)
+{
+    if (snapshot == RT_NULL)
+    {
+        return;
+    }
+
+    rt_enter_critical();
+    if (valid != RT_NULL)
+    {
+        *valid = s_bq27220_power_snapshot_valid;
+    }
+    if (s_bq27220_power_snapshot_valid)
+    {
+        *snapshot = s_bq27220_power_snapshot;
+    }
+    else
+    {
+        rt_memset(snapshot, 0, sizeof(*snapshot));
+    }
+    rt_exit_critical();
+}
+
+static void bq27220_monitor_store_power_snapshot(const bq27220_power_snapshot_t *snapshot)
+{
+    if (snapshot == RT_NULL)
+    {
+        return;
+    }
+
+    rt_enter_critical();
+    s_bq27220_power_snapshot = *snapshot;
+    s_bq27220_power_snapshot_valid = true;
+    rt_exit_critical();
+}
+
 static void bq27220_monitor_publish_power_snapshot(void)
 {
-    if (!s_bq27220_power_snapshot_valid)
+    bq27220_power_snapshot_t snapshot;
+    bool valid = false;
+
+    bq27220_monitor_copy_power_snapshot(&snapshot, &valid);
+    if (!valid)
     {
         return;
     }
 
     if (s_bq27220_last_published_power_snapshot.valid &&
         bq27220_monitor_power_snapshot_equal(&s_bq27220_last_published_power_snapshot,
-                                             &s_bq27220_power_snapshot))
+                                             &snapshot))
     {
         return;
     }
 
-    s_bq27220_last_published_power_snapshot = s_bq27220_power_snapshot;
+    s_bq27220_last_published_power_snapshot = snapshot;
     s_bq27220_last_published_power_snapshot.valid = true;
 
-    xiaozhi_ui_update_battery_percent(s_bq27220_power_snapshot.battery_percent);
-    xiaozhi_ui_update_charge_status(s_bq27220_power_snapshot.charging ? 1U : 0U);
+    xiaozhi_ui_update_battery_percent(snapshot.battery_percent);
+    xiaozhi_ui_update_charge_status(snapshot.charging ? 1U : 0U);
     ui_dispatch_request_status_refresh();
 }
 
 static void bq27220_monitor_set_status_text(const char *text)
 {
-    if ((text != RT_NULL) && (rt_strcmp(s_bq27220_status_text, text) != 0))
+    if (text == RT_NULL)
+    {
+        return;
+    }
+
+    rt_enter_critical();
+    if (rt_strcmp(s_bq27220_status_text, text) != 0)
     {
         rt_strncpy(s_bq27220_status_text, text, sizeof(s_bq27220_status_text) - 1U);
         s_bq27220_status_text[sizeof(s_bq27220_status_text) - 1U] = '\0';
     }
+    rt_exit_critical();
 }
 
 static bool bq27220_monitor_read_u16(struct rt_i2c_bus_device *i2c_bus,
@@ -176,7 +234,7 @@ static bool bq27220_monitor_read_aw_fault_status(struct rt_i2c_bus_device *i2c_b
     return true;
 }
 
-static void bq27220_monitor_scan_battery_now(struct rt_i2c_bus_device *i2c_bus)
+static bool bq27220_monitor_scan_battery_now(struct rt_i2c_bus_device *i2c_bus)
 {
     uint16_t soc = 0U;
     uint16_t battery_status = 0U;
@@ -195,18 +253,16 @@ static void bq27220_monitor_scan_battery_now(struct rt_i2c_bus_device *i2c_bus)
 
     if (i2c_bus == RT_NULL)
     {
-        return;
+        return false;
     }
 
     if (bq27220_monitor_read_u16(i2c_bus, BQ27220_I2C_ADDRESS, BQ27220_REG_STATE_OF_CHARGE, &soc))
     {
         bq27220_power_snapshot_t power_snapshot;
+        bool power_snapshot_valid = false;
 
-        if (s_bq27220_power_snapshot_valid)
-        {
-            power_snapshot = s_bq27220_power_snapshot;
-        }
-        else
+        bq27220_monitor_copy_power_snapshot(&power_snapshot, &power_snapshot_valid);
+        if (!power_snapshot_valid)
         {
             rt_memset(&power_snapshot, 0, sizeof(power_snapshot));
         }
@@ -288,15 +344,17 @@ static void bq27220_monitor_scan_battery_now(struct rt_i2c_bus_device *i2c_bus)
         power_snapshot.smoothing_active = smoothing_active;
         power_snapshot.discharge_mode = discharge_mode;
 
-        s_bq27220_power_snapshot = power_snapshot;
-        s_bq27220_power_snapshot_valid = true;
+        bq27220_monitor_store_power_snapshot(&power_snapshot);
         bq27220_monitor_publish_power_snapshot();
         bq27220_monitor_set_status_text(text);
+        return true;
     }
     else
     {
         bq27220_monitor_set_status_text("BQ27220: 电量读取失败");
     }
+
+    return false;
 }
 
 static void bq27220_monitor_thread_entry(void *parameter)
@@ -342,13 +400,22 @@ static void bq27220_monitor_thread_entry(void *parameter)
             if (bq27220_monitor_read_aw_charge_state(i2c_bus, &aw_charge_state))
             {
                 bool snapshot_dirty = false;
-                int charge_now = ((aw_charge_state == 1U) || (aw_charge_state == 2U)) ? 1 : 0;
+                bool charge_now = bq27220_monitor_aw_state_is_charging(aw_charge_state);
+                bool external_power_now = bq27220_monitor_aw_state_has_external_power(aw_charge_state);
                 bool aw_fault_valid = bq27220_monitor_read_aw_fault_status(i2c_bus, &aw_fault_status);
 
+                rt_enter_critical();
                 if (s_bq27220_power_snapshot_valid &&
-                    (s_bq27220_power_snapshot.charging != (charge_now != 0)))
+                    (s_bq27220_power_snapshot.charging != charge_now))
                 {
-                    s_bq27220_power_snapshot.charging = (charge_now != 0);
+                    s_bq27220_power_snapshot.charging = charge_now;
+                    snapshot_dirty = true;
+                }
+
+                if (s_bq27220_power_snapshot_valid &&
+                    (s_bq27220_power_snapshot.external_power != external_power_now))
+                {
+                    s_bq27220_power_snapshot.external_power = external_power_now;
                     snapshot_dirty = true;
                 }
 
@@ -366,11 +433,14 @@ static void bq27220_monitor_thread_entry(void *parameter)
                     s_bq27220_power_snapshot.aw_fault_status = aw_fault_status;
                     snapshot_dirty = true;
                 }
+                rt_exit_critical();
 
                 if (snapshot_dirty)
                 {
-                    bq27220_monitor_scan_battery_now(i2c_bus);
-                    bq27220_monitor_publish_power_snapshot();
+                    if (!bq27220_monitor_scan_battery_now(i2c_bus))
+                    {
+                        bq27220_monitor_publish_power_snapshot();
+                    }
                     last_battery_scan_tick = 0U;
                 }
             }
@@ -379,6 +449,7 @@ static void bq27220_monitor_thread_entry(void *parameter)
                 bool snapshot_dirty = false;
                 int charge_now = ((battery_status & (1U << 6)) == 0U) ? 1 : 0;
 
+                rt_enter_critical();
                 if (s_bq27220_power_snapshot_valid &&
                     (s_bq27220_power_snapshot.charging != (charge_now != 0)))
                 {
@@ -392,11 +463,14 @@ static void bq27220_monitor_thread_entry(void *parameter)
                     s_bq27220_power_snapshot.battery_status = battery_status;
                     snapshot_dirty = true;
                 }
+                rt_exit_critical();
 
                 if (snapshot_dirty)
                 {
-                    bq27220_monitor_scan_battery_now(i2c_bus);
-                    bq27220_monitor_publish_power_snapshot();
+                    if (!bq27220_monitor_scan_battery_now(i2c_bus))
+                    {
+                        bq27220_monitor_publish_power_snapshot();
+                    }
                     last_battery_scan_tick = 0U;
                 }
             }
@@ -434,22 +508,24 @@ void bq27220_monitor_get_status_text(char *buffer, rt_size_t buffer_size)
         return;
     }
 
+    rt_enter_critical();
     rt_strncpy(buffer, s_bq27220_status_text, buffer_size - 1U);
     buffer[buffer_size - 1U] = '\0';
+    rt_exit_critical();
 }
 
 void bq27220_monitor_get_power_snapshot(bq27220_power_snapshot_t *snapshot)
 {
+    bool valid = false;
+
     if (snapshot == RT_NULL)
     {
         return;
     }
 
-    if (!s_bq27220_power_snapshot_valid)
+    bq27220_monitor_copy_power_snapshot(snapshot, &valid);
+    if (!valid)
     {
         rt_memset(snapshot, 0, sizeof(*snapshot));
-        return;
     }
-
-    *snapshot = s_bq27220_power_snapshot;
 }

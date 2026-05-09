@@ -20,6 +20,7 @@
 #include "bt_connection_manager.h"
 #include "audio_manager.h"
 #include "app_buttons.h"
+#include "touch_wakeup.h"
 #include "config/app_config.h"
 #include "reading/reading_state.h"
 #include "audio_server.h"
@@ -50,6 +51,7 @@
 #define BACKLIGHT_STEP_DELAY_MS 20
 #define BACKLIGHT_LEVEL_MIN 0U
 #define BACKLIGHT_LEVEL_MAX 100U
+#define BACKLIGHT_PWM_VISIBLE_MIN 15U
 #define TF_MOUNT_THREAD_STACK_SIZE 4096
 #define TF_MOUNT_THREAD_PRIORITY 18
 #define TF_MOUNT_RETRY_COUNT 120
@@ -149,24 +151,62 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id,
     return 0;
 }
 
-static void set_panel_brightness(rt_uint8_t brightness)
+static rt_uint8_t backlight_user_percent_to_pwm(rt_uint8_t brightness)
 {
-    rt_device_t lcd_device;
+    uint32_t user;
+    uint32_t curve_q;
+    uint32_t pwm;
+
+    if (brightness == 0U)
+    {
+        return 0U;
+    }
 
     if (brightness > BACKLIGHT_LEVEL_MAX)
     {
         brightness = BACKLIGHT_LEVEL_MAX;
     }
-    else if ((brightness != 0U) && (brightness < BACKLIGHT_LEVEL_MIN))
+
+    user = brightness;
+    /*
+     * User-visible brightness is stored as 0-100%.
+     * Hardware PWM below about 15% is visually off on this panel, so any
+     * positive user brightness is mapped into 15-100% PWM. The blended
+     * linear/quadratic curve gives finer control at low brightness for
+     * constant-current LED backlight dimming without using float math.
+     */
+    curve_q = 35U * user * 100U + 65U * user * user;
+    pwm = BACKLIGHT_PWM_VISIBLE_MIN +
+          (((BACKLIGHT_LEVEL_MAX - BACKLIGHT_PWM_VISIBLE_MIN) * curve_q + 500000U) / 1000000U);
+
+    if (pwm < BACKLIGHT_PWM_VISIBLE_MIN)
     {
-        brightness = BACKLIGHT_LEVEL_MIN;
+        pwm = BACKLIGHT_PWM_VISIBLE_MIN;
+    }
+    if (pwm > BACKLIGHT_LEVEL_MAX)
+    {
+        pwm = BACKLIGHT_LEVEL_MAX;
+    }
+
+    return (rt_uint8_t)pwm;
+}
+
+static void set_panel_brightness(rt_uint8_t brightness)
+{
+    rt_device_t lcd_device;
+    rt_uint8_t pwm_brightness;
+
+    if (brightness > BACKLIGHT_LEVEL_MAX)
+    {
+        brightness = BACKLIGHT_LEVEL_MAX;
     }
 
     s_backlight_target_brightness = brightness;
+    pwm_brightness = backlight_user_percent_to_pwm(brightness);
     lcd_device = rt_device_find(LCD_DEVICE_NAME);
     if (lcd_device != RT_NULL)
     {
-        rt_device_control(lcd_device, RTGRAPHIC_CTRL_SET_BRIGHTNESS, &brightness);
+        rt_device_control(lcd_device, RTGRAPHIC_CTRL_SET_BRIGHTNESS, &pwm_brightness);
     }
 }
 
@@ -225,13 +265,23 @@ static void tf_ensure_media_dirs(const char *mount_path)
 
     for (i = 0; i < sizeof(dir_names) / sizeof(dir_names[0]); ++i)
     {
+        int written;
+
         if (strcmp(mount_path, "/") == 0)
         {
-            rt_snprintf(path, sizeof(path), "/%s", dir_names[i]);
+            written = rt_snprintf(path, sizeof(path), "/%s", dir_names[i]);
         }
         else
         {
-            rt_snprintf(path, sizeof(path), "%s/%s", mount_path, dir_names[i]);
+            written = rt_snprintf(path, sizeof(path), "%s/%s", mount_path, dir_names[i]);
+        }
+
+        if (written < 0 || (rt_size_t)written >= sizeof(path))
+        {
+            rt_kprintf("tf: skip media dir path too long root=%s name=%s\n",
+                       mount_path,
+                       dir_names[i]);
+            continue;
         }
 
         mkdir(path, 0);
@@ -561,6 +611,7 @@ static void ui_thread_entry(void *parameter)
 #endif
 
     set_panel_brightness(app_config_get_display_brightness());
+    bq27220_monitor_start();
     rt_kprintf("ui: before ui_init\n");
     ui_init();
     rt_kprintf("ui: after ui_init\n");
@@ -568,7 +619,6 @@ static void ui_thread_entry(void *parameter)
     ui_runtime_switch_to(UI_SCREEN_HOME);
     rt_kprintf("ui: after switch home\n");
     ui_font_manager_notify_storage_ready();
-    bq27220_monitor_start();
     rt_kprintf("ui: xz_ui thread ready, ai_dou loaded\n");
     app_watchdog_heartbeat(APP_WDT_MODULE_UI);
     app_watchdog_set_mode(APP_WDT_MODE_ACTIVE);
@@ -639,6 +689,7 @@ static void ui_thread_entry(void *parameter)
             {
                 rt_thread_mdelay(delay_ms);
             }
+            app_watchdog_heartbeat(APP_WDT_MODULE_UI);
             continue;
         }
 #endif
@@ -759,6 +810,7 @@ int main(void)
     xiaozhi_time_use_china_timezone();
     xz_prepare_tls_allocator();
     app_buttons_init();
+    touch_wakeup_init();
     aw32001_debug_ensure_charge_enabled();
     rt_kprintf("ui: boot\n");
 

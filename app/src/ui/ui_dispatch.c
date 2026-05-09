@@ -30,7 +30,10 @@
 static rt_event_t s_ui_dispatch_event = RT_NULL;
 static volatile ui_screen_id_t s_ui_active_screen = UI_SCREEN_NONE;
 static lv_obj_t *s_ui_poweroff_popup = NULL;
+static lv_obj_t *s_ui_poweroff_status_label = NULL;
 static volatile bool s_ui_status_refresh_pending = false;
+
+extern void app_set_panel_brightness(rt_uint8_t brightness);
 
 static void ui_dispatch_poweroff_popup_close(void)
 {
@@ -38,6 +41,7 @@ static void ui_dispatch_poweroff_popup_close(void)
     {
         lv_obj_del(s_ui_poweroff_popup);
         s_ui_poweroff_popup = NULL;
+        s_ui_poweroff_status_label = NULL;
     }
 }
 
@@ -52,6 +56,8 @@ static void ui_dispatch_poweroff_cancel_cb(lv_event_t *e)
 static void ui_dispatch_shutdown_now(void)
 {
     rt_kprintf("shutdown...\n");
+    app_set_panel_brightness(0U);
+    rt_thread_mdelay(80);
     HAL_PMU_EnterShutdown();
 
     while (1)
@@ -64,7 +70,12 @@ static void ui_dispatch_poweroff_confirm_cb(lv_event_t *e)
 {
     if (lv_event_get_code(e) == LV_EVENT_CLICKED)
     {
-        ui_dispatch_poweroff_popup_close();
+        if (s_ui_poweroff_status_label != NULL)
+        {
+            lv_label_set_text(s_ui_poweroff_status_label, "正在关机...");
+        }
+        lv_obj_invalidate(lv_layer_top());
+        lv_refr_now(NULL);
         ui_dispatch_shutdown_now();
     }
 }
@@ -72,8 +83,9 @@ static void ui_dispatch_poweroff_confirm_cb(lv_event_t *e)
 static void ui_dispatch_show_poweroff_popup(void)
 {
     lv_obj_t *panel;
-    lv_obj_t *label;
-    lv_obj_t *btn;
+    lv_obj_t *cancel_btn;
+    lv_obj_t *power_btn;
+    lv_obj_t *power_label;
 
     if (s_ui_poweroff_popup != NULL)
     {
@@ -89,42 +101,54 @@ static void ui_dispatch_show_poweroff_popup(void)
     lv_obj_set_style_bg_opa(s_ui_poweroff_popup, LV_OPA_30, 0);
     lv_obj_add_flag(s_ui_poweroff_popup, LV_OBJ_FLAG_CLICKABLE);
 
-    panel = lv_obj_create(s_ui_poweroff_popup);
-    lv_obj_set_size(panel, 392, 186);
-    lv_obj_center(panel);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_border_color(panel, lv_color_hex(0x000000), 0);
+    panel = ui_create_card(s_ui_poweroff_popup, 54, 254, 420, 250, UI_SCREEN_NONE, false, 16);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0xffffff), 0);
     lv_obj_set_style_border_width(panel, 2, 0);
-    lv_obj_set_style_radius(panel, 12, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 
-    label = lv_label_create(panel);
-    lv_label_set_text(label, "确认关机");
-    lv_obj_set_style_text_color(label, lv_color_hex(0x000000), 0);
-    lv_obj_align(label, LV_ALIGN_TOP_MID, 0, 28);
+    (void)ui_create_label(panel,
+                          "是否关机？",
+                          34,
+                          30,
+                          352,
+                          40,
+                          30,
+                          LV_TEXT_ALIGN_CENTER,
+                          false,
+                          false);
 
-    btn = lv_btn_create(panel);
-    lv_obj_set_size(btn, 132, 52);
-    lv_obj_align(btn, LV_ALIGN_BOTTOM_LEFT, 34, -24);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_border_color(btn, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_border_width(btn, 2, 0);
-    lv_obj_add_event_cb(btn, ui_dispatch_poweroff_cancel_cb, LV_EVENT_CLICKED, NULL);
-    label = lv_label_create(btn);
-    lv_label_set_text(label, "取消");
-    lv_obj_center(label);
+    s_ui_poweroff_status_label = ui_create_label(panel,
+                                                 "设备将进入关机状态\n长按电源键可重新开机",
+                                                 40,
+                                                 82,
+                                                 340,
+                                                 66,
+                                                 20,
+                                                 LV_TEXT_ALIGN_CENTER,
+                                                 false,
+                                                 true);
+    lv_obj_set_style_text_color(s_ui_poweroff_status_label, lv_color_hex(0x30384f), 0);
 
-    btn = lv_btn_create(panel);
-    lv_obj_set_size(btn, 162, 52);
-    lv_obj_align(btn, LV_ALIGN_BOTTOM_RIGHT, -28, -24);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_border_color(btn, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_border_width(btn, 2, 0);
-    lv_obj_add_event_cb(btn, ui_dispatch_poweroff_confirm_cb, LV_EVENT_CLICKED, NULL);
-    label = lv_label_create(btn);
-    lv_label_set_text(label, "确认关机");
-    lv_obj_set_style_text_color(label, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_center(label);
+    cancel_btn = ui_create_button(panel, 36, 170, 154, 56, "取消", 24, UI_SCREEN_NONE, false);
+    lv_obj_set_style_radius(cancel_btn, 12, 0);
+    lv_obj_add_event_cb(cancel_btn, ui_dispatch_poweroff_cancel_cb, LV_EVENT_CLICKED, NULL);
+
+    power_btn = ui_create_button(panel, 230, 170, 154, 56, "关机", 24, UI_SCREEN_NONE, false);
+    lv_obj_set_style_radius(power_btn, 12, 0);
+    lv_obj_set_style_bg_color(power_btn, lv_color_hex(0x30384f), 0);
+    lv_obj_set_style_bg_opa(power_btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(power_btn, 0, 0);
+    power_label = lv_obj_get_child(power_btn, 0);
+    if (power_label != NULL)
+    {
+        lv_obj_set_style_text_color(power_label, lv_color_hex(0xffffff), 0);
+    }
+    lv_obj_add_event_cb(power_btn, ui_dispatch_poweroff_confirm_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_update_layout(s_ui_poweroff_popup);
+    lv_obj_invalidate(s_ui_poweroff_popup);
+    lv_refr_now(NULL);
 }
 
 rt_err_t ui_dispatch_init(void)

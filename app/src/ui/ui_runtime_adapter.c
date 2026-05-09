@@ -2,11 +2,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "drv_lcd.h"
 #include "rtthread.h"
 
 #include "audio_server.h"
 #include "ui.h"
 #include "ui_dispatch.h"
+#include "ui_epd_refresh_policy.h"
 #include "ui_helpers.h"
 #include "../config/app_config.h"
 #include "../sleep_manager.h"
@@ -29,12 +31,12 @@ static const ui_runtime_screen_entry_t s_ui_runtime_screens[] = {
     {UI_SCREEN_PET, &ui_Pet, ui_Pet_screen_destroy, ui_Pet_screen_init},
     {UI_SCREEN_PET_RULES, &ui_Pet_Rules, ui_Pet_Rules_screen_destroy, ui_Pet_Rules_screen_init},
     {UI_SCREEN_AI_DOU, &ui_AI_Dou, ui_AI_Dou_screen_destroy, ui_AI_Dou_screen_init},
-    {UI_SCREEN_TIME_MANAGE, &ui_Time_Manage, ui_Time_Manage_screen_destroy, ui_Time_Manage_screen_init},
     {UI_SCREEN_POMODORO, &ui_Pomodoro, ui_Pomodoro_screen_destroy, ui_Pomodoro_screen_init},
     {UI_SCREEN_DATETIME, &ui_Datetime, ui_Datetime_screen_destroy, ui_Datetime_screen_init},
     {UI_SCREEN_WEATHER, &ui_Weather, ui_Weather_screen_destroy, ui_Weather_screen_init},
     {UI_SCREEN_CALENDAR, &ui_Calendar, ui_Calendar_screen_destroy, ui_Calendar_screen_init},
     {UI_SCREEN_STATUS_DETAIL, &ui_Status_Detail, ui_Status_Detail_screen_destroy, ui_Status_Detail_screen_init},
+    {UI_SCREEN_ABOUT, &ui_About, ui_About_screen_destroy, ui_About_screen_init},
     {UI_SCREEN_RECORDER, &ui_Recorder, ui_Recorder_screen_destroy, ui_Recorder_screen_init},
     {UI_SCREEN_RECORD_LIST, &ui_Record_List, ui_Record_List_screen_destroy, ui_Record_List_screen_init},
     {UI_SCREEN_MUSIC_LIST, &ui_Music_List, ui_Music_List_screen_destroy, ui_Music_List_screen_init},
@@ -42,11 +44,24 @@ static const ui_runtime_screen_entry_t s_ui_runtime_screens[] = {
     {UI_SCREEN_SETTINGS, &ui_Settings, ui_Settings_screen_destroy, ui_Settings_screen_init},
     {UI_SCREEN_BRIGHTNESS, &ui_Brightness, ui_Brightness_screen_destroy, ui_Brightness_screen_init},
     {UI_SCREEN_LANGUAGE, &ui_Language, ui_Language_screen_destroy, ui_Language_screen_init},
-    {UI_SCREEN_BLUETOOTH_CONFIG, &ui_Bluetooth_Config, ui_Bluetooth_Config_screen_destroy, ui_Bluetooth_Config_screen_init},
-    {UI_SCREEN_NETWORK_MODE, &ui_Network_Mode, ui_Network_Mode_screen_destroy, ui_Network_Mode_screen_init},
     {UI_SCREEN_WALLPAPER, &ui_Wallpaper, ui_Wallpaper_screen_destroy, ui_Wallpaper_screen_init},
     {UI_SCREEN_AI_WEATHER_SETTINGS, &ui_AI_Weather_Settings, ui_AI_Weather_Settings_screen_destroy, ui_AI_Weather_Settings_screen_init},
 };
+
+static bool ui_runtime_request_full_refresh_for_loaded_page_after_gray(ui_screen_id_t from,
+                                                                       ui_screen_id_t to)
+{
+    if (ui_epd_refresh_policy_should_full_after_gray(from, to))
+    {
+        rt_kprintf("ui_switch: gray previous frame from=%d to=%d, current loaded page refresh is full\n",
+                   from,
+                   to);
+        ui_epd_refresh_policy_request_clean_refresh("runtime_gray_cleanup");
+        return true;
+    }
+
+    return false;
+}
 static bool s_ui_runtime_first_present_done = false;
 static lv_timer_t *s_ui_runtime_idle_timer = NULL;
 static ui_screen_id_t s_ui_runtime_resume_screen = UI_SCREEN_HOME;
@@ -79,6 +94,7 @@ static bool s_ui_runtime_back_suppress = false;
 #endif
 
 extern void xiaozhi_ui_update_volume(int volume);
+extern void ui_reading_list_request_enter_refresh(void);
 extern void ui_reading_detail_hardware_prev_page(void);
 extern void ui_reading_detail_hardware_next_page(void);
 extern void ui_reading_detail_request_leave_refresh(void);
@@ -88,12 +104,8 @@ extern void ui_record_list_hardware_prev_page(void);
 extern void ui_record_list_hardware_next_page(void);
 extern void ui_music_list_hardware_prev_page(void);
 extern void ui_music_list_hardware_next_page(void);
-extern void ui_time_manage_hardware_prev_page(void);
-extern void ui_time_manage_hardware_next_page(void);
 extern void ui_settings_hardware_prev_page(void);
 extern void ui_settings_hardware_next_page(void);
-extern void ui_network_mode_hardware_prev_option(void);
-extern void ui_network_mode_hardware_next_option(void);
 extern void ui_calendar_hardware_prev_month(void);
 extern void ui_calendar_hardware_next_month(void);
 extern void ui_datetime_hardware_adjust(int direction);
@@ -161,6 +173,8 @@ static void ui_runtime_attach_delete_hook(lv_obj_t **screen_ref)
         return;
     }
 
+    lv_obj_remove_event_cb(*screen_ref, ui_runtime_screen_delete_event_cb);
+
     lv_obj_add_event_cb(*screen_ref,
                         ui_runtime_screen_delete_event_cb,
                         LV_EVENT_DELETE,
@@ -169,10 +183,8 @@ static void ui_runtime_attach_delete_hook(lv_obj_t **screen_ref)
 
 static void ui_runtime_notify_screen_leave(ui_screen_id_t active_id, ui_screen_id_t target_id)
 {
-    if (active_id == UI_SCREEN_READING_DETAIL && target_id != UI_SCREEN_READING_DETAIL)
-    {
-        ui_reading_detail_request_leave_refresh();
-    }
+    (void)active_id;
+    (void)target_id;
 }
 
 static const ui_runtime_screen_entry_t *ui_runtime_find_entry_by_id(ui_screen_id_t id)
@@ -298,13 +310,13 @@ static lv_obj_t *ui_runtime_get_scroll_target(void)
     section = lv_obj_get_child(screen, 1);
     if (section == NULL)
     {
-        return screen;
+        return lv_obj_has_flag(screen, LV_OBJ_FLAG_SCROLLABLE) ? screen : NULL;
     }
 
     content = lv_obj_get_child(section, 1);
     if (content == NULL)
     {
-        return screen;
+        return lv_obj_has_flag(screen, LV_OBJ_FLAG_SCROLLABLE) ? screen : NULL;
     }
 
     for (child_index = 0; ; ++child_index)
@@ -322,7 +334,7 @@ static lv_obj_t *ui_runtime_get_scroll_target(void)
         }
     }
 
-    return content;
+    return lv_obj_has_flag(content, LV_OBJ_FLAG_SCROLLABLE) ? content : NULL;
 }
 
 static void ui_runtime_idle_timer_cb(lv_timer_t *timer)
@@ -343,6 +355,8 @@ static void ui_runtime_idle_timer_cb(lv_timer_t *timer)
 
 static void ui_runtime_prepare_target(const ui_runtime_screen_entry_t *entry)
 {
+    bool created = false;
+
     if (s_ui_runtime_idle_timer == NULL)
     {
         s_ui_runtime_idle_timer = lv_timer_create(ui_runtime_idle_timer_cb,
@@ -365,8 +379,26 @@ static void ui_runtime_prepare_target(const ui_runtime_screen_entry_t *entry)
     if (*(entry->screen) == NULL)
     {
         entry->init();
+        created = true;
     }
-    ui_runtime_attach_delete_hook(entry->screen);
+    if (created)
+    {
+        ui_runtime_attach_delete_hook(entry->screen);
+    }
+}
+
+void ui_runtime_deinit(void)
+{
+    if (s_ui_runtime_idle_timer != NULL)
+    {
+        lv_timer_delete(s_ui_runtime_idle_timer);
+        s_ui_runtime_idle_timer = NULL;
+    }
+
+    s_ui_runtime_first_present_done = false;
+    s_ui_runtime_resume_screen = UI_SCREEN_HOME;
+    s_ui_runtime_back_count = 0U;
+    s_ui_runtime_back_suppress = false;
 }
 
 lv_obj_t *ui_runtime_get_home_screen(void)
@@ -452,6 +484,10 @@ void ui_runtime_switch_to(ui_screen_id_t target)
 
     if (active_entry != NULL && active_entry->id == target && entry->screen != NULL && *(entry->screen) != NULL)
     {
+        if (target == UI_SCREEN_READING_LIST)
+        {
+            ui_reading_list_request_enter_refresh();
+        }
         if (!s_ui_runtime_first_present_done)
         {
             UI_EPD_REFRESH_LOG("ui_switch: refreshing already-active first screen target=%d\n", entry->id);
@@ -474,6 +510,8 @@ void ui_runtime_switch_to(ui_screen_id_t target)
     LV_UNUSED(ui_screen_refs_get(target_screen));
     if (active_screen != target_screen)
     {
+        bool gray_page_refreshed = false;
+
         ui_runtime_notify_screen_leave(active_entry != NULL ? active_entry->id : UI_SCREEN_NONE,
                                        entry->id);
         UI_EPD_REFRESH_LOG("ui_switch: %d(%p) -> %d(%p) auto_del=%d\n",
@@ -489,6 +527,10 @@ void ui_runtime_switch_to(ui_screen_id_t target)
                             false);
         ui_dispatch_set_active_screen(entry->id);
         ui_force_refresh_global_status_bar();
+        if (target == UI_SCREEN_READING_LIST)
+        {
+            ui_reading_list_request_enter_refresh();
+        }
         lv_obj_update_layout(target_screen);
         lv_obj_invalidate(target_screen);
 
@@ -501,10 +543,21 @@ void ui_runtime_switch_to(ui_screen_id_t target)
             active_entry->destroy();
         }
 
+        gray_page_refreshed =
+            ui_runtime_request_full_refresh_for_loaded_page_after_gray(active_entry != NULL ? active_entry->id : UI_SCREEN_NONE,
+                                                                       entry->id);
+        if (gray_page_refreshed)
+        {
+            lv_refr_now(NULL);
+        }
+
         if (!s_ui_runtime_first_present_done)
         {
             UI_EPD_REFRESH_LOG("ui_switch: forcing first screen refresh target=%d\n", entry->id);
-            lv_refr_now(NULL);
+            if (!gray_page_refreshed)
+            {
+                lv_refr_now(NULL);
+            }
             s_ui_runtime_first_present_done = true;
         }
 
@@ -581,6 +634,10 @@ void ui_runtime_reload(ui_screen_id_t target)
     ui_dispatch_set_active_screen(entry->id);
     lv_obj_update_layout(target_screen);
     lv_obj_invalidate(target_screen);
+    if (ui_runtime_request_full_refresh_for_loaded_page_after_gray(active_entry->id, entry->id))
+    {
+        lv_refr_now(NULL);
+    }
     ui_runtime_log_heap("reload_end",
                         entry->id,
                         target);
@@ -692,19 +749,6 @@ void ui_runtime_handle_hardkey_nav(int direction)
         return;
     }
 
-    if (active == UI_SCREEN_TIME_MANAGE)
-    {
-        if (direction < 0)
-        {
-            ui_time_manage_hardware_prev_page();
-        }
-        else
-        {
-            ui_time_manage_hardware_next_page();
-        }
-        return;
-    }
-
     if (active == UI_SCREEN_SETTINGS)
     {
         if (direction < 0)
@@ -714,19 +758,6 @@ void ui_runtime_handle_hardkey_nav(int direction)
         else
         {
             ui_settings_hardware_next_page();
-        }
-        return;
-    }
-
-    if (active == UI_SCREEN_NETWORK_MODE)
-    {
-        if (direction < 0)
-        {
-            ui_network_mode_hardware_prev_option();
-        }
-        else
-        {
-            ui_network_mode_hardware_next_option();
         }
         return;
     }
@@ -758,7 +789,6 @@ void ui_runtime_handle_hardkey_nav(int direction)
         {
             lv_coord_t page_step;
 
-            lv_obj_add_flag(scroll_target, LV_OBJ_FLAG_SCROLLABLE);
             page_step = lv_obj_get_height(scroll_target);
             if (page_step <= 0)
             {

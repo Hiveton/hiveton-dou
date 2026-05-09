@@ -82,6 +82,7 @@ void ui_img_set_src(lv_obj_t *img, const void *src);
 void ui_image_set_src(lv_obj_t *img, const void *src);
 
 void ui_attach_nav_event(lv_obj_t *obj, ui_screen_id_t target);
+void ui_attach_nav_pressed_event(lv_obj_t *obj, ui_screen_id_t target);
 void ui_build_status_bar_ex(lv_obj_t *parent,
                             xiaozhi_home_screen_refs_t *refs,
                             bool enable_detail_touch);
@@ -99,6 +100,7 @@ void ui_build_status_detail_content(lv_obj_t *screen, lv_obj_t *parent);
 const xiaozhi_home_screen_refs_t *ui_screen_refs_get(lv_obj_t *screen);
 void ui_screen_refs_unregister(lv_obj_t *screen);
 bool ui_status_panel_is_visible(void);
+void ui_status_panel_handle_top_swipe(lv_event_t *e);
 void ui_refresh_global_status_bar(void);
 void ui_force_refresh_global_status_bar(void);
 void ui_rebuild_fonts_for_current_theme(void);

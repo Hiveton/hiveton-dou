@@ -3,6 +3,7 @@
 #include "ui.h"
 #include "ui_i18n.h"
 #include "ui_helpers.h"
+#include "ui_components.h"
 #include "music_service.h"
 
 lv_obj_t *ui_Music_Player = NULL;
@@ -94,7 +95,6 @@ static void ui_music_player_play_event_cb(lv_event_t *e)
 
 void ui_Music_Player_screen_init(void)
 {
-    ui_screen_scaffold_t page;
     lv_obj_t *prev_button;
     lv_obj_t *next_button;
 
@@ -106,42 +106,89 @@ void ui_Music_Player_screen_init(void)
     (void)music_service_refresh();
 
     ui_Music_Player = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Music_Player, ui_i18n_pick("音乐播放", "Player"), UI_SCREEN_MUSIC_LIST);
+    ui_top_nav_create(ui_Music_Player, UI_TOP_TAB_MUSIC);
+    ui_bottom_nav_create(ui_Music_Player, UI_BOTTOM_TAB_NONE);
 
-    s_music_player_title = ui_create_label(page.content,
+    ui_create_label(ui_Music_Player,
+                    ui_i18n_pick("音乐播放", "Player"),
+                    32,
+                    84,
+                    220,
+                    42,
+                    30,
+                    LV_TEXT_ALIGN_LEFT,
+                    true,
+                    false);
+    ui_create_button(ui_Music_Player,
+                     360,
+                     86,
+                     136,
+                     40,
+                     ui_i18n_pick("返回", "Back"),
+                     20,
+                     UI_SCREEN_MUSIC_LIST,
+                     false);
+
+    s_music_player_title = ui_create_label(ui_Music_Player,
                                            "",
                                            24,
-                                           84,
+                                           166,
                                            480,
                                            120,
                                            36,
                                            LV_TEXT_ALIGN_CENTER,
                                            false,
                                            true);
-    s_music_player_subtitle = ui_create_label(page.content,
+    s_music_player_subtitle = ui_create_label(ui_Music_Player,
                                               "",
                                               44,
-                                              214,
+                                              304,
                                               440,
                                               30,
                                               20,
                                               LV_TEXT_ALIGN_CENTER,
                                               false,
                                               false);
-    s_music_player_state = ui_create_label(page.content,
+    lv_label_set_long_mode(s_music_player_subtitle, LV_LABEL_LONG_DOT);
+    s_music_player_state = ui_create_label(ui_Music_Player,
                                            "",
                                            44,
-                                           282,
+                                           374,
                                            440,
                                            40,
                                            28,
                                            LV_TEXT_ALIGN_CENTER,
                                            false,
                                            false);
+    lv_label_set_long_mode(s_music_player_state, LV_LABEL_LONG_DOT);
 
-    prev_button = ui_create_button(page.content, 32, 520, 136, 56, ui_i18n_pick("上一首", "Prev"), 22, UI_SCREEN_NONE, false);
-    s_music_player_play_button = ui_create_button(page.content, 186, 500, 156, 96, ui_i18n_pick("播放", "Play"), 28, UI_SCREEN_NONE, true);
-    next_button = ui_create_button(page.content, 360, 520, 136, 56, ui_i18n_pick("下一首", "Next"), 22, UI_SCREEN_NONE, false);
+    prev_button = ui_create_button(ui_Music_Player,
+                                   32,
+                                   542,
+                                   136,
+                                   56,
+                                   ui_i18n_pick("上一首", "Prev"),
+                                   22,
+                                   UI_SCREEN_NONE,
+                                   false);
+    s_music_player_play_button = ui_create_button(ui_Music_Player,
+                                                  186,
+                                                  522,
+                                                  156,
+                                                  96,
+                                                  ui_i18n_pick("播放", "Play"),
+                                                  28,
+                                                  UI_SCREEN_NONE,
+                                                  true);
+    next_button = ui_create_button(ui_Music_Player,
+                                   360,
+                                   542,
+                                   136,
+                                   56,
+                                   ui_i18n_pick("下一首", "Next"),
+                                   22,
+                                   UI_SCREEN_NONE,
+                                   false);
 
     lv_obj_add_event_cb(prev_button, ui_music_player_prev_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_music_player_play_button, ui_music_player_play_event_cb, LV_EVENT_CLICKED, NULL);

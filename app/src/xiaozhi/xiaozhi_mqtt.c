@@ -71,6 +71,26 @@ static rt_tick_t g_total_speaking_time = 0;  // 累计讲话时间
 static bool g_is_speaking = false;           // 是否正在讲话
 #define SPEAKING_THRESHOLD_MS (5 * 60 * 1000) // 5分钟阈值 (毫秒)
 
+static bool xz_mqtt_copy_session_id(xiaozhi_context_t *ctx, const char *session_id)
+{
+    size_t len;
+
+    if (!ctx || !session_id)
+    {
+        return false;
+    }
+
+    len = strlen(session_id);
+    if (len == 0U || len >= sizeof(ctx->session_id))
+    {
+        ctx->session_id[0] = '\0';
+        return false;
+    }
+
+    memcpy(ctx->session_id, session_id, len + 1U);
+    return true;
+}
+
 static void xz_mqtt_release_rx_buf(xiaozhi_context_t *ctx, xz_topic_buf_t *buf)
 {
     if (!ctx || !buf)
@@ -356,7 +376,13 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
         ctx->sample_rate = sample_rate;
         ctx->frame_duration = duration;
 
-        strncpy(ctx->session_id, session_id, 9);
+        if (!xz_mqtt_copy_session_id(ctx, session_id))
+        {
+            rt_kprintf("MQTT hello session_id too long or empty\n");
+            cJSON_Delete(root);
+            return;
+        }
+
         mqtt_g_state = kDeviceStateIdle;
         xz_audio_init();
         mqtt_listen_start(&g_xz_context, kListeningModeAlwaysOn);
@@ -535,12 +561,20 @@ void mqtt_listen_stop(xiaozhi_context_t *ctx)
 
 void mqtt_speak_abort(xiaozhi_context_t *ctx, int reason)
 {
-    rt_snprintf(message, 256, "{\"session_id\":\"%s\",\"type\":\"abort\"",
-                ctx->session_id);
     if (reason)
-        strcat(message, ",\"reason\":\"wake_word_detected\"}");
+    {
+        rt_snprintf(message,
+                    sizeof(message),
+                    "{\"session_id\":\"%s\",\"type\":\"abort\",\"reason\":\"wake_word_detected\"}",
+                    ctx->session_id);
+    }
     else
-        strcat(message, "}");
+    {
+        rt_snprintf(message,
+                    sizeof(message),
+                    "{\"session_id\":\"%s\",\"type\":\"abort\"}",
+                    ctx->session_id);
+    }
     LOCK_TCPIP_CORE();
     if (mqtt_client_is_connected(&(ctx->clnt)))
     {

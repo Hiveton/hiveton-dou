@@ -5,6 +5,7 @@
 
 #include "rtthread.h"
 #include "ui.h"
+#include "ui_components.h"
 #include "ui_i18n.h"
 #include "ui_helpers.h"
 
@@ -495,8 +496,8 @@ static void ui_calendar_refresh_timer_cb(lv_timer_t *timer)
 
 void ui_Calendar_screen_init(void)
 {
-    ui_screen_scaffold_t page;
     ui_calendar_layout_t layout;
+    lv_obj_t *content;
     lv_obj_t *summary_card;
     uint16_t row;
     uint16_t col;
@@ -513,10 +514,20 @@ void ui_Calendar_screen_init(void)
     s_calendar_view_month = s_calendar_today.month;
 
     ui_Calendar = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Calendar, ui_i18n_pick("日历", "Calendar"), UI_SCREEN_HOME);
-    ui_calendar_build_layout(page.content, &layout);
+    ui_top_nav_create(ui_Calendar, UI_TOP_TAB_NONE);
+    ui_bottom_nav_create(ui_Calendar, UI_BOTTOM_TAB_CALENDAR);
 
-    s_calendar_refs.title_label = ui_create_label(page.content,
+    content = lv_obj_create(ui_Calendar);
+    lv_obj_remove_style_all(content);
+    lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(content, ui_px_x(0), ui_px_y(63));
+    lv_obj_set_size(content, ui_px_w(528), ui_px_h(647));
+    lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(content, 0, 0);
+
+    ui_calendar_build_layout(content, &layout);
+
+    s_calendar_refs.title_label = ui_create_label(content,
                                                   "",
                                                   layout.title_x,
                                                   layout.title_y,
@@ -526,7 +537,8 @@ void ui_Calendar_screen_init(void)
                                                   LV_TEXT_ALIGN_CENTER,
                                                   false,
                                                   false);
-    s_calendar_refs.meta_label = ui_create_label(page.content,
+    lv_label_set_long_mode(s_calendar_refs.title_label, LV_LABEL_LONG_DOT);
+    s_calendar_refs.meta_label = ui_create_label(content,
                                                  "",
                                                  layout.meta_x,
                                                  layout.meta_y,
@@ -536,8 +548,9 @@ void ui_Calendar_screen_init(void)
                                                  LV_TEXT_ALIGN_CENTER,
                                                  false,
                                                  false);
+    lv_label_set_long_mode(s_calendar_refs.meta_label, LV_LABEL_LONG_DOT);
 
-    s_calendar_refs.today_button = ui_create_button(page.content,
+    s_calendar_refs.today_button = ui_create_button(content,
                                                     layout.today_x,
                                                     layout.today_y,
                                                     layout.today_w,
@@ -549,14 +562,14 @@ void ui_Calendar_screen_init(void)
     lv_obj_add_event_cb(s_calendar_refs.today_button, ui_calendar_today_event_cb, LV_EVENT_CLICKED, NULL);
 
     {
-        lv_obj_t *prev_button = ui_create_nav_button(page.content,
+        lv_obj_t *prev_button = ui_create_nav_button(content,
                                                      layout.prev_x,
                                                      layout.nav_y,
                                                      layout.nav_w,
                                                      layout.nav_h,
                                                      "<",
                                                      UI_SCREEN_NONE);
-        lv_obj_t *next_button = ui_create_nav_button(page.content,
+        lv_obj_t *next_button = ui_create_nav_button(content,
                                                      layout.next_x,
                                                      layout.nav_y,
                                                      layout.nav_w,
@@ -569,7 +582,7 @@ void ui_Calendar_screen_init(void)
 
     for (col = 0; col < UI_CALENDAR_GRID_COLS; ++col)
     {
-        ui_create_label(page.content,
+        ui_create_label(content,
                         ui_i18n_weekday_short((int)col),
                         layout.week_x + (int)col * (layout.week_w + layout.week_gap),
                         layout.week_y,
@@ -582,7 +595,7 @@ void ui_Calendar_screen_init(void)
     }
 
     {
-        lv_obj_t *weekday_line = lv_obj_create(page.content);
+        lv_obj_t *weekday_line = lv_obj_create(content);
         lv_obj_set_pos(weekday_line, layout.week_x, layout.week_y + layout.week_h + 8);
         lv_obj_set_size(weekday_line, layout.summary_w, 1);
         lv_obj_set_style_radius(weekday_line, 0, 0);
@@ -600,7 +613,7 @@ void ui_Calendar_screen_init(void)
             uint16_t index = (uint16_t)(row * UI_CALENDAR_GRID_COLS + col);
             ui_calendar_cell_refs_t *cell = &s_calendar_refs.cells[index];
 
-            cell->card = ui_create_card(page.content,
+            cell->card = ui_create_card(content,
                                         layout.grid_x + (int)col * (layout.cell_w + layout.cell_gap_x),
                                         layout.grid_y + (int)row * (layout.cell_h + layout.cell_gap_y),
                                         layout.cell_w,
@@ -628,7 +641,7 @@ void ui_Calendar_screen_init(void)
         }
     }
 
-    summary_card = ui_create_card(page.content,
+    summary_card = ui_create_card(content,
                                   layout.summary_x,
                                   layout.summary_y,
                                   layout.summary_w,
@@ -646,6 +659,7 @@ void ui_Calendar_screen_init(void)
                                                     LV_TEXT_ALIGN_LEFT,
                                                     false,
                                                     false);
+    lv_label_set_long_mode(s_calendar_refs.summary_label, LV_LABEL_LONG_DOT);
     s_calendar_refs.detail_label = ui_create_label(summary_card,
                                                    "",
                                                    18,

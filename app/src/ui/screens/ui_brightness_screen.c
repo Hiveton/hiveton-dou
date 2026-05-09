@@ -12,18 +12,6 @@ static lv_obj_t *s_brightness_fill = NULL;
 extern void app_set_panel_brightness(rt_uint8_t brightness);
 extern rt_uint8_t app_get_panel_brightness(void);
 
-static const char *ui_brightness_screen_title(void)
-{
-    switch (ui_settings_get_language())
-    {
-    case UI_SETTINGS_LANGUAGE_EN_US:
-        return "Brightness";
-    case UI_SETTINGS_LANGUAGE_ZH_CN:
-    default:
-        return "屏幕亮度";
-    }
-}
-
 static const char *ui_brightness_current_label(void)
 {
     switch (ui_settings_get_language())
@@ -57,18 +45,6 @@ static const char *ui_brightness_increase_label(void)
     case UI_SETTINGS_LANGUAGE_ZH_CN:
     default:
         return "提高亮度";
-    }
-}
-
-static const char *ui_brightness_hint_text(void)
-{
-    switch (ui_settings_get_language())
-    {
-    case UI_SETTINGS_LANGUAGE_EN_US:
-        return "If brightness is off, raising it again resumes from 50%.";
-    case UI_SETTINGS_LANGUAGE_ZH_CN:
-    default:
-        return "关闭后保持熄屏，再次提高亮度会从 50% 恢复。";
     }
 }
 
@@ -113,24 +89,28 @@ static rt_uint8_t ui_brightness_step_down(rt_uint8_t brightness)
     {
         return 0U;
     }
-    if (brightness <= 10U)
+    if (brightness <= 2U)
     {
         return 0U;
     }
-    return (rt_uint8_t)(brightness - 10U);
+    return (rt_uint8_t)(brightness - 2U);
 }
 
 static rt_uint8_t ui_brightness_step_up(rt_uint8_t brightness)
 {
     if (brightness == 0U)
     {
-        return 10U;
+        return 2U;
     }
     if (brightness >= 100U)
     {
         return 100U;
     }
-    return (rt_uint8_t)(brightness + 10U);
+    if (brightness >= 98U)
+    {
+        return 100U;
+    }
+    return (rt_uint8_t)(brightness + 2U);
 }
 
 static void ui_brightness_refresh(void)
@@ -200,7 +180,6 @@ static void ui_brightness_adjust_event_cb(lv_event_t *e)
 
 void ui_Brightness_screen_init(void)
 {
-    ui_screen_scaffold_t page;
     lv_obj_t *panel;
     lv_obj_t *button;
 
@@ -210,9 +189,8 @@ void ui_Brightness_screen_init(void)
     }
 
     ui_Brightness = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Brightness, ui_brightness_screen_title(), UI_SCREEN_SETTINGS);
 
-    panel = ui_create_card(page.content, 0, 0, 528, 653, UI_SCREEN_NONE, false, 0);
+    panel = ui_create_card(ui_Brightness, 0, 0, 528, 792, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(panel, 2, 0);
 
     ui_create_label(panel,
@@ -244,16 +222,6 @@ void ui_Brightness_screen_init(void)
     button = ui_create_button(panel, 280, 224, 204, 50, ui_brightness_increase_label(), 22, UI_SCREEN_NONE, true);
     lv_obj_add_event_cb(button, ui_brightness_adjust_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)1);
 
-    ui_create_label(panel,
-                    ui_brightness_hint_text(),
-                    44,
-                    304,
-                    440,
-                    52,
-                    20,
-                    LV_TEXT_ALIGN_LEFT,
-                    false,
-                    true);
     ui_brightness_refresh();
 }
 

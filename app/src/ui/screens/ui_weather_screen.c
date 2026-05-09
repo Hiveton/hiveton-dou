@@ -4,6 +4,7 @@
 #include "ui.h"
 #include "ui_i18n.h"
 #include "ui_helpers.h"
+#include "ui_components.h"
 #include "ui_runtime_adapter.h"
 #include "ui_dispatch.h"
 #include "drv_lcd.h"
@@ -259,8 +260,9 @@ void ui_Weather_screen_refresh(void)
 
 void ui_Weather_screen_init(void)
 {
-    ui_screen_scaffold_t page;
-    lv_obj_t *metrics_box;
+    lv_obj_t *hero_card;
+    lv_obj_t *metrics_card;
+    lv_obj_t *tip_card;
     lv_obj_t *refresh_button;
 
     if (ui_Weather != NULL)
@@ -269,71 +271,106 @@ void ui_Weather_screen_init(void)
     }
 
     ui_Weather = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Weather, ui_i18n_pick("天气", "Weather"), UI_SCREEN_HOME);
+    ui_top_nav_create(ui_Weather, UI_TOP_TAB_WEATHER);
+    ui_bottom_nav_create(ui_Weather, UI_BOTTOM_TAB_NONE);
 
-    s_weather_location_label = ui_create_label(page.content,
-                                               ui_i18n_pick("天气数据准备中", "Weather is preparing"),
-                                               0,
-                                               46,
-                                               528,
-                                               25,
-                                               22,
-                                               LV_TEXT_ALIGN_CENTER,
-                                               false,
-                                               false);
+    ui_create_label(ui_Weather,
+                    ui_i18n_pick("实时天气", "Weather"),
+                    32,
+                    84,
+                    180,
+                    42,
+                    30,
+                    LV_TEXT_ALIGN_LEFT,
+                    true,
+                    false);
 
-    s_weather_icon = ui_create_image_slot(page.content, 196, 85, 136, 136);
-    ui_img_set_src(s_weather_icon, xiaozhi_weather_get_icon("99"));
-
-    s_weather_temp_label = ui_create_label(page.content,
-                                           "--",
-                                           0,
-                                           224,
-                                           528,
-                                           92,
-                                           76,
-                                           LV_TEXT_ALIGN_CENTER,
-                                           false,
-                                           false);
-    s_weather_summary_label = ui_create_label(page.content,
-                                              ui_i18n_pick("联网后将自动同步当前天气", "Weather syncs automatically when online"),
-                                              0,
-                                              316,
-                                              528,
-                                              28,
-                                              24,
-                                              LV_TEXT_ALIGN_CENTER,
-                                              false,
-                                              false);
-
-    metrics_box = ui_create_card(page.content, 24, 376, 480, 88, UI_SCREEN_NONE, false, 0);
-    s_weather_humidity_label = ui_create_label(metrics_box, ui_i18n_pick("湿度 --", "Humidity --"), 12, 30, 152, 20, 18, LV_TEXT_ALIGN_CENTER, false, false);
-    s_weather_wind_label = ui_create_label(metrics_box, ui_i18n_pick("风向 --", "Wind --"), 164, 30, 152, 20, 18, LV_TEXT_ALIGN_CENTER, false, false);
-    s_weather_feels_like_label = ui_create_label(metrics_box, ui_i18n_pick("体感 --", "Feels Like --"), 316, 30, 152, 20, 18, LV_TEXT_ALIGN_CENTER, false, false);
-
-    s_weather_tip_label = ui_create_label(page.content,
-                                          ui_i18n_pick("可以点击底部按钮手动刷新一次。", "Tap the button below to refresh once."),
-                                          41,
-                                          492,
-                                          446,
-                                          34,
-                                          22,
-                                          LV_TEXT_ALIGN_CENTER,
-                                          false,
-                                          true);
-    s_weather_last_update_label = ui_create_label(page.content,
+    s_weather_last_update_label = ui_create_label(ui_Weather,
                                                   ui_i18n_pick("上次更新: --:--", "Last Update: --:--"),
-                                                  0,
-                                                  548,
-                                                  528,
+                                                  264,
+                                                  94,
+                                                  232,
                                                   24,
-                                                  20,
-                                                  LV_TEXT_ALIGN_CENTER,
+                                                  18,
+                                                  LV_TEXT_ALIGN_RIGHT,
                                                   false,
                                                   false);
+    lv_label_set_long_mode(s_weather_last_update_label, LV_LABEL_LONG_DOT);
 
-    refresh_button = ui_create_button(page.content, 164, 592, 200, 52, ui_i18n_pick("立即刷新", "Refresh"), 24, UI_SCREEN_NONE, true);
+    hero_card = ui_create_card(ui_Weather, 24, 138, 480, 250, UI_SCREEN_NONE, false, 0);
+    lv_obj_set_style_border_width(hero_card, 2, 0);
+
+    s_weather_location_label = ui_create_label(hero_card,
+                                               ui_i18n_pick("天气数据准备中", "Weather is preparing"),
+                                               24,
+                                               22,
+                                               210,
+                                               25,
+                                               22,
+                                               LV_TEXT_ALIGN_LEFT,
+                                               false,
+                                               false);
+    lv_label_set_long_mode(s_weather_location_label, LV_LABEL_LONG_DOT);
+
+    s_weather_summary_label = ui_create_label(hero_card,
+                                              ui_i18n_pick("联网后将自动同步当前天气", "Weather syncs automatically when online"),
+                                              24,
+                                              58,
+                                              220,
+                                              34,
+                                              22,
+                                              LV_TEXT_ALIGN_LEFT,
+                                              false,
+                                              true);
+
+    s_weather_icon = ui_create_image_slot(hero_card, 304, 24, 128, 128);
+    ui_img_set_src(s_weather_icon, xiaozhi_weather_get_icon("99"));
+
+    s_weather_temp_label = ui_create_label(hero_card,
+                                           "--",
+                                           20,
+                                           116,
+                                           250,
+                                           92,
+                                           76,
+                                           LV_TEXT_ALIGN_LEFT,
+                                           false,
+                                           false);
+
+    refresh_button = ui_create_button(hero_card, 304, 174, 136, 48, ui_i18n_pick("立即刷新", "Refresh"), 22, UI_SCREEN_NONE, true);
     lv_obj_add_event_cb(refresh_button, ui_weather_refresh_event_cb, LV_EVENT_CLICKED, NULL);
+
+    metrics_card = ui_create_card(ui_Weather, 24, 408, 480, 106, UI_SCREEN_NONE, false, 0);
+    lv_obj_set_style_border_width(metrics_card, 2, 0);
+    s_weather_humidity_label = ui_create_label(metrics_card, ui_i18n_pick("湿度 --", "Humidity --"), 12, 38, 152, 28, 20, LV_TEXT_ALIGN_CENTER, false, false);
+    s_weather_wind_label = ui_create_label(metrics_card, ui_i18n_pick("风向 --", "Wind --"), 164, 38, 152, 28, 20, LV_TEXT_ALIGN_CENTER, false, false);
+    s_weather_feels_like_label = ui_create_label(metrics_card, ui_i18n_pick("体感 --", "Feels Like --"), 316, 38, 152, 28, 20, LV_TEXT_ALIGN_CENTER, false, false);
+    lv_label_set_long_mode(s_weather_humidity_label, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(s_weather_wind_label, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(s_weather_feels_like_label, LV_LABEL_LONG_DOT);
+
+    tip_card = ui_create_card(ui_Weather, 24, 536, 480, 120, UI_SCREEN_NONE, false, 0);
+    lv_obj_set_style_border_width(tip_card, 2, 0);
+    ui_create_label(tip_card,
+                    ui_i18n_pick("出行建议", "Tips"),
+                    24,
+                    18,
+                    180,
+                    28,
+                    24,
+                    LV_TEXT_ALIGN_LEFT,
+                    true,
+                    false);
+    s_weather_tip_label = ui_create_label(tip_card,
+                                          ui_i18n_pick("可以点击底部按钮手动刷新一次。", "Tap the button below to refresh once."),
+                                          24,
+                                          56,
+                                          432,
+                                          46,
+                                          21,
+                                          LV_TEXT_ALIGN_LEFT,
+                                          false,
+                                          true);
 
     xiaozhi_weather_request_refresh();
     ui_weather_refresh_content();

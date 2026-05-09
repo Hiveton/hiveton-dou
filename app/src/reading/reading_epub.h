@@ -75,6 +75,10 @@ bool reading_epub_decode_image(const char *epub_path,
                                uint16_t max_height,
                                lv_image_dsc_t *out_image);
 
+bool reading_epub_find_cover_image(const char *epub_path,
+                                   char *internal_path,
+                                   size_t internal_path_size);
+
 bool reading_epub_probe_image_size(const char *epub_path,
                                    const char *internal_path,
                                    uint16_t *width_out,

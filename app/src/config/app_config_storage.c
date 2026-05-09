@@ -134,6 +134,7 @@ static rt_err_t app_config_storage_write_all(int fd, const char *data, size_t le
 static rt_err_t app_config_storage_write_single_path(const char *path, const char *data, size_t len)
 {
     int fd;
+    int written;
     rt_err_t result;
     char temp_path[APP_CONFIG_STORAGE_PATH_MAX];
 
@@ -142,7 +143,8 @@ static rt_err_t app_config_storage_write_single_path(const char *path, const cha
         return -RT_EINVAL;
     }
 
-    if (snprintf(temp_path, sizeof(temp_path), "%s%s", path, APP_CONFIG_STORAGE_TEMP_SUFFIX) >= (int)sizeof(temp_path))
+    written = snprintf(temp_path, sizeof(temp_path), "%s%s", path, APP_CONFIG_STORAGE_TEMP_SUFFIX);
+    if (written < 0 || (size_t)written >= sizeof(temp_path))
     {
         return -RT_EFULL;
     }
@@ -154,6 +156,10 @@ static rt_err_t app_config_storage_write_single_path(const char *path, const cha
     }
 
     result = app_config_storage_write_all(fd, data, len);
+    if (result == RT_EOK && fsync(fd) != 0)
+    {
+        result = -RT_EIO;
+    }
     if (close(fd) != 0 && result == RT_EOK)
     {
         result = -RT_EIO;
@@ -169,27 +175,8 @@ static rt_err_t app_config_storage_write_single_path(const char *path, const cha
         return RT_EOK;
     }
 
-    (void)unlink(path);
-    if (rename(temp_path, path) == 0)
-    {
-        return RT_EOK;
-    }
-
     (void)unlink(temp_path);
-
-    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0)
-    {
-        return -RT_EIO;
-    }
-
-    result = app_config_storage_write_all(fd, data, len);
-    if (close(fd) != 0 && result == RT_EOK)
-    {
-        result = -RT_EIO;
-    }
-
-    return result;
+    return -RT_EIO;
 }
 
 rt_err_t app_config_storage_load(const char *preferred_path,
@@ -215,7 +202,8 @@ rt_err_t app_config_storage_load(const char *preferred_path,
         {
             if (out_path != NULL && out_path_size > 0U)
             {
-                if (snprintf(out_path, out_path_size, "%s", preferred_path) >= (int)out_path_size)
+                int written = snprintf(out_path, out_path_size, "%s", preferred_path);
+                if (written < 0 || (size_t)written >= out_path_size)
                 {
                     return -RT_EFULL;
                 }
@@ -242,7 +230,8 @@ rt_err_t app_config_storage_load(const char *preferred_path,
         {
             if (out_path != NULL && out_path_size > 0U)
             {
-                if (snprintf(out_path, out_path_size, "%s", path) >= (int)out_path_size)
+                int written = snprintf(out_path, out_path_size, "%s", path);
+                if (written < 0 || (size_t)written >= out_path_size)
                 {
                     return -RT_EFULL;
                 }
@@ -273,7 +262,8 @@ rt_err_t app_config_storage_save(const char *preferred_path,
         {
             if (saved_path != NULL && saved_path_size > 0U)
             {
-                if (snprintf(saved_path, saved_path_size, "%s", preferred_path) >= (int)saved_path_size)
+                int written = snprintf(saved_path, saved_path_size, "%s", preferred_path);
+                if (written < 0 || (size_t)written >= saved_path_size)
                 {
                     return -RT_EFULL;
                 }
@@ -297,7 +287,8 @@ rt_err_t app_config_storage_save(const char *preferred_path,
         {
             if (saved_path != NULL && saved_path_size > 0U)
             {
-                if (snprintf(saved_path, saved_path_size, "%s", path) >= (int)saved_path_size)
+                int written = snprintf(saved_path, saved_path_size, "%s", path);
+                if (written < 0 || (size_t)written >= saved_path_size)
                 {
                     return -RT_EFULL;
                 }

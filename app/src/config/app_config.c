@@ -98,6 +98,31 @@ static void app_config_copy_string(char *dst, size_t dst_size, const char *src)
     (void)snprintf(dst, dst_size, "%s", src);
 }
 
+static bool app_config_copy_string_checked(char *dst, size_t dst_size, const char *src)
+{
+    int written;
+
+    if (dst == NULL || dst_size == 0U)
+    {
+        return false;
+    }
+
+    if (src == NULL)
+    {
+        dst[0] = '\0';
+        return true;
+    }
+
+    written = snprintf(dst, dst_size, "%s", src);
+    if (written < 0 || (size_t)written >= dst_size)
+    {
+        dst[0] = '\0';
+        return false;
+    }
+
+    return true;
+}
+
 static int app_config_ascii_casecmp(const char *lhs, const char *rhs)
 {
     unsigned char cl;
@@ -448,7 +473,9 @@ static void app_config_apply_kv(app_config_t *cfg, const char *key, const char *
 
     if (strcmp(key, "reading.font_path") == 0)
     {
-        app_config_copy_string(cfg->reading.font_path, sizeof(cfg->reading.font_path), value);
+        (void)app_config_copy_string_checked(cfg->reading.font_path,
+                                             sizeof(cfg->reading.font_path),
+                                             value);
         return;
     }
 
@@ -490,7 +517,9 @@ static void app_config_apply_kv(app_config_t *cfg, const char *key, const char *
 
     if (strcmp(key, "wallpaper.path") == 0)
     {
-        app_config_copy_string(cfg->wallpaper.path, sizeof(cfg->wallpaper.path), value);
+        (void)app_config_copy_string_checked(cfg->wallpaper.path,
+                                             sizeof(cfg->wallpaper.path),
+                                             value);
         return;
     }
 
@@ -654,7 +683,13 @@ rt_err_t app_config_load(void)
     s_dirty = false;
     if (found)
     {
-        app_config_copy_string(s_storage_path, sizeof(s_storage_path), s_storage_temp_path);
+        if (!app_config_copy_string_checked(s_storage_path,
+                                            sizeof(s_storage_path),
+                                            s_storage_temp_path))
+        {
+            app_config_unlock();
+            return -RT_EFULL;
+        }
     }
     else
     {
@@ -831,7 +866,13 @@ rt_err_t app_config_save(void)
         return result;
     }
 
-    app_config_copy_string(s_storage_path, sizeof(s_storage_path), s_storage_temp_path);
+    if (!app_config_copy_string_checked(s_storage_path,
+                                        sizeof(s_storage_path),
+                                        s_storage_temp_path))
+    {
+        app_config_unlock();
+        return -RT_EFULL;
+    }
     s_loaded_from_file = true;
     s_dirty = false;
     app_config_unlock();
@@ -1164,6 +1205,13 @@ void app_config_get_reading_font_path(char *out, size_t out_size)
 
 rt_err_t app_config_set_reading_font_path(const char *path)
 {
+    char checked_path[sizeof(s_config.reading.font_path)];
+
+    if (!app_config_copy_string_checked(checked_path, sizeof(checked_path), path))
+    {
+        return -RT_EFULL;
+    }
+
     if (app_config_lock() != RT_EOK)
     {
         return -RT_ERROR;
@@ -1174,7 +1222,7 @@ rt_err_t app_config_set_reading_font_path(const char *path)
         app_config_set_defaults(&s_config);
         s_config_ready = true;
     }
-    app_config_copy_string(s_config.reading.font_path, sizeof(s_config.reading.font_path), path);
+    app_config_copy_string(s_config.reading.font_path, sizeof(s_config.reading.font_path), checked_path);
     app_config_touch_dirty_locked();
     app_config_unlock();
     return RT_EOK;
@@ -1352,6 +1400,13 @@ void app_config_get_wallpaper_path(char *out, size_t out_size)
 
 rt_err_t app_config_set_wallpaper_path(const char *path)
 {
+    char checked_path[sizeof(s_config.wallpaper.path)];
+
+    if (!app_config_copy_string_checked(checked_path, sizeof(checked_path), path))
+    {
+        return -RT_EFULL;
+    }
+
     if (app_config_lock() != RT_EOK)
     {
         return -RT_ERROR;
@@ -1362,7 +1417,7 @@ rt_err_t app_config_set_wallpaper_path(const char *path)
         app_config_set_defaults(&s_config);
         s_config_ready = true;
     }
-    app_config_copy_string(s_config.wallpaper.path, sizeof(s_config.wallpaper.path), path);
+    app_config_copy_string(s_config.wallpaper.path, sizeof(s_config.wallpaper.path), checked_path);
     app_config_sanitize(&s_config);
     app_config_touch_dirty_locked();
     app_config_unlock();

@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "ui.h"
+#include "ui_components.h"
 #include "ui_helpers.h"
 #include "ui_i18n.h"
 
@@ -241,7 +242,7 @@ static void pomodoro_refresh_ui(void)
 
     if (s_pomodoro_ui.subtitle_label != NULL)
     {
-        lv_label_set_text(s_pomodoro_ui.subtitle_label, ui_i18n_pick("专注当下  ·  提升效率", "Focus now  ·  Improve efficiency"));
+        lv_label_set_text(s_pomodoro_ui.subtitle_label, ui_i18n_pick("25分钟专注", "25 min focus"));
     }
 
     if (s_pomodoro_ui.hint_label != NULL)
@@ -344,6 +345,40 @@ static lv_obj_t *pomodoro_create_action_button(lv_obj_t *parent,
     return button;
 }
 
+static lv_obj_t *pomodoro_create_text_action_button(lv_obj_t *parent,
+                                                    int x,
+                                                    int y,
+                                                    int w,
+                                                    int h,
+                                                    bool filled,
+                                                    pomodoro_action_t action,
+                                                    int font_size,
+                                                    lv_obj_t **out_label)
+{
+    lv_obj_t *button = lv_button_create(parent);
+    lv_obj_t *label;
+
+    lv_obj_set_pos(button, ui_px_x(x), ui_px_y(y));
+    lv_obj_set_size(button, ui_px_w(w), ui_px_h(h));
+    pomodoro_style_box(button, filled, 12, filled ? 0 : 2);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(button, pomodoro_action_event_cb, LV_EVENT_CLICKED, (void *)(uintptr_t)action);
+
+    label = lv_label_create(button);
+    lv_label_set_text(label, "");
+    lv_obj_set_style_text_font(label, ui_font_get((uint16_t)font_size), 0);
+    lv_obj_set_style_text_color(label, filled ? lv_color_hex(0xFFFFFF) : lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(label, LV_OPA_TRANSP, 0);
+    lv_obj_center(label);
+
+    if (out_label != NULL)
+    {
+        *out_label = label;
+    }
+
+    return button;
+}
+
 static void pomodoro_timer_cb(lv_timer_t *timer)
 {
     (void)timer;
@@ -372,12 +407,7 @@ static void pomodoro_action_event_cb(lv_event_t *e)
 
 void ui_Pomodoro_screen_init(void)
 {
-    ui_screen_scaffold_t page;
-    lv_obj_t *badge;
     lv_obj_t *dot;
-    lv_obj_t *hint_box;
-    lv_obj_t *img;
-    lv_obj_t *parent;
 
     if (ui_Pomodoro != NULL)
     {
@@ -385,89 +415,107 @@ void ui_Pomodoro_screen_init(void)
     }
 
     ui_Pomodoro = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Pomodoro, ui_i18n_pick("番茄时间", "Pomodoro"), UI_SCREEN_TIME_MANAGE);
-    parent = page.content;
+    lv_obj_set_style_bg_color(ui_Pomodoro, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_bg_opa(ui_Pomodoro, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(ui_Pomodoro, LV_OBJ_FLAG_SCROLLABLE);
 
-    badge = pomodoro_create_box(parent, 203, 21, 122, 37, 19, 2, false);
-    dot = pomodoro_create_box(badge, 19, 12, 13, 13, 7, 0, true);
+    ui_top_nav_create(ui_Pomodoro, UI_TOP_TAB_POMODORO);
+
+    ui_create_label(ui_Pomodoro,
+                    ui_i18n_pick("番茄时间", "Pomodoro"),
+                    28,
+                    94,
+                    250,
+                    52,
+                    38,
+                    LV_TEXT_ALIGN_LEFT,
+                    false,
+                    false);
+
+    s_pomodoro_ui.status_label = ui_create_label(ui_Pomodoro,
+                                                 "",
+                                                 28,
+                                                 149,
+                                                 472,
+                                                 28,
+                                                 20,
+                                                 LV_TEXT_ALIGN_CENTER,
+                                                 false,
+                                                 false);
+    lv_label_set_long_mode(s_pomodoro_ui.status_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(s_pomodoro_ui.status_label, lv_color_hex(0x666666), 0);
+
+    s_pomodoro_ui.badge_label = ui_create_label(ui_Pomodoro,
+                                                "",
+                                                0,
+                                                181,
+                                                528,
+                                                48,
+                                                36,
+                                                LV_TEXT_ALIGN_CENTER,
+                                                false,
+                                                false);
+    lv_label_set_long_mode(s_pomodoro_ui.badge_label, LV_LABEL_LONG_DOT);
+
+    dot = pomodoro_create_box(ui_Pomodoro, 258, 243, 12, 12, 6, 0, true);
     lv_obj_set_style_border_width(dot, 0, 0);
-    s_pomodoro_ui.badge_label = ui_create_label(badge, "", 46, 6, 62, 24, 24, LV_TEXT_ALIGN_LEFT, false, false);
 
-    s_pomodoro_ui.subtitle_label = ui_create_label(parent,
-                                                   "",
-                                                   0,
-                                                   82,
-                                                   528,
-                                                   32,
-                                                   27,
-                                                   LV_TEXT_ALIGN_CENTER,
-                                                   false,
-                                                   false);
-
-    s_pomodoro_ui.time_label = ui_create_label(parent,
+    s_pomodoro_ui.time_label = ui_create_label(ui_Pomodoro,
                                                "25:00",
                                                0,
-                                               142,
+                                               289,
                                                528,
-                                               88,
-                                               74,
+                                               136,
+                                               122,
                                                LV_TEXT_ALIGN_CENTER,
                                                false,
                                                false);
 
-    img = ui_create_image_slot(parent, 196, 242, 136, 158);
-    ui_img_set_src(img, &pomodoro_mascot);
+    s_pomodoro_ui.subtitle_label = ui_create_label(ui_Pomodoro,
+                                                   "",
+                                                   0,
+                                                   426,
+                                                   528,
+                                                   42,
+                                                   32,
+                                                   LV_TEXT_ALIGN_CENTER,
+                                                   false,
+                                                   false);
+    lv_label_set_long_mode(s_pomodoro_ui.subtitle_label, LV_LABEL_LONG_DOT);
 
-    s_pomodoro_ui.status_label = ui_create_label(parent,
-                                                 "",
-                                                 0,
-                                                 411,
-                                                 528,
-                                                 32,
-                                                 26,
-                                                 LV_TEXT_ALIGN_CENTER,
-                                                 false,
-                                                 false);
+    s_pomodoro_ui.primary_button = pomodoro_create_text_action_button(ui_Pomodoro,
+                                                                      111,
+                                                                      525,
+                                                                      307,
+                                                                      64,
+                                                                      true,
+                                                                      POMODORO_ACTION_PRIMARY,
+                                                                      39,
+                                                                      &s_pomodoro_ui.primary_button_label);
+    s_pomodoro_ui.reset_button = pomodoro_create_text_action_button(ui_Pomodoro,
+                                                                   111,
+                                                                   606,
+                                                                   307,
+                                                                   63,
+                                                                   false,
+                                                                   POMODORO_ACTION_RESET,
+                                                                   34,
+                                                                   &s_pomodoro_ui.reset_button_label);
 
-    hint_box = pomodoro_create_box(parent, 63, 443, 402, 100, 11, 2, false);
-    img = ui_create_image_slot(hint_box, 22, 22, 58, 64);
-    ui_img_set_src(img, &pomodoro_bulb);
-    ui_create_label(hint_box, ui_i18n_pick("小提示", "Tips"), 103, 25, 220, 34, 28, LV_TEXT_ALIGN_LEFT, false, false);
-    s_pomodoro_ui.hint_label = ui_create_label(hint_box, "", 103, 63, 280, 34, 20, LV_TEXT_ALIGN_LEFT, false, true);
-    lv_obj_set_style_text_line_space(s_pomodoro_ui.hint_label, 8, 0);
+    s_pomodoro_ui.hint_label = ui_create_label(ui_Pomodoro,
+                                               "",
+                                               52,
+                                               681,
+                                               424,
+                                               38,
+                                               17,
+                                               LV_TEXT_ALIGN_CENTER,
+                                               false,
+                                               true);
+    lv_label_set_long_mode(s_pomodoro_ui.hint_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(s_pomodoro_ui.hint_label, lv_color_hex(0x666666), 0);
 
-    s_pomodoro_ui.primary_button = pomodoro_create_action_button(parent,
-                                                                 58,
-                                                                 562,
-                                                                 223,
-                                                                 62,
-                                                                 true,
-                                                                 POMODORO_ACTION_PRIMARY,
-                                                                 &pomodoro_play,
-                                                                 42,
-                                                                 15,
-                                                                 28,
-                                                                 34,
-                                                                 83,
-                                                                 130,
-                                                                 31,
-                                                                 &s_pomodoro_ui.primary_button_label);
-    s_pomodoro_ui.reset_button = pomodoro_create_action_button(parent,
-                                                              303,
-                                                              562,
-                                                              167,
-                                                              62,
-                                                              false,
-                                                              POMODORO_ACTION_RESET,
-                                                              &pomodoro_reset,
-                                                              39,
-                                                              14,
-                                                              34,
-                                                              34,
-                                                              84,
-                                                              70,
-                                                              31,
-                                                              &s_pomodoro_ui.reset_button_label);
+    ui_bottom_nav_create(ui_Pomodoro, UI_BOTTOM_TAB_NONE);
 
     s_pomodoro_ui.screen = ui_Pomodoro;
     pomodoro_update_timer_state();

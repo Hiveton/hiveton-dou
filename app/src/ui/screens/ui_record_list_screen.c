@@ -11,6 +11,7 @@
 lv_obj_t *ui_Record_List = NULL;
 
 #define UI_RECORD_LIST_VISIBLE_COUNT 6U
+#define UI_RECORD_LIST_CONTENT_HEIGHT 650
 
 typedef struct
 {
@@ -29,6 +30,32 @@ typedef struct
 
 static ui_record_list_refs_t s_record_list_refs;
 static ui_record_list_state_t s_record_list_state;
+
+static bool ui_record_list_copy_path(char *buffer, size_t buffer_size, const char *path)
+{
+    size_t path_len;
+
+    if (buffer == NULL || buffer_size == 0U)
+    {
+        return false;
+    }
+
+    if (path == NULL)
+    {
+        buffer[0] = '\0';
+        return true;
+    }
+
+    path_len = strlen(path);
+    if (path_len >= buffer_size)
+    {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    memcpy(buffer, path, path_len + 1U);
+    return true;
+}
 
 static void ui_record_list_format_time(time_t mtime, char *buffer, size_t buffer_size)
 {
@@ -122,10 +149,9 @@ static void ui_record_list_select_index(size_t index)
         {
             recorder_service_stop_playback();
             s_record_list_state.selected_index = (size_t)-1;
-            rt_strncpy(s_record_list_state.suppressed_path,
-                       path,
-                       sizeof(s_record_list_state.suppressed_path) - 1U);
-            s_record_list_state.suppressed_path[sizeof(s_record_list_state.suppressed_path) - 1U] = '\0';
+            (void)ui_record_list_copy_path(s_record_list_state.suppressed_path,
+                                           sizeof(s_record_list_state.suppressed_path),
+                                           path);
         }
         else if (recorder_service_play_file(path))
         {
@@ -389,7 +415,7 @@ void ui_Record_List_screen_init(void)
     s_record_list_refs.list_panel = lv_obj_create(page.content);
     lv_obj_remove_flag(s_record_list_refs.list_panel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_pos(s_record_list_refs.list_panel, 0, 0);
-    lv_obj_set_size(s_record_list_refs.list_panel, ui_px_w(528), ui_px_h(653));
+    lv_obj_set_size(s_record_list_refs.list_panel, ui_px_w(528), ui_px_h(UI_RECORD_LIST_CONTENT_HEIGHT));
     lv_obj_set_style_bg_opa(s_record_list_refs.list_panel, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_record_list_refs.list_panel, 0, 0);
     lv_obj_set_style_pad_all(s_record_list_refs.list_panel, 0, 0);
@@ -405,6 +431,7 @@ void ui_Record_List_screen_init(void)
                                                     LV_TEXT_ALIGN_LEFT,
                                                     false,
                                                     false);
+    lv_label_set_long_mode(s_record_list_refs.page_label, LV_LABEL_LONG_DOT);
 
     ui_record_list_render();
 }

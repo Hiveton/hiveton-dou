@@ -9,6 +9,7 @@
 
 #define READING_STATE_FILE_NAME "reading_state.cfg"
 #define READING_STATE_TEMP_SUFFIX ".tmp"
+#define READING_STATE_BACKUP_SUFFIX ".bak"
 #define READING_STATE_STORAGE_PATH_MAX 320U
 #define READING_STATE_LINE_MAX 2048U
 
@@ -537,6 +538,7 @@ static rt_err_t reading_state_write_file_locked(int fd)
 static rt_err_t reading_state_save_to_path_locked(const char *path)
 {
     char temp_path[READING_STATE_STORAGE_PATH_MAX];
+    char backup_path[READING_STATE_STORAGE_PATH_MAX];
     int written;
     int fd;
     rt_err_t result;
@@ -551,6 +553,11 @@ static rt_err_t reading_state_save_to_path_locked(const char *path)
     {
         return -RT_EFULL;
     }
+    written = snprintf(backup_path, sizeof(backup_path), "%s%s", path, READING_STATE_BACKUP_SUFFIX);
+    if (written < 0 || (size_t)written >= sizeof(backup_path))
+    {
+        return -RT_EFULL;
+    }
 
     fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0)
@@ -559,6 +566,20 @@ static rt_err_t reading_state_save_to_path_locked(const char *path)
     }
 
     result = reading_state_write_file_locked(fd);
+    if (result != RT_EOK)
+    {
+        close(fd);
+        (void)unlink(temp_path);
+        return result;
+    }
+
+    if (fsync(fd) != 0)
+    {
+        close(fd);
+        (void)unlink(temp_path);
+        return -RT_EIO;
+    }
+
     if (close(fd) != 0 && result == RT_EOK)
     {
         result = -RT_EIO;
@@ -575,12 +596,31 @@ static rt_err_t reading_state_save_to_path_locked(const char *path)
         return RT_EOK;
     }
 
-    (void)unlink(path);
+    bool backup_created = reading_state_can_read_path(path);
+
+    if (backup_created)
+    {
+        (void)unlink(backup_path);
+        if (rename(path, backup_path) != 0)
+        {
+            (void)unlink(temp_path);
+            return -RT_EIO;
+        }
+    }
+
     if (rename(temp_path, path) == 0)
     {
+        if (backup_created)
+        {
+            (void)unlink(backup_path);
+        }
         return RT_EOK;
     }
 
+    if (backup_created)
+    {
+        (void)rename(backup_path, path);
+    }
     (void)unlink(temp_path);
     return -RT_EIO;
 }
@@ -611,7 +651,12 @@ static rt_err_t reading_state_save_locked(void)
         result = reading_state_save_to_path_locked(path);
         if (result == RT_EOK)
         {
-            (void)reading_state_copy_path(s_reading_state_db.storage_path, sizeof(s_reading_state_db.storage_path), path);
+            if (!reading_state_copy_path(s_reading_state_db.storage_path,
+                                         sizeof(s_reading_state_db.storage_path),
+                                         path))
+            {
+                return -RT_EFULL;
+            }
             s_reading_state_db.dirty = false;
             return RT_EOK;
         }
@@ -1022,8 +1067,16 @@ rt_err_t reading_state_reload(void)
     found = reading_state_find_existing_path_locked(path, sizeof(path));
     if (found)
     {
-        (void)reading_state_copy_path(s_reading_state_db.storage_path, sizeof(s_reading_state_db.storage_path), path);
-        result = reading_state_load_from_path_locked(path);
+        if (!reading_state_copy_path(s_reading_state_db.storage_path,
+                                     sizeof(s_reading_state_db.storage_path),
+                                     path))
+        {
+            result = -RT_EFULL;
+        }
+        else
+        {
+            result = reading_state_load_from_path_locked(path);
+        }
     }
     else
     {

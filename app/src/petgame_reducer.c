@@ -13,6 +13,8 @@
 #define PETGAME_GROWTH_PER_AI 4U
 #define PETGAME_GROWTH_PER_FEED 3U
 #define PETGAME_GROWTH_PER_AFFECTION 2U
+#define PETGAME_GROWTH_PER_PLAY 3U
+#define PETGAME_GROWTH_PER_CLEAN 1U
 #define PETGAME_FEED_GAIN_PER_READING_SECOND 60U
 #define PETGAME_FEED_GAIN_PER_AI_INTERACTION 1U
 #define PETGAME_FEED_BALANCE_INITIAL 3U
@@ -22,6 +24,8 @@
 #define PETGAME_HUNGER_DECAY_SECONDS 1800U
 #define PETGAME_ENERGY_DECAY_SECONDS 1200U
 #define PETGAME_MOOD_DECAY_SECONDS 900U
+#define PETGAME_CLEANLINESS_DECAY_SECONDS 2400U
+#define PETGAME_COMPANION_DAY_SECONDS 86400U
 #define PETGAME_ENERGY_RECOVER_READING_SECONDS 1800U
 #define PETGAME_MOOD_RECOVER_READING_SECONDS 720U
 
@@ -71,8 +75,15 @@ static const petgame_state_t s_petgame_default_state = {
     .growth_level = 0U,
     .mood_level = 82U,
     .hunger_level = 100U,
-    .energy_level = 100U,
+    .energy_level = 78U,
+    .cleanliness_level = 85U,
+    .reserved0 = 0U,
+    .reserved1 = 0U,
     .feed_balance = PETGAME_FEED_BALANCE_INITIAL,
+    .play_count = 0U,
+    .clean_count = 0U,
+    .companion_days = 1U,
+    .companion_elapsed_seconds = 0U,
 };
 
 static petgame_state_t s_petgame_state = {
@@ -85,8 +96,15 @@ static petgame_state_t s_petgame_state = {
     .growth_level = 0U,
     .mood_level = 82U,
     .hunger_level = 100U,
-    .energy_level = 100U,
+    .energy_level = 78U,
+    .cleanliness_level = 85U,
+    .reserved0 = 0U,
+    .reserved1 = 0U,
     .feed_balance = PETGAME_FEED_BALANCE_INITIAL,
+    .play_count = 0U,
+    .clean_count = 0U,
+    .companion_days = 1U,
+    .companion_elapsed_seconds = 0U,
 };
 static bool s_petgame_dirty = false;
 static bool s_petgame_inited = false;
@@ -97,6 +115,7 @@ static petgame_init_state_t s_init_state = PETGAME_NOT_READY;
 static uint32_t s_petgame_hunger_decay_seconds = 0U;
 static uint32_t s_petgame_energy_decay_seconds = 0U;
 static uint32_t s_petgame_mood_decay_seconds = 0U;
+static uint32_t s_petgame_cleanliness_decay_seconds = 0U;
 static petgame_activity_type_t s_activity_events[PETGAME_ACTIVITY_EVENT_QUEUE_CAPACITY];
 static uint8_t s_activity_event_head = 0U;
 static uint8_t s_activity_event_tail = 0U;
@@ -325,6 +344,16 @@ static void petgame_recompute_from_state(petgame_state_t *state)
         state->energy_level = PETGAME_MAX_STATUS;
     }
 
+    if (state->cleanliness_level > PETGAME_MAX_STATUS)
+    {
+        state->cleanliness_level = PETGAME_MAX_STATUS;
+    }
+
+    if (state->companion_days == 0U)
+    {
+        state->companion_days = 1U;
+    }
+
     petgame_recompute_level(state);
 }
 
@@ -357,6 +386,14 @@ static void petgame_apply_growth_decay_or_recover(uint32_t elapsed_seconds)
     if (!s_petgame_inited || (elapsed_seconds == 0U))
     {
         return;
+    }
+
+    petgame_saturating_add_u32(&s_petgame_state.companion_elapsed_seconds, elapsed_seconds);
+    while (s_petgame_state.companion_elapsed_seconds >= PETGAME_COMPANION_DAY_SECONDS)
+    {
+        s_petgame_state.companion_elapsed_seconds -= PETGAME_COMPANION_DAY_SECONDS;
+        petgame_saturating_inc_u32(&s_petgame_state.companion_days);
+        petgame_mark_dirty();
     }
 
     if (s_petgame_reading_mode)
@@ -412,6 +449,16 @@ static void petgame_apply_growth_decay_or_recover(uint32_t elapsed_seconds)
             petgame_mark_dirty();
         }
     }
+
+    s_petgame_cleanliness_decay_seconds += elapsed_seconds;
+    while (s_petgame_cleanliness_decay_seconds >= PETGAME_CLEANLINESS_DECAY_SECONDS)
+    {
+        s_petgame_cleanliness_decay_seconds -= PETGAME_CLEANLINESS_DECAY_SECONDS;
+        if (petgame_change_u8(&s_petgame_state.cleanliness_level, -1))
+        {
+            petgame_mark_dirty();
+        }
+    }
 }
 
 const char *petgame_get_level_name(void)
@@ -447,6 +494,16 @@ uint32_t petgame_get_feed_balance(void)
     }
 
     return s_petgame_state.feed_balance;
+}
+
+uint32_t petgame_get_companion_days(void)
+{
+    if (!s_petgame_inited)
+    {
+        return 1U;
+    }
+
+    return (s_petgame_state.companion_days == 0U) ? 1U : s_petgame_state.companion_days;
 }
 
 void petgame_set_reading_active(bool active)
@@ -513,6 +570,15 @@ void petgame_init(void)
                                         (loaded_state.reading_seconds / PETGAME_FEED_GAIN_PER_READING_SECOND) +
                                         (loaded_state.ai_interaction_count * PETGAME_FEED_GAIN_PER_AI_INTERACTION);
         }
+
+        if (loaded_state.cleanliness_level == 0U)
+        {
+            loaded_state.cleanliness_level = s_petgame_default_state.cleanliness_level;
+        }
+        if (loaded_state.companion_days == 0U)
+        {
+            loaded_state.companion_days = s_petgame_default_state.companion_days;
+        }
     }
     else if (loaded_state.version > PETGAME_DATA_VERSION)
     {
@@ -521,7 +587,8 @@ void petgame_init(void)
 
     if ((loaded_state.mood_level == 0U) ||
         (loaded_state.hunger_level == 0U) ||
-        (loaded_state.energy_level == 0U))
+        (loaded_state.energy_level == 0U) ||
+        (loaded_state.cleanliness_level == 0U))
     {
         if (loaded_state.version <= PETGAME_DATA_VERSION)
         {
@@ -536,6 +603,10 @@ void petgame_init(void)
             if (loaded_state.energy_level == 0U)
             {
                 loaded_state.energy_level = s_petgame_default_state.energy_level;
+            }
+            if (loaded_state.cleanliness_level == 0U)
+            {
+                loaded_state.cleanliness_level = s_petgame_default_state.cleanliness_level;
             }
             petgame_mark_dirty();
         }
@@ -692,6 +763,38 @@ void petgame_record_affection(uint32_t count)
         petgame_mark_dirty();
     }
 
+    petgame_recompute_level(&s_petgame_state);
+    petgame_mark_dirty();
+}
+
+void petgame_record_play(void)
+{
+    if (!s_petgame_inited)
+    {
+        petgame_init();
+    }
+
+    petgame_saturating_inc_u32(&s_petgame_state.play_count);
+    petgame_saturating_add_u32(&s_petgame_state.growth_score, PETGAME_GROWTH_PER_PLAY);
+    (void)petgame_change_u8(&s_petgame_state.mood_level, 10);
+    (void)petgame_change_u8(&s_petgame_state.energy_level, -6);
+    petgame_activity_event_push(PETGAME_ACTIVITY_TYPE_PLAY);
+    petgame_recompute_level(&s_petgame_state);
+    petgame_mark_dirty();
+}
+
+void petgame_record_clean(void)
+{
+    if (!s_petgame_inited)
+    {
+        petgame_init();
+    }
+
+    petgame_saturating_inc_u32(&s_petgame_state.clean_count);
+    petgame_saturating_add_u32(&s_petgame_state.growth_score, PETGAME_GROWTH_PER_CLEAN);
+    (void)petgame_change_u8(&s_petgame_state.cleanliness_level, 25);
+    (void)petgame_change_u8(&s_petgame_state.mood_level, 3);
+    petgame_activity_event_push(PETGAME_ACTIVITY_TYPE_CLEAN);
     petgame_recompute_level(&s_petgame_state);
     petgame_mark_dirty();
 }

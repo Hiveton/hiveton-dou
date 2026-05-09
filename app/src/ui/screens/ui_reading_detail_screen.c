@@ -18,6 +18,7 @@
 #include "config/app_config.h"
 #include "ui_font_manager.h"
 #include "ui_helpers.h"
+#include "ui_epd_refresh_policy.h"
 #include "../ui_image_policy.h"
 #include "ui_runtime_adapter.h"
 #include "../../../../sdk/external/lvgl_v9/src/draw/lv_draw_buf.h"
@@ -369,6 +370,8 @@ static void ui_reading_detail_release_font_resources(void)
     ui_reading_detail_release_hdfont();
 }
 
+static bool ui_reading_detail_copy_font_path(char *buffer, size_t buffer_size, const char *path);
+
 static void ui_reading_detail_load_config_defaults(void)
 {
     char font_path[UI_FONT_MANAGER_PATH_MAX];
@@ -410,10 +413,21 @@ static void ui_reading_detail_load_config_defaults(void)
     {
         const char *base;
 
-        rt_strncpy(s_reading_detail_font_path, font_path, sizeof(s_reading_detail_font_path) - 1U);
-        base = strrchr(font_path, '/');
-        base = (base != NULL) ? (base + 1) : font_path;
-        rt_strncpy(s_reading_detail_font_name, base, sizeof(s_reading_detail_font_name) - 1U);
+        if (ui_reading_detail_copy_font_path(s_reading_detail_font_path,
+                                             sizeof(s_reading_detail_font_path),
+                                             font_path))
+        {
+            base = strrchr(font_path, '/');
+            base = (base != NULL) ? (base + 1) : font_path;
+            rt_strncpy(s_reading_detail_font_name, base, sizeof(s_reading_detail_font_name) - 1U);
+        }
+        else
+        {
+            s_reading_detail_font_use_system = true;
+            rt_strncpy(s_reading_detail_font_name,
+                       ui_i18n_pick("系统字体", "System Font"),
+                       sizeof(s_reading_detail_font_name) - 1U);
+        }
     }
 
     s_reading_detail_font_path[sizeof(s_reading_detail_font_path) - 1U] = '\0';
@@ -451,6 +465,31 @@ static const char *ui_reading_detail_get_selected_font_name(void)
            ui_i18n_pick("未知字体", "Unknown Font");
 }
 
+static bool ui_reading_detail_copy_path(char *buffer, size_t buffer_size, const char *path)
+{
+    size_t len;
+
+    if (buffer == NULL || buffer_size == 0U || path == NULL)
+    {
+        return false;
+    }
+
+    len = strlen(path);
+    if (len == 0U || len >= buffer_size)
+    {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    memcpy(buffer, path, len + 1U);
+    return true;
+}
+
+static bool ui_reading_detail_copy_font_path(char *buffer, size_t buffer_size, const char *path)
+{
+    return ui_reading_detail_copy_path(buffer, buffer_size, path);
+}
+
 static bool ui_reading_detail_get_selected_font_path(char *buffer, size_t buffer_size)
 {
     if (buffer == NULL || buffer_size == 0U ||
@@ -460,9 +499,7 @@ static bool ui_reading_detail_get_selected_font_path(char *buffer, size_t buffer
         return false;
     }
 
-    rt_strncpy(buffer, s_reading_detail_font_path, buffer_size - 1U);
-    buffer[buffer_size - 1U] = '\0';
-    return true;
+    return ui_reading_detail_copy_font_path(buffer, buffer_size, s_reading_detail_font_path);
 }
 
 static bool ui_reading_detail_should_log_rejected_font(const char *path)
@@ -477,10 +514,9 @@ static bool ui_reading_detail_should_log_rejected_font(const char *path)
         return false;
     }
 
-    rt_strncpy(s_reading_detail_last_rejected_font_path,
-               path,
-               sizeof(s_reading_detail_last_rejected_font_path) - 1U);
-    s_reading_detail_last_rejected_font_path[sizeof(s_reading_detail_last_rejected_font_path) - 1U] = '\0';
+    (void)ui_reading_detail_copy_font_path(s_reading_detail_last_rejected_font_path,
+                                           sizeof(s_reading_detail_last_rejected_font_path),
+                                           path);
     return true;
 }
 
@@ -836,8 +872,22 @@ static bool ui_reading_detail_init_hdfont(void)
         return false;
     }
 
-    rt_strncpy(next_state.path, font_path, sizeof(next_state.path) - 1U);
-    next_state.path[sizeof(next_state.path) - 1U] = '\0';
+    if (!ui_reading_detail_copy_font_path(next_state.path,
+                                          sizeof(next_state.path),
+                                          font_path))
+    {
+        if (next_state.index_from_audio)
+        {
+            audio_mem_free(next_state.index_data);
+        }
+        else
+        {
+            rt_free(next_state.index_data);
+        }
+        close(fd);
+        ui_reading_detail_release_hdfont();
+        return false;
+    }
     next_state.ready = true;
 
     ui_reading_detail_release_hdfont();
@@ -959,10 +1009,14 @@ static bool ui_reading_detail_set_selected_font_item(uint16_t index)
     }
     else
     {
-        rt_strncpy(s_reading_detail_font_path, item->path, sizeof(s_reading_detail_font_path) - 1U);
+        if (!ui_reading_detail_copy_font_path(s_reading_detail_font_path,
+                                              sizeof(s_reading_detail_font_path),
+                                              item->path))
+        {
+            return false;
+        }
         rt_strncpy(s_reading_detail_font_name, item->name, sizeof(s_reading_detail_font_name) - 1U);
     }
-    s_reading_detail_font_path[sizeof(s_reading_detail_font_path) - 1U] = '\0';
     s_reading_detail_font_name[sizeof(s_reading_detail_font_name) - 1U] = '\0';
 
     if (changed)
@@ -987,9 +1041,10 @@ static void ui_reading_detail_refresh_font_items(void)
     previous_path[0] = '\0';
     if (!previous_system)
     {
-        rt_strncpy(previous_path, configured_path, sizeof(previous_path) - 1U);
+        (void)ui_reading_detail_copy_font_path(previous_path,
+                                               sizeof(previous_path),
+                                               configured_path);
     }
-    previous_path[sizeof(previous_path) - 1U] = '\0';
 
     count = ui_font_manager_list_items(discovered,
                                        (uint16_t)(sizeof(discovered) /
@@ -1291,7 +1346,7 @@ static bool ui_reading_detail_consume_image_transition_refresh(const char *reaso
     UI_EPD_REFRESH_LOG("reading_detail: image full refresh consume reason=%s page=%u\n",
                        reason != NULL ? reason : "?",
                        (unsigned int)(s_reading_detail_current_page + 1U));
-    lcd_request_epd_force_full_refresh_once();
+    ui_epd_refresh_policy_request_clean_refresh("reading_image_transition");
     s_reading_detail_image_transition_refresh_pending = false;
     return true;
 }
@@ -1327,7 +1382,7 @@ void ui_reading_detail_request_leave_refresh(void)
 
     UI_EPD_REFRESH_LOG("reading_detail: image full refresh request on leave page=%u\n",
                        (unsigned int)(s_reading_detail_current_page + 1U));
-    lcd_request_epd_force_full_refresh_once();
+    ui_epd_refresh_policy_request_clean_refresh("reading_image_leave");
 }
 
 static uint32_t ui_reading_detail_compute_image_zoom(uint16_t src_width)
@@ -1950,10 +2005,13 @@ static void ui_reading_detail_touch_open_state(const char *file_path)
         return;
     }
 
-    rt_snprintf(s_reading_detail_current_path,
-                sizeof(s_reading_detail_current_path),
-                "%s",
-                file_path);
+    if (!ui_reading_detail_copy_path(s_reading_detail_current_path,
+                                     sizeof(s_reading_detail_current_path),
+                                     file_path))
+    {
+        ui_reading_detail_refresh_favorite_button();
+        return;
+    }
 
     suffix = strrchr(file_path, '.');
     if (suffix != NULL && strcasecmp(suffix, ".epub") == 0)
@@ -2901,7 +2959,12 @@ static void ui_reading_detail_load_thread_entry(void *parameter)
         }
 
         request_id = s_reading_detail_request_id;
-        rt_snprintf(file_path, sizeof(file_path), "%s", s_reading_detail_request_path);
+        if (!ui_reading_detail_copy_path(file_path,
+                                         sizeof(file_path),
+                                         s_reading_detail_request_path))
+        {
+            file_path[0] = '\0';
+        }
         load_start_ms = ui_reading_detail_now_ms();
         ui_reading_detail_watchdog_begin_long_task();
 
@@ -3549,10 +3612,12 @@ static void ui_reading_detail_request_async_load(void)
     (void)ui_reading_list_get_selected_path(file_path, sizeof(file_path));
     ui_reading_detail_touch_open_state(file_path);
 
-    rt_snprintf(s_reading_detail_request_path,
-                sizeof(s_reading_detail_request_path),
-                "%s",
-                file_path);
+    if (!ui_reading_detail_copy_path(s_reading_detail_request_path,
+                                     sizeof(s_reading_detail_request_path),
+                                     file_path))
+    {
+        s_reading_detail_request_path[0] = '\0';
+    }
     ++s_reading_detail_request_id;
     s_reading_detail_load_state = UI_READING_DETAIL_LOAD_LOADING;
     s_reading_detail_completed_request_id = 0U;
@@ -3584,10 +3649,12 @@ static void ui_reading_detail_load_selected_sync(void)
     (void)ui_reading_list_get_selected_path(file_path, sizeof(file_path));
     ui_reading_detail_touch_open_state(file_path);
 
-    rt_snprintf(s_reading_detail_request_path,
-                sizeof(s_reading_detail_request_path),
-                "%s",
-                file_path);
+    if (!ui_reading_detail_copy_path(s_reading_detail_request_path,
+                                     sizeof(s_reading_detail_request_path),
+                                     file_path))
+    {
+        s_reading_detail_request_path[0] = '\0';
+    }
     ++s_reading_detail_request_id;
     request_id = s_reading_detail_request_id;
     s_reading_detail_load_state = UI_READING_DETAIL_LOAD_LOADING;
@@ -3735,7 +3802,7 @@ static bool ui_reading_detail_render_page(void)
             UI_EPD_REFRESH_LOG("reading_detail: image full refresh consume first=%d pending=0 page=%u\n",
                                s_reading_detail_first_render_done ? 0 : 1,
                                (unsigned int)(s_reading_detail_current_page + 1U));
-            lcd_request_epd_force_full_refresh_once();
+            ui_epd_refresh_policy_request_clean_refresh("reading_image_enter");
         }
 
         ui_reading_detail_release_current_image();
@@ -3759,7 +3826,7 @@ static bool ui_reading_detail_render_page(void)
             target_image_height = (page->type == UI_READING_DETAIL_PAGE_IMAGE)
                                       ? s_reading_detail_current_image_dsc.header.h
                                       : s_reading_detail_current_image_dsc.header.h;
-            lcd_set_epd_image_refresh_hint(RT_TRUE);
+            ui_epd_refresh_policy_request_image_refresh("reading_image_render");
             ui_image_set_src(s_reading_detail_refs.content_image, &s_reading_detail_current_image_dsc);
             lv_image_set_pivot(s_reading_detail_refs.content_image, 0, 0);
             lv_image_set_scale_x(s_reading_detail_refs.content_image, LV_SCALE_NONE);
@@ -4445,6 +4512,7 @@ void ui_Reading_Detail_screen_init(void)
                                                        LV_TEXT_ALIGN_LEFT,
                                                        false,
                                                        false);
+    lv_label_set_long_mode(s_reading_detail_refs.page_label, LV_LABEL_LONG_DOT);
     s_reading_detail_refs.file_name_label = ui_create_label(ui_Reading_Detail,
                                                             "",
                                                             196,
@@ -4520,15 +4588,15 @@ void ui_Reading_Detail_screen_init(void)
     row = ui_create_card(s_reading_detail_refs.settings_panel, 24, 52, 480, 42, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    ui_create_label(row, ui_i18n_pick("字号", "Font"), 0, 8, 80, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
-    button = ui_create_button(row, 256, 0, 56, 42, "-", 24, UI_SCREEN_NONE, false);
+    ui_create_label(row, ui_i18n_pick("字号", "Font"), 0, 8, 120, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
+    button = ui_create_button(row, 204, 0, 56, 42, "-", 24, UI_SCREEN_NONE, false);
     s_reading_detail_refs.font_dec_button = button;
     lv_obj_add_event_cb(button, ui_reading_detail_adjust_font_event_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(-UI_READING_DETAIL_TEXT_FONT_STEP));
     s_reading_detail_refs.font_value_label = ui_create_label(row,
                                                              "22",
-                                                             324,
+                                                             272,
                                                              8,
-                                                             UI_READING_DETAIL_SETTINGS_VALUE_WIDTH,
+                                                             124,
                                                              24,
                                                              20,
                                                              LV_TEXT_ALIGN_CENTER,
@@ -4541,8 +4609,8 @@ void ui_Reading_Detail_screen_init(void)
     row = ui_create_card(s_reading_detail_refs.settings_panel, 24, 102, 480, 42, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    ui_create_label(row, ui_i18n_pick("行距", "Spacing"), 0, 8, 80, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
-    button = ui_create_button(row, 256, 0, 56, 42, "-", 24, UI_SCREEN_NONE, false);
+    ui_create_label(row, ui_i18n_pick("行距", "Spacing"), 0, 8, 120, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
+    button = ui_create_button(row, 204, 0, 56, 42, "-", 24, UI_SCREEN_NONE, false);
     s_reading_detail_refs.line_space_dec_button = button;
     lv_obj_add_event_cb(button,
                         ui_reading_detail_adjust_line_space_event_cb,
@@ -4550,9 +4618,9 @@ void ui_Reading_Detail_screen_init(void)
                         (void *)(intptr_t)(-UI_READING_DETAIL_TEXT_LINE_SPACE_STEP));
     s_reading_detail_refs.line_space_value_label = ui_create_label(row,
                                                                    "2",
-                                                                   324,
+                                                                   272,
                                                                    8,
-                                                                   UI_READING_DETAIL_SETTINGS_VALUE_WIDTH,
+                                                                   124,
                                                                    24,
                                                                    20,
                                                                    LV_TEXT_ALIGN_CENTER,
@@ -4568,8 +4636,8 @@ void ui_Reading_Detail_screen_init(void)
     row = ui_create_card(s_reading_detail_refs.settings_panel, 24, 152, 480, 42, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
-    ui_create_label(row, ui_i18n_pick("字体", "Typeface"), 0, 8, 80, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
-    button = ui_create_button(row, 204, 0, 48, 42, "<", 22, UI_SCREEN_NONE, false);
+    ui_create_label(row, ui_i18n_pick("字体", "Typeface"), 0, 8, 120, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
+    button = ui_create_button(row, 204, 0, 56, 42, "<", 22, UI_SCREEN_NONE, false);
     s_reading_detail_refs.font_family_prev_button = button;
     lv_obj_add_event_cb(button,
                         ui_reading_detail_adjust_font_family_event_cb,
@@ -4577,15 +4645,16 @@ void ui_Reading_Detail_screen_init(void)
                         (void *)(intptr_t)-1);
     s_reading_detail_refs.font_family_value_label = ui_create_label(row,
                                                                     ui_i18n_pick("系统字体", "System Font"),
-                                                                    260,
+                                                                    272,
                                                                     8,
-                                                                    UI_READING_DETAIL_SETTINGS_FONT_NAME_WIDTH,
+                                                                    124,
                                                                     24,
                                                                     18,
                                                                     LV_TEXT_ALIGN_CENTER,
                                                                     false,
                                                                     false);
-    button = ui_create_button(row, 432, 0, 48, 42, ">", 22, UI_SCREEN_NONE, true);
+    lv_label_set_long_mode(s_reading_detail_refs.font_family_value_label, LV_LABEL_LONG_DOT);
+    button = ui_create_button(row, 404, 0, 56, 42, ">", 22, UI_SCREEN_NONE, true);
     s_reading_detail_refs.font_family_next_button = button;
     lv_obj_add_event_cb(button,
                         ui_reading_detail_adjust_font_family_event_cb,
@@ -4596,7 +4665,7 @@ void ui_Reading_Detail_screen_init(void)
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     ui_create_label(row, ui_i18n_pick("收藏", "Favorite"), 0, 8, 120, 24, 20, LV_TEXT_ALIGN_LEFT, false, false);
-    button = ui_create_button(row, 276, 0, 184, 42, ui_i18n_pick("收藏", "Favorite"), 20, UI_SCREEN_NONE, true);
+    button = ui_create_button(row, 204, 0, 256, 42, ui_i18n_pick("收藏", "Favorite"), 20, UI_SCREEN_NONE, true);
     s_reading_detail_refs.favorite_button = button;
     lv_obj_add_event_cb(button,
                         ui_reading_detail_favorite_event_cb,
@@ -4672,7 +4741,9 @@ void ui_Reading_Detail_screen_destroy(void)
         s_reading_detail_load_timer = NULL;
     }
 
-    lcd_request_epd_force_full_refresh_once();
+    ui_reading_detail_reset_text_source();
+
+    ui_epd_refresh_policy_request_clean_refresh("reading_detail_destroy");
 
     ui_reading_detail_release_current_image();
     ui_reading_detail_release_text_bitmap_buffer();

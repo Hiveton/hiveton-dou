@@ -6,6 +6,8 @@
 
 lv_obj_t *ui_Language = NULL;
 
+#define UI_LANGUAGE_CONTENT_HEIGHT 650
+
 typedef struct
 {
     ui_settings_language_t language;
@@ -32,22 +34,26 @@ static const char *ui_language_screen_hint(void)
 static void ui_language_invalidate_all_screens(void)
 {
     ui_Home_screen_destroy();
+    ui_Standby_screen_destroy();
     ui_Reading_List_screen_destroy();
     ui_Reading_Detail_screen_destroy();
     ui_Pet_screen_destroy();
+    ui_Pet_Rules_screen_destroy();
     ui_AI_Dou_screen_destroy();
-    ui_Time_Manage_screen_destroy();
     ui_Pomodoro_screen_destroy();
     ui_Datetime_screen_destroy();
     ui_Weather_screen_destroy();
     ui_Calendar_screen_destroy();
     ui_Status_Detail_screen_destroy();
+    ui_About_screen_destroy();
     ui_Recorder_screen_destroy();
     ui_Record_List_screen_destroy();
     ui_Music_List_screen_destroy();
     ui_Music_Player_screen_destroy();
     ui_Settings_screen_destroy();
     ui_Brightness_screen_destroy();
+    ui_Wallpaper_screen_destroy();
+    ui_AI_Weather_Settings_screen_destroy();
 }
 
 static void ui_language_select_event_cb(lv_event_t *e)
@@ -87,7 +93,7 @@ void ui_Language_screen_init(void)
     ui_Language = ui_create_screen_base();
     ui_build_standard_screen(&page, ui_Language, ui_language_screen_title(), UI_SCREEN_SETTINGS);
 
-    panel = ui_create_card(page.content, 0, 0, 528, 653, UI_SCREEN_NONE, false, 0);
+    panel = ui_create_card(page.content, 0, 0, 528, UI_LANGUAGE_CONTENT_HEIGHT, UI_SCREEN_NONE, false, 0);
     lv_obj_set_style_border_width(panel, 2, 0);
     hint = ui_create_label(panel,
                            ui_language_screen_hint(),

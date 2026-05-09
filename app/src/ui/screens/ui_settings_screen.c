@@ -1,414 +1,84 @@
 #include "ui.h"
-#include "ui_i18n.h"
+#include "ui_components.h"
 #include "ui_helpers.h"
+#include "ui_i18n.h"
 #include "ui_runtime_adapter.h"
 #include "config/app_config.h"
 #include "network/net_manager.h"
 #include "rtthread.h"
 
 #include <stdint.h>
+#include <string.h>
 
 lv_obj_t *ui_Settings = NULL;
 
-#define UI_SETTINGS_VISIBLE_COUNT 5U
-
-typedef struct
-{
-    const char *(*title_fn)(void);
-    const char *(*summary_fn)(void);
-    ui_screen_id_t target;
-} ui_settings_item_t;
-
-typedef struct
-{
-    lv_obj_t *card;
-    lv_obj_t *title_label;
-    lv_obj_t *subtitle_label;
-} ui_settings_card_refs_t;
-
-static ui_settings_card_refs_t s_settings_cards[UI_SETTINGS_VISIBLE_COUNT];
-static lv_obj_t *s_settings_prev_button = NULL;
-static lv_obj_t *s_settings_next_button = NULL;
-static lv_obj_t *s_settings_page_label = NULL;
-static uint16_t s_settings_page_offset = 0U;
-
-extern void app_set_panel_brightness(rt_uint8_t brightness);
 extern rt_uint8_t app_get_panel_brightness(void);
+
+extern const lv_image_dsc_t settings_icon_language;
+extern const lv_image_dsc_t settings_icon_backlight;
+extern const lv_image_dsc_t settings_icon_bluetooth;
+extern const lv_image_dsc_t settings_icon_cellular;
+extern const lv_image_dsc_t settings_icon_volume;
+extern const lv_image_dsc_t settings_icon_datetime;
+extern const lv_image_dsc_t settings_icon_about;
+
+typedef const char *(*settings_text_fn_t)(void);
+
+typedef enum
+{
+    SETTINGS_ROW_ACTION_NONE = 0,
+    SETTINGS_ROW_ACTION_NAV,
+    SETTINGS_ROW_ACTION_TOGGLE_BT,
+    SETTINGS_ROW_ACTION_TOGGLE_4G,
+} settings_row_action_t;
+
+typedef struct
+{
+    const lv_image_dsc_t *icon;
+    const char *zh;
+    const char *en;
+    settings_text_fn_t summary_fn;
+    settings_row_action_t action;
+    ui_screen_id_t target;
+} settings_row_t;
+
+static const char *ui_settings_language_summary(void);
+static const char *ui_settings_brightness_summary(void);
+static const char *ui_settings_bluetooth_summary(void);
+static const char *ui_settings_cellular_summary(void);
+static const char *ui_settings_volume_summary(void);
+static void ui_settings_confirm_close(void);
+static void ui_settings_row_event_cb(lv_event_t *e);
+
+static lv_obj_t *settings_plain_obj(lv_obj_t *parent,
+                                    int x,
+                                    int y,
+                                    int w,
+                                    int h,
+                                    int radius,
+                                    lv_opa_t opa,
+                                    uint32_t bg,
+                                    int border_w)
+{
+    lv_obj_t *obj = lv_obj_create(parent);
+
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(obj, ui_px_x(x), ui_px_y(y));
+    lv_obj_set_size(obj, ui_px_w(w), ui_px_h(h));
+    lv_obj_set_style_radius(obj, ui_px_x(radius), 0);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(bg), 0);
+    lv_obj_set_style_bg_opa(obj, opa, 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_border_width(obj, border_w, 0);
+    lv_obj_set_style_shadow_width(obj, 0, 0);
+    lv_obj_set_style_outline_width(obj, 0, 0);
+    lv_obj_set_style_pad_all(obj, 0, 0);
+    return obj;
+}
 
 static const char *ui_settings_title_text(void)
 {
-    switch (ui_settings_get_language())
-    {
-    case UI_SETTINGS_LANGUAGE_EN_US:
-        return "Settings";
-    case UI_SETTINGS_LANGUAGE_ZH_CN:
-    default:
-        return "设置";
-    }
-}
-
-static const char *ui_settings_brightness_card_title(void)
-{
-    switch (ui_settings_get_language())
-    {
-    case UI_SETTINGS_LANGUAGE_EN_US:
-        return "Brightness";
-    case UI_SETTINGS_LANGUAGE_ZH_CN:
-    default:
-        return "屏幕亮度";
-    }
-}
-
-static const char *ui_settings_language_card_title(void)
-{
-    switch (ui_settings_get_language())
-    {
-    case UI_SETTINGS_LANGUAGE_EN_US:
-        return "Language";
-    case UI_SETTINGS_LANGUAGE_ZH_CN:
-    default:
-        return "语言";
-    }
-}
-
-static const char *ui_settings_bluetooth_config_card_title(void)
-{
-    switch (ui_settings_get_language())
-    {
-    case UI_SETTINGS_LANGUAGE_EN_US:
-        return "Bluetooth Config";
-    case UI_SETTINGS_LANGUAGE_ZH_CN:
-    default:
-        return "蓝牙配置";
-    }
-}
-
-static const char *ui_settings_bluetooth_config_card_summary(void)
-{
-    switch (ui_settings_get_language())
-    {
-    case UI_SETTINGS_LANGUAGE_EN_US:
-        return "Bluetooth status, connection state and device name presets";
-    case UI_SETTINGS_LANGUAGE_ZH_CN:
-    default:
-        return "查看蓝牙开关、连接状态与设备名预设";
-    }
-}
-
-static const char *ui_settings_ai_weather_card_title(void)
-{
-    return ui_i18n_pick("AI与天气", "AI & Weather");
-}
-
-static const char *ui_settings_ai_weather_card_summary(void)
-{
-    static char buffer[64];
-
-    rt_snprintf(buffer,
-                sizeof(buffer),
-                ui_i18n_pick("AI自动重连：%s  天气自动刷新：%s",
-                             "AI reconnect: %s  Weather refresh: %s"),
-                app_config_get_ai_auto_resume() ? ui_i18n_pick("开", "On") : ui_i18n_pick("关", "Off"),
-                app_config_get_weather_auto_refresh() ? ui_i18n_pick("开", "On") : ui_i18n_pick("关", "Off"));
-    return buffer;
-}
-
-static const char *ui_settings_wallpaper_card_title(void)
-{
-    switch (ui_settings_get_language())
-    {
-    case UI_SETTINGS_LANGUAGE_EN_US:
-        return "Wallpaper";
-    case UI_SETTINGS_LANGUAGE_ZH_CN:
-    default:
-        return "壁纸";
-    }
-}
-
-static const char *ui_settings_wallpaper_card_summary(void)
-{
-    switch (ui_settings_get_language())
-    {
-    case UI_SETTINGS_LANGUAGE_EN_US:
-        return "Open the TF picture preview page";
-    case UI_SETTINGS_LANGUAGE_ZH_CN:
-    default:
-        return "进入 TF 卡图片预览测试页";
-    }
-}
-
-static void ui_settings_format_brightness_summary(char *buffer, size_t buffer_size)
-{
-    rt_uint8_t brightness;
-
-    if (buffer == NULL || buffer_size == 0U)
-    {
-        return;
-    }
-
-    brightness = app_get_panel_brightness();
-    if (brightness == 0U)
-    {
-        switch (ui_settings_get_language())
-        {
-        case UI_SETTINGS_LANGUAGE_EN_US:
-            rt_snprintf(buffer, buffer_size, "Currently off");
-            break;
-        case UI_SETTINGS_LANGUAGE_ZH_CN:
-        default:
-            rt_snprintf(buffer, buffer_size, "当前已关闭");
-            break;
-        }
-    }
-    else
-    {
-        switch (ui_settings_get_language())
-        {
-        case UI_SETTINGS_LANGUAGE_EN_US:
-            rt_snprintf(buffer, buffer_size, "Current brightness %u%%", (unsigned int)brightness);
-            break;
-        case UI_SETTINGS_LANGUAGE_ZH_CN:
-        default:
-            rt_snprintf(buffer, buffer_size, "当前亮度 %u%%", (unsigned int)brightness);
-            break;
-        }
-    }
-}
-
-static const char *ui_settings_brightness_card_summary(void)
-{
-    static char buffer[32];
-
-    ui_settings_format_brightness_summary(buffer, sizeof(buffer));
-    return buffer;
-}
-
-static const char *ui_settings_language_card_summary(void)
-{
-    return ui_settings_get_language_label();
-}
-
-static const char *ui_settings_network_mode_card_title(void)
-{
-    return ui_i18n_pick("网络模式", "Network Mode");
-}
-
-static const char *ui_settings_network_mode_card_summary(void)
-{
-    net_manager_snapshot_t snapshot;
-
-    net_manager_get_snapshot(&snapshot);
-
-    switch (snapshot.desired_mode)
-    {
-    case NET_MANAGER_MODE_BT:
-        return ui_i18n_pick("当前：蓝牙模式", "Current: Bluetooth");
-    case NET_MANAGER_MODE_4G:
-    default:
-        return ui_i18n_pick("当前：4G模式", "Current: 4G");
-    }
-}
-
-static const ui_settings_item_t s_settings_items[] = {
-    {ui_settings_brightness_card_title, ui_settings_brightness_card_summary, UI_SCREEN_BRIGHTNESS},
-    {ui_settings_language_card_title, ui_settings_language_card_summary, UI_SCREEN_LANGUAGE},
-    {ui_settings_network_mode_card_title, ui_settings_network_mode_card_summary, UI_SCREEN_NETWORK_MODE},
-    {ui_settings_wallpaper_card_title, ui_settings_wallpaper_card_summary, UI_SCREEN_WALLPAPER},
-    {ui_settings_bluetooth_config_card_title, ui_settings_bluetooth_config_card_summary, UI_SCREEN_BLUETOOTH_CONFIG},
-    {ui_settings_ai_weather_card_title, ui_settings_ai_weather_card_summary, UI_SCREEN_AI_WEATHER_SETTINGS},
-};
-
-static const int s_settings_card_y_positions[UI_SETTINGS_VISIBLE_COUNT] = {0, 108, 216, 324, 432};
-
-static void ui_settings_set_button_enabled(lv_obj_t *button, bool enabled)
-{
-    if (button == NULL)
-    {
-        return;
-    }
-
-    if (enabled)
-    {
-        lv_obj_clear_state(button, LV_STATE_DISABLED);
-        lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_opa(button, LV_OPA_COVER, 0);
-    }
-    else
-    {
-        lv_obj_add_state(button, LV_STATE_DISABLED);
-        lv_obj_clear_flag(button, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_style_opa(button, LV_OPA_50, 0);
-    }
-}
-
-static void ui_settings_show_card(uint16_t slot_index, const ui_settings_item_t *item)
-{
-    ui_settings_card_refs_t *refs;
-
-    if (slot_index >= UI_SETTINGS_VISIBLE_COUNT || item == NULL)
-    {
-        return;
-    }
-
-    refs = &s_settings_cards[slot_index];
-    if (refs->card == NULL)
-    {
-        return;
-    }
-
-    lv_obj_clear_flag(refs->card, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_state(refs->card, LV_STATE_DISABLED);
-    lv_obj_add_flag(refs->card, LV_OBJ_FLAG_CLICKABLE);
-    lv_label_set_text(refs->title_label, item->title_fn());
-    lv_label_set_text(refs->subtitle_label, item->summary_fn());
-    lv_obj_set_user_data(refs->card, (void *)(uintptr_t)item->target);
-}
-
-static void ui_settings_hide_card(uint16_t slot_index)
-{
-    ui_settings_card_refs_t *refs;
-
-    if (slot_index >= UI_SETTINGS_VISIBLE_COUNT)
-    {
-        return;
-    }
-
-    refs = &s_settings_cards[slot_index];
-    if (refs->card == NULL)
-    {
-        return;
-    }
-
-    lv_obj_add_flag(refs->card, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_add_state(refs->card, LV_STATE_DISABLED);
-}
-
-static void ui_settings_card_event_cb(lv_event_t *e)
-{
-    ui_screen_id_t target;
-
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
-    {
-        return;
-    }
-
-    target = (ui_screen_id_t)(uintptr_t)lv_obj_get_user_data(lv_event_get_target(e));
-    if (target != UI_SCREEN_NONE)
-    {
-        ui_runtime_switch_to(target);
-    }
-}
-
-static void ui_settings_render(void)
-{
-    uint16_t visible_index;
-    uint16_t item_count = (uint16_t)(sizeof(s_settings_items) / sizeof(s_settings_items[0]));
-    uint16_t total_pages = item_count == 0U ? 0U : (uint16_t)((item_count + UI_SETTINGS_VISIBLE_COUNT - 1U) / UI_SETTINGS_VISIBLE_COUNT);
-    uint16_t current_page = total_pages == 0U ? 0U : (uint16_t)(s_settings_page_offset / UI_SETTINGS_VISIBLE_COUNT + 1U);
-    char page_text[16];
-    bool can_prev = s_settings_page_offset > 0U;
-    bool can_next = (uint16_t)(s_settings_page_offset + UI_SETTINGS_VISIBLE_COUNT) < item_count;
-
-    ui_settings_set_button_enabled(s_settings_prev_button, can_prev);
-    ui_settings_set_button_enabled(s_settings_next_button, can_next);
-    if (s_settings_page_label != NULL)
-    {
-        rt_snprintf(page_text, sizeof(page_text), "%u / %u", (unsigned int)current_page, (unsigned int)total_pages);
-        lv_label_set_text(s_settings_page_label, page_text);
-    }
-
-    for (visible_index = 0; visible_index < UI_SETTINGS_VISIBLE_COUNT; ++visible_index)
-    {
-        uint16_t item_index = (uint16_t)(s_settings_page_offset + visible_index);
-
-        if (item_index >= item_count)
-        {
-            ui_settings_hide_card(visible_index);
-            continue;
-        }
-
-        ui_settings_show_card(visible_index, &s_settings_items[item_index]);
-    }
-}
-
-static void ui_settings_prev_event_cb(lv_event_t *e)
-{
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
-    {
-        return;
-    }
-
-    if (s_settings_page_offset >= UI_SETTINGS_VISIBLE_COUNT)
-    {
-        s_settings_page_offset = (uint16_t)(s_settings_page_offset - UI_SETTINGS_VISIBLE_COUNT);
-    }
-    else
-    {
-        s_settings_page_offset = 0U;
-    }
-
-    ui_settings_render();
-}
-
-static void ui_settings_next_event_cb(lv_event_t *e)
-{
-    uint16_t item_count = (uint16_t)(sizeof(s_settings_items) / sizeof(s_settings_items[0]));
-
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
-    {
-        return;
-    }
-
-    if ((uint16_t)(s_settings_page_offset + UI_SETTINGS_VISIBLE_COUNT) < item_count)
-    {
-        s_settings_page_offset = (uint16_t)(s_settings_page_offset + UI_SETTINGS_VISIBLE_COUNT);
-        ui_settings_render();
-    }
-}
-
-static void ui_settings_create_card(lv_obj_t *parent, uint16_t slot_index, int y)
-{
-    ui_settings_card_refs_t *refs = &s_settings_cards[slot_index];
-    lv_obj_t *divider;
-
-    refs->card = ui_create_card(parent, 0, y, 528, 108, UI_SCREEN_NONE, false, 0);
-    lv_obj_set_style_radius(refs->card, 0, 0);
-    lv_obj_set_style_border_width(refs->card, 0, 0);
-    lv_obj_set_style_outline_width(refs->card, 0, 0);
-    lv_obj_set_style_shadow_width(refs->card, 0, 0);
-    lv_obj_set_style_pad_all(refs->card, 0, 0);
-    lv_obj_set_style_bg_color(refs->card, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_bg_opa(refs->card, LV_OPA_TRANSP, 0);
-    refs->title_label = ui_create_label(refs->card,
-                                        "",
-                                        24,
-                                        24,
-                                        448,
-                                        34,
-                                        28,
-                                        LV_TEXT_ALIGN_LEFT,
-                                        false,
-                                        false);
-    refs->subtitle_label = ui_create_label(refs->card,
-                                           "",
-                                           24,
-                                           66,
-                                           448,
-                                           22,
-                                           19,
-                                           LV_TEXT_ALIGN_LEFT,
-                                           false,
-                                           false);
-    divider = lv_obj_create(refs->card);
-    lv_obj_set_pos(divider, 0, 107);
-    lv_obj_set_size(divider, 528, 1);
-    lv_obj_set_style_radius(divider, 0, 0);
-    lv_obj_set_style_bg_color(divider, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(divider, 0, 0);
-    lv_obj_set_style_shadow_width(divider, 0, 0);
-    lv_obj_clear_flag(divider, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(refs->card, ui_settings_card_event_cb, LV_EVENT_CLICKED, NULL);
+    return ui_i18n_pick("设置", "Settings");
 }
 
 ui_settings_language_t ui_settings_get_language(void)
@@ -446,80 +116,353 @@ const char *ui_settings_get_language_label(void)
     }
 }
 
+static const char *ui_settings_language_summary(void)
+{
+    return ui_settings_get_language_label();
+}
+
+static const char *ui_settings_brightness_summary(void)
+{
+    static char buffer[24];
+    rt_uint8_t brightness = app_get_panel_brightness();
+
+    if (brightness == 0U)
+    {
+        return ui_i18n_pick("已关闭", "Off");
+    }
+
+    rt_snprintf(buffer,
+                sizeof(buffer),
+                ui_i18n_pick("自动 (%u%%)", "Auto (%u%%)"),
+                (unsigned int)brightness);
+    return buffer;
+}
+
+static const char *ui_settings_bluetooth_summary(void)
+{
+    return net_manager_bt_enabled() ? ui_i18n_pick("已开启", "On") : ui_i18n_pick("已关闭", "Off");
+}
+
+static const char *ui_settings_cellular_summary(void)
+{
+    return net_manager_4g_enabled() ? ui_i18n_pick("已开启", "On") : ui_i18n_pick("已关闭", "Off");
+}
+
+static const char *ui_settings_volume_summary(void)
+{
+    static char buffer[16];
+    uint32_t volume = app_config_get_audio_music_volume();
+    uint32_t percent;
+
+    if (volume > 15U)
+    {
+        volume = 15U;
+    }
+    percent = (volume * 100U + 7U) / 15U;
+    rt_snprintf(buffer, sizeof(buffer), "%u%%", (unsigned int)percent);
+    return buffer;
+}
+
+static const settings_row_t s_settings_rows[] = {
+    {&settings_icon_language, "语言", "Language", ui_settings_language_summary, SETTINGS_ROW_ACTION_NAV, UI_SCREEN_LANGUAGE},
+    {&settings_icon_backlight, "背光", "Backlight", ui_settings_brightness_summary, SETTINGS_ROW_ACTION_NAV, UI_SCREEN_BRIGHTNESS},
+    {&settings_icon_bluetooth, "蓝牙设置", "Bluetooth", ui_settings_bluetooth_summary, SETTINGS_ROW_ACTION_TOGGLE_BT, UI_SCREEN_NONE},
+    {&settings_icon_cellular, "4G设置", "4G", ui_settings_cellular_summary, SETTINGS_ROW_ACTION_TOGGLE_4G, UI_SCREEN_NONE},
+    {&settings_icon_volume, "音量设置", "Volume", ui_settings_volume_summary, SETTINGS_ROW_ACTION_NONE, UI_SCREEN_NONE},
+    {&settings_icon_datetime, "日期与时间", "Date & Time", NULL, SETTINGS_ROW_ACTION_NAV, UI_SCREEN_DATETIME},
+    {&settings_icon_about, "关于设备", "About", NULL, SETTINGS_ROW_ACTION_NAV, UI_SCREEN_ABOUT},
+};
+
+static lv_obj_t *s_settings_summary_labels[sizeof(s_settings_rows) / sizeof(s_settings_rows[0])];
+static lv_obj_t *s_settings_confirm_overlay = NULL;
+static net_manager_mode_t s_settings_confirm_target_mode = NET_MANAGER_MODE_NONE;
+
+static void ui_settings_refresh_summaries(void)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(s_settings_rows) / sizeof(s_settings_rows[0]); ++i)
+    {
+        if (s_settings_summary_labels[i] != NULL && s_settings_rows[i].summary_fn != NULL)
+        {
+            lv_label_set_text(s_settings_summary_labels[i], s_settings_rows[i].summary_fn());
+        }
+    }
+}
+
+static const char *ui_settings_mode_text(net_manager_mode_t mode)
+{
+    if (mode == NET_MANAGER_MODE_BT)
+    {
+        return ui_i18n_pick("蓝牙", "Bluetooth");
+    }
+
+    if (mode == NET_MANAGER_MODE_4G)
+    {
+        return "4G";
+    }
+
+    return ui_i18n_pick("网络", "Network");
+}
+
+static void ui_settings_confirm_cancel_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED)
+    {
+        ui_settings_confirm_close();
+    }
+}
+
+static void ui_settings_confirm_apply_event_cb(lv_event_t *e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    if (s_settings_confirm_target_mode == NET_MANAGER_MODE_BT)
+    {
+        net_manager_request_bt_mode();
+    }
+    else if (s_settings_confirm_target_mode == NET_MANAGER_MODE_4G)
+    {
+        net_manager_request_4g_mode();
+    }
+
+    ui_settings_confirm_close();
+    ui_settings_refresh_summaries();
+}
+
+static void ui_settings_confirm_close(void)
+{
+    if (s_settings_confirm_overlay != NULL)
+    {
+        lv_obj_del(s_settings_confirm_overlay);
+        s_settings_confirm_overlay = NULL;
+    }
+    s_settings_confirm_target_mode = NET_MANAGER_MODE_NONE;
+}
+
+static void ui_settings_show_network_confirm(settings_row_action_t action)
+{
+    net_manager_snapshot_t snapshot;
+    net_manager_mode_t target_mode;
+    const char *title;
+    const char *message;
+    lv_obj_t *panel;
+    lv_obj_t *cancel_button;
+    lv_obj_t *apply_button;
+
+    if (ui_Settings == NULL)
+    {
+        return;
+    }
+
+    net_manager_get_snapshot(&snapshot);
+
+    if (action == SETTINGS_ROW_ACTION_TOGGLE_BT)
+    {
+        if (snapshot.bt_enabled)
+        {
+            target_mode = NET_MANAGER_MODE_4G;
+            title = ui_i18n_pick("关闭蓝牙？", "Turn off Bluetooth?");
+            message = ui_i18n_pick("关闭蓝牙后会自动开启 4G 网络。", "4G will be enabled automatically.");
+        }
+        else
+        {
+            target_mode = NET_MANAGER_MODE_BT;
+            title = ui_i18n_pick("开启蓝牙？", "Turn on Bluetooth?");
+            message = ui_i18n_pick("开启蓝牙后会自动关闭 4G 网络。", "4G will be disabled automatically.");
+        }
+    }
+    else if (action == SETTINGS_ROW_ACTION_TOGGLE_4G)
+    {
+        if (snapshot.net_4g_enabled)
+        {
+            target_mode = NET_MANAGER_MODE_BT;
+            title = ui_i18n_pick("关闭4G？", "Turn off 4G?");
+            message = ui_i18n_pick("关闭 4G 后会自动开启蓝牙网络。", "Bluetooth will be enabled automatically.");
+        }
+        else
+        {
+            target_mode = NET_MANAGER_MODE_4G;
+            title = ui_i18n_pick("开启4G？", "Turn on 4G?");
+            message = ui_i18n_pick("开启 4G 后会自动关闭蓝牙。", "Bluetooth will be disabled automatically.");
+        }
+    }
+    else
+    {
+        return;
+    }
+
+    ui_settings_confirm_close();
+    s_settings_confirm_target_mode = target_mode;
+
+    s_settings_confirm_overlay = settings_plain_obj(ui_Settings, 0, 0, 528, 792, 0, LV_OPA_30, 0x000000, 0);
+    lv_obj_add_flag(s_settings_confirm_overlay, LV_OBJ_FLAG_CLICKABLE);
+
+    panel = ui_create_card(s_settings_confirm_overlay, 54, 256, 420, 230, UI_SCREEN_NONE, false, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(panel, 2, 0);
+
+    ui_create_label(panel, title, 24, 24, 372, 36, 28, LV_TEXT_ALIGN_CENTER, true, false);
+    ui_create_label(panel, message, 34, 76, 352, 60, 22, LV_TEXT_ALIGN_CENTER, false, true);
+    ui_create_label(panel,
+                    ui_settings_mode_text(target_mode),
+                    34,
+                    132,
+                    352,
+                    28,
+                    20,
+                    LV_TEXT_ALIGN_CENTER,
+                    false,
+                    false);
+
+    cancel_button = ui_create_button(panel, 34, 170, 154, 42, ui_i18n_pick("取消", "Cancel"), 20, UI_SCREEN_NONE, false);
+    apply_button = ui_create_button(panel, 232, 170, 154, 42, ui_i18n_pick("确认", "OK"), 20, UI_SCREEN_NONE, true);
+    lv_obj_add_event_cb(cancel_button, ui_settings_confirm_cancel_event_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(apply_button, ui_settings_confirm_apply_event_cb, LV_EVENT_CLICKED, NULL);
+}
+
+static void ui_settings_row_event_cb(lv_event_t *e)
+{
+    uintptr_t index;
+    const settings_row_t *row;
+
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    index = (uintptr_t)lv_obj_get_user_data(lv_event_get_target(e));
+    if (index >= sizeof(s_settings_rows) / sizeof(s_settings_rows[0]))
+    {
+        return;
+    }
+
+    row = &s_settings_rows[index];
+    if (row->action == SETTINGS_ROW_ACTION_NAV && row->target != UI_SCREEN_NONE)
+    {
+        ui_runtime_switch_to(row->target);
+    }
+    else if (row->action == SETTINGS_ROW_ACTION_TOGGLE_BT ||
+             row->action == SETTINGS_ROW_ACTION_TOGGLE_4G)
+    {
+        ui_settings_show_network_confirm(row->action);
+    }
+}
+
+static void ui_settings_create_row(lv_obj_t *parent, const settings_row_t *row, size_t index, int y)
+{
+    lv_obj_t *hit;
+    lv_obj_t *line;
+    lv_obj_t *icon;
+    lv_obj_t *summary_label;
+    const char *summary;
+
+    hit = settings_plain_obj(parent, 0, y, 528, 61, 0, LV_OPA_TRANSP, 0xffffff, 0);
+    lv_obj_add_flag(hit, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_user_data(hit, (void *)(uintptr_t)index);
+    lv_obj_add_event_cb(hit, ui_settings_row_event_cb, LV_EVENT_CLICKED, NULL);
+
+    icon = ui_create_image_slot(hit, 39, 7, 48, 48);
+    ui_img_set_src(icon, row->icon);
+
+    ui_create_label(hit,
+                    ui_i18n_pick(row->zh, row->en),
+                    94,
+                    15,
+                    190,
+                    34,
+                    29,
+                    LV_TEXT_ALIGN_LEFT,
+                    false,
+                    false);
+
+    summary = row->summary_fn != NULL ? row->summary_fn() : "";
+    summary_label = ui_create_label(hit,
+                                    summary,
+                                    354,
+                                    15,
+                                    115,
+                                    34,
+                                    25,
+                                    LV_TEXT_ALIGN_RIGHT,
+                                    false,
+                                    false);
+    lv_label_set_long_mode(summary_label, LV_LABEL_LONG_DOT);
+    if (index < sizeof(s_settings_summary_labels) / sizeof(s_settings_summary_labels[0]))
+    {
+        s_settings_summary_labels[index] = summary_label;
+    }
+
+    ui_create_label(hit,
+                    ">",
+                    488,
+                    13,
+                    26,
+                    38,
+                    31,
+                    LV_TEXT_ALIGN_CENTER,
+                    false,
+                    false);
+
+    line = settings_plain_obj(hit, 23, 60, 482, 1, 0, LV_OPA_COVER, 0x8c8c8c, 0);
+    lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE);
+}
+
 void ui_settings_hardware_prev_page(void)
 {
-    if (s_settings_prev_button != NULL)
-    {
-        lv_obj_send_event(s_settings_prev_button, LV_EVENT_CLICKED, NULL);
-    }
 }
 
 void ui_settings_hardware_next_page(void)
 {
-    if (s_settings_next_button != NULL)
-    {
-        lv_obj_send_event(s_settings_next_button, LV_EVENT_CLICKED, NULL);
-    }
 }
 
 void ui_Settings_screen_init(void)
 {
-    ui_screen_scaffold_t page;
-    uint16_t i;
+    size_t i;
 
     if (ui_Settings != NULL)
     {
         return;
     }
 
-    s_settings_page_offset = 0U;
-    for (i = 0; i < UI_SETTINGS_VISIBLE_COUNT; ++i)
-    {
-        s_settings_cards[i].card = NULL;
-        s_settings_cards[i].title_label = NULL;
-        s_settings_cards[i].subtitle_label = NULL;
-    }
+    memset(s_settings_summary_labels, 0, sizeof(s_settings_summary_labels));
+    ui_settings_confirm_close();
 
     ui_Settings = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Settings, ui_settings_title_text(), UI_SCREEN_HOME);
+    lv_obj_set_style_bg_color(ui_Settings, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_bg_opa(ui_Settings, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(ui_Settings, LV_OBJ_FLAG_SCROLLABLE);
 
-    for (i = 0; i < UI_SETTINGS_VISIBLE_COUNT; ++i)
+    ui_top_nav_create(ui_Settings, UI_TOP_TAB_SETTINGS);
+
+    ui_create_label(ui_Settings,
+                    ui_settings_title_text(),
+                    27,
+                    78,
+                    220,
+                    54,
+                    44,
+                    LV_TEXT_ALIGN_LEFT,
+                    false,
+                    false);
+
+    for (i = 0; i < sizeof(s_settings_rows) / sizeof(s_settings_rows[0]); ++i)
     {
-        ui_settings_create_card(page.content, i, s_settings_card_y_positions[i]);
+        ui_settings_create_row(ui_Settings, &s_settings_rows[i], i, 139 + (int)i * 61);
     }
 
-    s_settings_page_label = ui_create_label(page.content,
-                                            "1 / 1",
-                                            24,
-                                            598,
-                                            120,
-                                            24,
-                                            18,
-                                            LV_TEXT_ALIGN_LEFT,
-                                            false,
-                                            false);
-    s_settings_prev_button = ui_create_button(page.content, 304, 585, 96, 46, ui_i18n_pick("上翻", "Prev"), 20, UI_SCREEN_NONE, false);
-    s_settings_next_button = ui_create_button(page.content, 408, 585, 96, 46, ui_i18n_pick("下翻", "Next"), 20, UI_SCREEN_NONE, false);
-    lv_obj_add_event_cb(s_settings_prev_button, ui_settings_prev_event_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_add_event_cb(s_settings_next_button, ui_settings_next_event_cb, LV_EVENT_CLICKED, NULL);
-
-    ui_settings_render();
+    ui_bottom_nav_create(ui_Settings, UI_BOTTOM_TAB_NONE);
 }
 
 void ui_Settings_screen_destroy(void)
 {
-    uint16_t i;
-
-    s_settings_prev_button = NULL;
-    s_settings_next_button = NULL;
-    s_settings_page_label = NULL;
-    s_settings_page_offset = 0U;
-    for (i = 0; i < UI_SETTINGS_VISIBLE_COUNT; ++i)
-    {
-        s_settings_cards[i].card = NULL;
-        s_settings_cards[i].title_label = NULL;
-        s_settings_cards[i].subtitle_label = NULL;
-    }
+    s_settings_confirm_overlay = NULL;
+    s_settings_confirm_target_mode = NET_MANAGER_MODE_NONE;
+    memset(s_settings_summary_labels, 0, sizeof(s_settings_summary_labels));
 
     if (ui_Settings != NULL)
     {

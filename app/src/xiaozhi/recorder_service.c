@@ -35,6 +35,7 @@
 #define RECORDER_RECORD_BUFFER_BYTES  (32U * 1024U)
 #define RECORDER_RECORD_WRITE_CHUNK_BYTES 960U
 #define RECORDER_RECORD_FLUSH_TIMEOUT_MS 2000U
+#define RECORDER_RECORD_CREATE_ATTEMPTS 8U
 
 #define RECORDER_EVT_PLAY_REQUEST     (1U << 0)
 #define RECORDER_EVT_EXIT             (1U << 1)
@@ -187,6 +188,7 @@ bool recorder_service_storage_ready(void)
 static bool recorder_service_build_record_dir(char *buffer, size_t buffer_size)
 {
     const char *mount_root = recorder_service_resolve_mount_root();
+    int written;
 
     if (buffer == NULL || buffer_size == 0U)
     {
@@ -201,11 +203,17 @@ static bool recorder_service_build_record_dir(char *buffer, size_t buffer_size)
 
     if (mount_root == NULL || mount_root[0] == '\0' || strcmp(mount_root, "/") == 0)
     {
-        rt_snprintf(buffer, buffer_size, "/record");
+        written = rt_snprintf(buffer, buffer_size, "/record");
     }
     else
     {
-        rt_snprintf(buffer, buffer_size, "%s/record", mount_root);
+        written = rt_snprintf(buffer, buffer_size, "%s/record", mount_root);
+    }
+
+    if (written < 0 || (size_t)written >= buffer_size)
+    {
+        buffer[0] = '\0';
+        return false;
     }
 
     mkdir(buffer, 0);
@@ -215,6 +223,7 @@ static bool recorder_service_build_record_dir(char *buffer, size_t buffer_size)
 static bool recorder_service_join_path(char *buffer, size_t buffer_size, const char *dir, const char *name)
 {
     size_t dir_len;
+    int written;
 
     if (buffer == NULL || buffer_size == 0U || dir == NULL || name == NULL)
     {
@@ -229,46 +238,87 @@ static bool recorder_service_join_path(char *buffer, size_t buffer_size, const c
 
     if (strcmp(dir, "/") == 0)
     {
-        rt_snprintf(buffer, buffer_size, "/%s", name);
+        written = rt_snprintf(buffer, buffer_size, "/%s", name);
     }
     else if (dir[dir_len - 1] == '/')
     {
-        rt_snprintf(buffer, buffer_size, "%s%s", dir, name);
+        written = rt_snprintf(buffer, buffer_size, "%s%s", dir, name);
     }
     else
     {
-        rt_snprintf(buffer, buffer_size, "%s/%s", dir, name);
+        written = rt_snprintf(buffer, buffer_size, "%s/%s", dir, name);
+    }
+
+    if (written < 0 || (size_t)written >= buffer_size)
+    {
+        buffer[0] = '\0';
+        return false;
     }
 
     return true;
 }
 
-static void recorder_service_build_timestamp_name(char *buffer, size_t buffer_size)
+static bool recorder_service_build_timestamp_name(char *buffer, size_t buffer_size, uint8_t suffix)
 {
     time_t now = time(RT_NULL);
     struct tm tm_now;
+    int written;
 
     if (buffer == NULL || buffer_size == 0U)
     {
-        return;
+        return false;
     }
 
     if (now < 1700000000)
     {
-        rt_snprintf(buffer, buffer_size, "rec_%lu.wav", (unsigned long)rt_tick_get());
-        return;
+        if (suffix == 0U)
+        {
+            written = rt_snprintf(buffer, buffer_size, "rec_%lu.wav", (unsigned long)rt_tick_get());
+        }
+        else
+        {
+            written = rt_snprintf(buffer, buffer_size, "rec_%lu_%u.wav", (unsigned long)rt_tick_get(), (unsigned int)suffix);
+        }
+        if (written < 0 || (size_t)written >= buffer_size)
+        {
+            buffer[0] = '\0';
+            return false;
+        }
+        return true;
     }
 
     localtime_r(&now, &tm_now);
-    rt_snprintf(buffer,
-                buffer_size,
-                "rec_%04d%02d%02d_%02d%02d%02d.wav",
-                tm_now.tm_year + 1900,
-                tm_now.tm_mon + 1,
-                tm_now.tm_mday,
-                tm_now.tm_hour,
-                tm_now.tm_min,
-                tm_now.tm_sec);
+    if (suffix == 0U)
+    {
+        written = rt_snprintf(buffer,
+                              buffer_size,
+                              "rec_%04d%02d%02d_%02d%02d%02d.wav",
+                              tm_now.tm_year + 1900,
+                              tm_now.tm_mon + 1,
+                              tm_now.tm_mday,
+                              tm_now.tm_hour,
+                              tm_now.tm_min,
+                              tm_now.tm_sec);
+    }
+    else
+    {
+        written = rt_snprintf(buffer,
+                              buffer_size,
+                              "rec_%04d%02d%02d_%02d%02d%02d_%u.wav",
+                              tm_now.tm_year + 1900,
+                              tm_now.tm_mon + 1,
+                              tm_now.tm_mday,
+                              tm_now.tm_hour,
+                              tm_now.tm_min,
+                              tm_now.tm_sec,
+                              (unsigned int)suffix);
+    }
+    if (written < 0 || (size_t)written >= buffer_size)
+    {
+        buffer[0] = '\0';
+        return false;
+    }
+    return true;
 }
 
 static bool recorder_service_write_all(int fd, const void *buffer, size_t size)
@@ -791,7 +841,11 @@ static bool recorder_service_open_record_file(void)
 {
     char file_name[RECORDER_MAX_FILE_NAME];
     char file_path[RECORDER_MAX_PATH];
+    char cached_record_file_path[RECORDER_MAX_PATH];
+    char cached_recording_file_name[RECORDER_MAX_FILE_NAME];
     int fd;
+    int written;
+    uint8_t attempt;
 
     if (!recorder_service_prepare_record_dir())
     {
@@ -799,14 +853,47 @@ static bool recorder_service_open_record_file(void)
         return false;
     }
 
-    recorder_service_build_timestamp_name(file_name, sizeof(file_name));
-    if (!recorder_service_join_path(file_path, sizeof(file_path), s_recorder.record_dir, file_name))
+    fd = -1;
+    for (attempt = 0U; attempt < RECORDER_RECORD_CREATE_ATTEMPTS; ++attempt)
+    {
+        if (!recorder_service_build_timestamp_name(file_name, sizeof(file_name), attempt))
+        {
+            recorder_service_set_status("文件名过长");
+            return false;
+        }
+        if (!recorder_service_join_path(file_path, sizeof(file_path), s_recorder.record_dir, file_name))
+        {
+            recorder_service_set_status("文件路径失败");
+            return false;
+        }
+
+        fd = open(file_path, O_RDWR | O_CREAT | O_EXCL, 0666);
+        if (fd >= 0)
+        {
+            break;
+        }
+    }
+
+    written = rt_snprintf(cached_record_file_path,
+                          sizeof(cached_record_file_path),
+                          "%s",
+                          file_path);
+    if (written < 0 || (size_t)written >= sizeof(cached_record_file_path))
     {
         recorder_service_set_status("文件路径失败");
         return false;
     }
 
-    fd = open(file_path, O_RDWR | O_CREAT | O_TRUNC, 0);
+    written = rt_snprintf(cached_recording_file_name,
+                          sizeof(cached_recording_file_name),
+                          "%s",
+                          file_name);
+    if (written < 0 || (size_t)written >= sizeof(cached_recording_file_name))
+    {
+        recorder_service_set_status("文件名过长");
+        return false;
+    }
+
     if (fd < 0)
     {
         recorder_service_set_status("打开录音文件失败");
@@ -821,8 +908,14 @@ static bool recorder_service_open_record_file(void)
         return false;
     }
 
-    rt_snprintf(s_recorder.record_file_path, sizeof(s_recorder.record_file_path), "%s", file_path);
-    rt_snprintf(s_recorder.recording_file_name, sizeof(s_recorder.recording_file_name), "%s", file_name);
+    rt_snprintf(s_recorder.record_file_path,
+                sizeof(s_recorder.record_file_path),
+                "%s",
+                cached_record_file_path);
+    rt_snprintf(s_recorder.recording_file_name,
+                sizeof(s_recorder.recording_file_name),
+                "%s",
+                cached_recording_file_name);
     s_recorder.record_fd = fd;
     s_recorder.record_bytes = 0U;
     s_recorder.record_write_generation++;
@@ -1255,6 +1348,7 @@ size_t recorder_service_scan_files(recorder_service_file_t *files, size_t max_fi
     struct dirent *entry = RT_NULL;
     size_t count = 0U;
     char dir_path[RECORDER_MAX_PATH];
+    int written;
 
     if (files == NULL || max_files == 0U)
     {
@@ -1266,7 +1360,13 @@ size_t recorder_service_scan_files(recorder_service_file_t *files, size_t max_fi
         return 0U;
     }
 
-    rt_snprintf(dir_path, sizeof(dir_path), "%s", recorder_service_get_record_dir());
+    written = rt_snprintf(dir_path, sizeof(dir_path), "%s", recorder_service_get_record_dir());
+    if (written < 0 || (size_t)written >= sizeof(dir_path))
+    {
+        recorder_service_set_status("录音目录过长");
+        return 0U;
+    }
+
     dir = opendir(dir_path);
     if (dir == RT_NULL)
     {
@@ -1306,8 +1406,18 @@ size_t recorder_service_scan_files(recorder_service_file_t *files, size_t max_fi
             continue;
         }
 
-        rt_snprintf(files[count].name, sizeof(files[count].name), "%s", entry->d_name);
-        rt_snprintf(files[count].path, sizeof(files[count].path), "%s", path);
+        written = rt_snprintf(files[count].name, sizeof(files[count].name), "%s", entry->d_name);
+        if (written < 0 || (size_t)written >= sizeof(files[count].name))
+        {
+            continue;
+        }
+
+        written = rt_snprintf(files[count].path, sizeof(files[count].path), "%s", path);
+        if (written < 0 || (size_t)written >= sizeof(files[count].path))
+        {
+            continue;
+        }
+
         files[count].size_bytes = (uint32_t)st.st_size;
         files[count].mtime = st.st_mtime;
         if (st.st_size > RECORDER_HEADER_BYTES)
@@ -1331,6 +1441,7 @@ size_t recorder_service_scan_files(recorder_service_file_t *files, size_t max_fi
 bool recorder_service_play_file(const char *path)
 {
     const char *name;
+    int written;
 
     if (path == NULL || path[0] == '\0')
     {
@@ -1358,10 +1469,28 @@ bool recorder_service_play_file(const char *path)
         return false;
     }
 
-    rt_snprintf(s_recorder.playing_path, sizeof(s_recorder.playing_path), "%s", path);
+    written = rt_snprintf(s_recorder.playing_path, sizeof(s_recorder.playing_path), "%s", path);
+    if (written < 0 || (size_t)written >= sizeof(s_recorder.playing_path))
+    {
+        s_recorder.playing_path[0] = '\0';
+        s_recorder.playing_name[0] = '\0';
+        rt_mutex_release(s_recorder.lock);
+        recorder_service_set_status("播放路径过长");
+        return false;
+    }
+
     name = strrchr(path, '/');
     name = (name != NULL) ? (name + 1) : path;
-    rt_snprintf(s_recorder.playing_name, sizeof(s_recorder.playing_name), "%s", name);
+    written = rt_snprintf(s_recorder.playing_name, sizeof(s_recorder.playing_name), "%s", name);
+    if (written < 0 || (size_t)written >= sizeof(s_recorder.playing_name))
+    {
+        s_recorder.playing_path[0] = '\0';
+        s_recorder.playing_name[0] = '\0';
+        rt_mutex_release(s_recorder.lock);
+        recorder_service_set_status("播放文件名过长");
+        return false;
+    }
+
     s_recorder.playback_stop_requested = false;
     rt_mutex_release(s_recorder.lock);
 

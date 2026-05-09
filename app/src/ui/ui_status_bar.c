@@ -1,4 +1,5 @@
 #include "ui_status_bar.h"
+#include "ui_components.h"
 
 #include <limits.h>
 #include <stddef.h>
@@ -823,7 +824,7 @@ void ui_status_bar_component_build(lv_obj_t *parent,
     if (enable_detail_touch && detail_touch_cb != NULL)
     {
         lv_obj_add_flag(bar_touch_zone, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_add_event_cb(bar_touch_zone, detail_touch_cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(bar_touch_zone, detail_touch_cb, LV_EVENT_GESTURE, NULL);
     }
 
     if (refs != NULL)
@@ -941,11 +942,13 @@ void ui_status_bar_component_refresh(void)
     if (battery_changed)
     {
         s_status_pending_battery_percent = snapshot.battery_percent;
+        ui_top_nav_update_battery(snapshot.battery_percent, snapshot.charge_state);
         ui_status_bar_refresh_battery_percent();
     }
     if (charge_changed)
     {
         s_status_pending_charge = snapshot.charge_state;
+        ui_top_nav_update_battery(snapshot.battery_percent, snapshot.charge_state);
         ui_status_bar_refresh_charging_icons();
     }
     if (connection_changed)
@@ -968,6 +971,14 @@ void ui_status_bar_component_force_refresh(void)
 void ui_status_bar_component_update_charge(uint8_t is_charging)
 {
     int pending = is_charging ? 1 : 0;
+    int percent = (s_status_pending_battery_percent >= 0) ?
+                  s_status_pending_battery_percent : s_status_applied_battery_percent;
+
+    if (percent < 0)
+    {
+        percent = 100;
+    }
+    ui_top_nav_update_battery((uint8_t)percent, (uint8_t)pending);
 
     if (s_status_pending_charge == pending ||
         (s_status_pending_charge < 0 && s_status_applied_charge == pending))
@@ -985,6 +996,14 @@ void ui_status_bar_component_update_battery_percent(uint8_t percent)
     {
         percent = 100U;
     }
+
+    int charging = (s_status_pending_charge >= 0) ?
+                   s_status_pending_charge : s_status_applied_charge;
+    if (charging < 0)
+    {
+        charging = 0;
+    }
+    ui_top_nav_update_battery(percent, (uint8_t)charging);
 
     if (s_status_pending_battery_percent == (int)percent ||
         (s_status_pending_battery_percent < 0 &&

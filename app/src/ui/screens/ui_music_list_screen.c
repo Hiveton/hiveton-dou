@@ -4,6 +4,7 @@
 #include "ui.h"
 #include "ui_i18n.h"
 #include "ui_helpers.h"
+#include "ui_components.h"
 #include "ui_runtime_adapter.h"
 #include "music_service.h"
 
@@ -209,6 +210,7 @@ static void ui_music_list_create_card(lv_obj_t *parent, uint16_t slot_index, int
                                         LV_TEXT_ALIGN_LEFT,
                                         false,
                                         false);
+    lv_label_set_long_mode(refs->title_label, LV_LABEL_LONG_DOT);
     refs->subtitle_label = ui_create_label(refs->card,
                                            "",
                                            20,
@@ -219,6 +221,7 @@ static void ui_music_list_create_card(lv_obj_t *parent, uint16_t slot_index, int
                                            LV_TEXT_ALIGN_LEFT,
                                            false,
                                            false);
+    lv_label_set_long_mode(refs->subtitle_label, LV_LABEL_LONG_DOT);
 
     divider = lv_obj_create(refs->card);
     lv_obj_set_pos(divider, 0, 125);
@@ -251,7 +254,6 @@ void ui_music_list_hardware_next_page(void)
 
 void ui_Music_List_screen_init(void)
 {
-    ui_screen_scaffold_t page;
     uint16_t i;
 
     if (ui_Music_List != NULL)
@@ -259,35 +261,66 @@ void ui_Music_List_screen_init(void)
         return;
     }
 
-    (void)music_service_refresh();
+    memset(s_music_cards, 0, sizeof(s_music_cards));
+    s_music_page_label = NULL;
+    s_music_prev_button = NULL;
+    s_music_next_button = NULL;
     s_music_page_offset = 0U;
-    for (i = 0; i < UI_MUSIC_LIST_VISIBLE_COUNT; ++i)
-    {
-        s_music_cards[i].card = NULL;
-        s_music_cards[i].title_label = NULL;
-        s_music_cards[i].subtitle_label = NULL;
-    }
+
+    (void)music_service_refresh();
 
     ui_Music_List = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Music_List, ui_i18n_pick("本地音乐", "Music"), UI_SCREEN_HOME);
+    ui_top_nav_create(ui_Music_List, UI_TOP_TAB_MUSIC);
+    ui_bottom_nav_create(ui_Music_List, UI_BOTTOM_TAB_NONE);
+
+    ui_create_label(ui_Music_List,
+                    ui_i18n_pick("本地音乐", "Music"),
+                    32,
+                    84,
+                    200,
+                    42,
+                    30,
+                    LV_TEXT_ALIGN_LEFT,
+                    true,
+                    false);
+
+    s_music_page_label = ui_create_label(ui_Music_List,
+                                         "0 / 0",
+                                         346,
+                                         94,
+                                         150,
+                                         24,
+                                         18,
+                                         LV_TEXT_ALIGN_RIGHT,
+                                         false,
+                                         false);
+    lv_label_set_long_mode(s_music_page_label, LV_LABEL_LONG_DOT);
 
     for (i = 0; i < UI_MUSIC_LIST_VISIBLE_COUNT; ++i)
     {
-        ui_music_list_create_card(page.content, i, (int)(i * 126));
+        ui_music_list_create_card(ui_Music_List,
+                                  i,
+                                  (int)(138 + (int)i * 126));
     }
 
-    s_music_page_label = ui_create_label(page.content,
-                                         "1 / 1",
-                                         24,
-                                         598,
-                                         120,
-                                         24,
-                                         18,
-                                         LV_TEXT_ALIGN_LEFT,
-                                         false,
-                                         false);
-    s_music_prev_button = ui_create_button(page.content, 304, 585, 96, 46, ui_i18n_pick("上翻", "Prev"), 20, UI_SCREEN_NONE, false);
-    s_music_next_button = ui_create_button(page.content, 408, 585, 96, 46, ui_i18n_pick("下翻", "Next"), 20, UI_SCREEN_NONE, false);
+    s_music_prev_button = ui_create_button(ui_Music_List,
+                                           32,
+                                           664,
+                                           136,
+                                           44,
+                                           ui_i18n_pick("上一页", "Prev"),
+                                           20,
+                                           UI_SCREEN_NONE,
+                                           false);
+    s_music_next_button = ui_create_button(ui_Music_List,
+                                           360,
+                                           664,
+                                           136,
+                                           44,
+                                           ui_i18n_pick("下一页", "Next"),
+                                           20,
+                                           UI_SCREEN_NONE,
+                                           true);
     lv_obj_add_event_cb(s_music_prev_button, ui_music_list_prev_event_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_music_next_button, ui_music_list_next_event_cb, LV_EVENT_CLICKED, NULL);
 

@@ -23,6 +23,7 @@ void ui_runtime_go_back(void);
 void ui_runtime_handle_hardkey_nav(int direction);
 void ui_runtime_request_back(void);
 void ui_runtime_request_hardkey_nav(int direction);
+void ui_runtime_deinit(void);
 
 #ifdef __cplusplus
 }

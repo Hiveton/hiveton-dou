@@ -162,8 +162,10 @@ static void aw32001_debug_set_text(const char *text)
 {
     if (text != NULL)
     {
+        rt_enter_critical();
         rt_strncpy(s_status_text, text, sizeof(s_status_text) - 1U);
         s_status_text[sizeof(s_status_text) - 1U] = '\0';
+        rt_exit_critical();
     }
 }
 
@@ -303,6 +305,8 @@ void aw32001_debug_get_status_text(char *buffer, size_t buffer_size)
         return;
     }
 
+    rt_enter_critical();
     (void)rt_strncpy(buffer, s_status_text, buffer_size - 1U);
     buffer[buffer_size - 1U] = '\0';
+    rt_exit_critical();
 }

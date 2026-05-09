@@ -30,9 +30,9 @@
 #define READING_EPUB_ZIP_TAIL_BYTES (64U * 1024U)
 #define READING_EPUB_INFLATE_DICT_BITS 15U
 #define READING_EPUB_IMAGE_PSRAM_HEAP_SIZE (1408U * 1024U)
-#define READING_EPUB_IMAGE_ZIP_COMPRESSED_MAX_BYTES (1536U * 1024U)
-#define READING_EPUB_IMAGE_ZIP_UNCOMPRESSED_MAX_BYTES (1536U * 1024U)
-#define READING_EPUB_PNG_RAW_MAX_BYTES (1U * 1024U * 1024U)
+#define READING_EPUB_IMAGE_ZIP_COMPRESSED_MAX_BYTES (2U * 1024U * 1024U)
+#define READING_EPUB_IMAGE_ZIP_UNCOMPRESSED_MAX_BYTES (2U * 1024U * 1024U)
+#define READING_EPUB_PNG_RAW_MAX_BYTES (2U * 1024U * 1024U)
 #define READING_EPUB_IMAGE_RGB565_MAX_BYTES (1U * 1024U * 1024U)
 #define READING_EPUB_RGB565_BYTES_PER_PIXEL 2U
 #define READING_EPUB_IMAGE_MEM_MAGIC_PSRAM 0x4550524DU
@@ -52,6 +52,8 @@ typedef struct
 {
     reading_epub_zip_entry_t entries[READING_EPUB_MAX_ENTRIES];
     uint16_t entry_count;
+    uint16_t total_entry_count;
+    uint32_t central_dir_offset;
 } reading_epub_zip_t;
 
 typedef struct
@@ -59,6 +61,7 @@ typedef struct
     char id[READING_EPUB_MAX_NAME];
     char href[READING_EPUB_MAX_INTERNAL_PATH];
     char media_type[48];
+    char properties[64];
 } reading_epub_manifest_item_t;
 
 typedef struct
@@ -67,6 +70,9 @@ typedef struct
     uint16_t item_count;
     char opf_path[READING_EPUB_MAX_INTERNAL_PATH];
     char root_dir[READING_EPUB_MAX_INTERNAL_PATH];
+    char cover_id[READING_EPUB_MAX_NAME];
+    char cover_path[READING_EPUB_MAX_INTERNAL_PATH];
+    uint8_t cover_priority;
 } reading_epub_package_t;
 
 typedef struct
@@ -119,6 +125,13 @@ typedef struct
 static bool s_reading_epub_uzlib_ready = false;
 static struct rt_memheap s_reading_epub_image_psram_heap;
 static rt_bool_t s_reading_epub_image_psram_heap_ready = RT_FALSE;
+
+static bool reading_epub_media_type_is_image(const char *media_type);
+static bool reading_epub_manifest_item_has_property(const reading_epub_manifest_item_t *item,
+                                                    const char *property);
+static bool reading_epub_manifest_item_looks_like_cover(const reading_epub_manifest_item_t *item);
+static bool reading_epub_spine_item_should_skip(const reading_epub_manifest_item_t *item,
+                                                const char *itemref_tag);
 
 #if defined(__CC_ARM) || defined(__CLANG_ARM)
 L2_RET_BSS_SECT_BEGIN(reading_epub_image_psram_heap_pool)
@@ -760,6 +773,101 @@ static const reading_epub_zip_entry_t *reading_epub_zip_find(const reading_epub_
     return NULL;
 }
 
+static bool reading_epub_zip_find_in_central_dir(const char *epub_path,
+                                                 const reading_epub_zip_t *zip,
+                                                 const char *name,
+                                                 reading_epub_zip_entry_t *entry_out)
+{
+    int fd;
+    uint16_t i;
+
+    if (epub_path == NULL ||
+        zip == NULL ||
+        name == NULL ||
+        entry_out == NULL ||
+        zip->central_dir_offset == 0U ||
+        zip->total_entry_count == 0U)
+    {
+        return false;
+    }
+
+    memset(entry_out, 0, sizeof(*entry_out));
+    fd = open(epub_path, O_RDONLY);
+    if (fd < 0)
+    {
+        return false;
+    }
+
+    if (lseek(fd, (off_t)zip->central_dir_offset, SEEK_SET) < 0)
+    {
+        close(fd);
+        return false;
+    }
+
+    for (i = 0U; i < zip->total_entry_count; ++i)
+    {
+        uint8_t header[46];
+        ssize_t read_size;
+        uint16_t name_len;
+        uint16_t extra_len;
+        uint16_t comment_len;
+        char name_buffer[READING_EPUB_MAX_INTERNAL_PATH];
+
+        read_size = read(fd, header, sizeof(header));
+        if (read_size != (ssize_t)sizeof(header) ||
+            reading_epub_le32(header) != 0x02014B50UL)
+        {
+            break;
+        }
+
+        name_len = reading_epub_le16(&header[28]);
+        extra_len = reading_epub_le16(&header[30]);
+        comment_len = reading_epub_le16(&header[32]);
+        if (name_len == 0U || name_len >= READING_EPUB_MAX_INTERNAL_PATH)
+        {
+            if (lseek(fd, (off_t)(name_len + extra_len + comment_len), SEEK_CUR) < 0)
+            {
+                break;
+            }
+            continue;
+        }
+
+        if (read(fd, name_buffer, name_len) != (ssize_t)name_len)
+        {
+            break;
+        }
+        name_buffer[name_len] = '\0';
+
+        if (strcmp(name_buffer, name) == 0)
+        {
+            int written = rt_snprintf(entry_out->name,
+                                      sizeof(entry_out->name),
+                                      "%s",
+                                      name_buffer);
+            if (written < 0 || (size_t)written >= sizeof(entry_out->name))
+            {
+                close(fd);
+                memset(entry_out, 0, sizeof(*entry_out));
+                return false;
+            }
+            entry_out->compression_method = reading_epub_le16(&header[10]);
+            entry_out->compressed_size = reading_epub_le32(&header[20]);
+            entry_out->uncompressed_size = reading_epub_le32(&header[24]);
+            entry_out->local_header_offset = reading_epub_le32(&header[42]);
+            close(fd);
+            return true;
+        }
+
+        if (lseek(fd, (off_t)(extra_len + comment_len), SEEK_CUR) < 0)
+        {
+            break;
+        }
+    }
+
+    close(fd);
+    return false;
+}
+
 static bool reading_epub_is_image_path(const char *path)
 {
     return reading_epub_has_extension(path, ".png") ||
@@ -880,6 +988,9 @@ static bool reading_epub_zip_open(const char *epub_path, reading_epub_zip_t *zip
 
     reading_epub_free_bytes(tail_buffer);
 
+    zip->total_entry_count = entry_count;
+    zip->central_dir_offset = central_dir_offset;
+
     if (entry_count == 0U || central_dir_offset == 0U)
     {
         rt_kprintf("reading_epub: zip eocd invalid path=%s entries=%u cd_off=%lu\n",
@@ -992,6 +1103,7 @@ static bool reading_epub_zip_read(const char *epub_path,
                                   size_t *out_size)
 {
     const reading_epub_zip_entry_t *entry;
+    reading_epub_zip_entry_t slow_entry;
     int fd;
     uint8_t local_header[30];
     uint16_t name_len;
@@ -1011,7 +1123,11 @@ static bool reading_epub_zip_read(const char *epub_path,
     entry = reading_epub_zip_find(zip, name);
     if (entry == NULL)
     {
-        return false;
+        if (!reading_epub_zip_find_in_central_dir(epub_path, zip, name, &slow_entry))
+        {
+            return false;
+        }
+        entry = &slow_entry;
     }
 
     if (!reading_epub_zip_entry_within_image_limits(entry, name))
@@ -1117,7 +1233,8 @@ static bool reading_epub_zip_read(const char *epub_path,
 
         status = uzlib_uncompress(&decomp);
         audio_mem_free(dict);
-        if (status != TINF_DONE && status != TINF_OK)
+        if ((status != TINF_DONE && status != TINF_OK) ||
+            decomp.dest != output_buffer + entry->uncompressed_size)
         {
             reading_epub_free_bytes(compressed_buffer);
             reading_epub_free_bytes(output_buffer);
@@ -1156,28 +1273,50 @@ static bool reading_epub_extract_attribute(const char *tag,
                                            size_t buffer_size)
 {
     const char *attribute;
+    const char *candidate;
+    const char *name_end;
     const char *value_start;
     const char *value_end;
+    size_t attribute_len;
+    size_t value_len;
 
     if (tag == NULL || attribute_name == NULL || buffer == NULL || buffer_size == 0U)
     {
         return false;
     }
 
-    attribute = strstr(tag, attribute_name);
-    if (attribute == NULL)
+    attribute_len = strlen(attribute_name);
+    attribute = NULL;
+    candidate = tag;
+    while (*candidate != '\0')
     {
-        buffer[0] = '\0';
-        return false;
-    }
+        bool left_boundary = (candidate == tag) ||
+                             isspace((unsigned char)candidate[-1]) ||
+                             candidate[-1] == '<' ||
+                             candidate[-1] == '/';
 
-    attribute = strchr(attribute, '=');
+        if (strncasecmp(candidate, attribute_name, attribute_len) == 0)
+        {
+            name_end = candidate + attribute_len;
+            while (*name_end == ' ' || *name_end == '\t' || *name_end == '\r' || *name_end == '\n')
+            {
+                ++name_end;
+            }
+
+            if (left_boundary && *name_end == '=')
+            {
+                attribute = name_end + 1;
+                break;
+            }
+        }
+
+        ++candidate;
+    }
     if (attribute == NULL)
     {
         buffer[0] = '\0';
         return false;
     }
-    ++attribute;
 
     while (*attribute == ' ' || *attribute == '\t')
     {
@@ -1198,8 +1337,80 @@ static bool reading_epub_extract_attribute(const char *tag,
         return false;
     }
 
-    rt_snprintf(buffer, buffer_size, "%.*s", (int)(value_end - value_start), value_start);
+    value_len = (size_t)(value_end - value_start);
+    if (value_len >= buffer_size)
+    {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    rt_snprintf(buffer, buffer_size, "%.*s", (int)value_len, value_start);
     return true;
+}
+
+static bool reading_epub_copy_xml_span(char *buffer,
+                                       size_t buffer_size,
+                                       const char *start,
+                                       size_t span_len)
+{
+    if (buffer == NULL || buffer_size == 0U || start == NULL || span_len >= buffer_size)
+    {
+        if (buffer != NULL && buffer_size > 0U)
+        {
+            buffer[0] = '\0';
+        }
+        return false;
+    }
+
+    rt_snprintf(buffer, buffer_size, "%.*s", (int)span_len, start);
+    return true;
+}
+
+static bool reading_epub_xml_start_tag_matches(const char *tag, const char *name)
+{
+    const char *cursor;
+    size_t name_len;
+
+    if (tag == NULL || name == NULL || tag[0] != '<' || name[0] == '\0')
+    {
+        return false;
+    }
+
+    cursor = tag + 1;
+    if (*cursor == '/' || *cursor == '!' || *cursor == '?')
+    {
+        return false;
+    }
+
+    name_len = strlen(name);
+    if (strncasecmp(cursor, name, name_len) != 0)
+    {
+        return false;
+    }
+
+    cursor += name_len;
+    return *cursor == '>' ||
+           *cursor == '/' ||
+           isspace((unsigned char)*cursor);
+}
+
+static const char *reading_epub_find_xml_start_tag(const char *cursor, const char *name)
+{
+    if (cursor == NULL || name == NULL)
+    {
+        return NULL;
+    }
+
+    while ((cursor = strchr(cursor, '<')) != NULL)
+    {
+        if (reading_epub_xml_start_tag_matches(cursor, name))
+        {
+            return cursor;
+        }
+        ++cursor;
+    }
+
+    return NULL;
 }
 
 static void reading_epub_get_directory(const char *path, char *buffer, size_t buffer_size)
@@ -1227,7 +1438,7 @@ static void reading_epub_get_directory(const char *path, char *buffer, size_t bu
     rt_snprintf(buffer, buffer_size, "%.*s", (int)(slash - path), path);
 }
 
-static void reading_epub_resolve_path(const char *base_path,
+static bool reading_epub_resolve_path(const char *base_path,
                                       const char *relative_path,
                                       char *buffer,
                                       size_t buffer_size)
@@ -1237,41 +1448,54 @@ static void reading_epub_resolve_path(const char *base_path,
     char *segments[24];
     uint16_t segment_count = 0U;
     char *token;
+    char *save_ptr = NULL;
+    size_t used = 0U;
+    int written;
 
     if (buffer == NULL || buffer_size == 0U)
     {
-        return;
+        return false;
     }
 
     if (relative_path == NULL || relative_path[0] == '\0')
     {
         buffer[0] = '\0';
-        return;
+        return false;
     }
 
     if (strchr(relative_path, ':') != NULL || relative_path[0] == '/')
     {
-        rt_snprintf(buffer, buffer_size, "%s", relative_path);
-        return;
+        written = rt_snprintf(buffer, buffer_size, "%s", relative_path);
+        if (written < 0 || (size_t)written >= buffer_size)
+        {
+            buffer[0] = '\0';
+            return false;
+        }
+        return true;
     }
 
     reading_epub_get_directory(base_path, directory, sizeof(directory));
     if (directory[0] != '\0')
     {
-        rt_snprintf(temp, sizeof(temp), "%s/%s", directory, relative_path);
+        written = rt_snprintf(temp, sizeof(temp), "%s/%s", directory, relative_path);
     }
     else
     {
-        rt_snprintf(temp, sizeof(temp), "%s", relative_path);
+        written = rt_snprintf(temp, sizeof(temp), "%s", relative_path);
+    }
+    if (written < 0 || (size_t)written >= sizeof(temp))
+    {
+        buffer[0] = '\0';
+        return false;
     }
 
     segment_count = 0U;
-    token = strtok(temp, "/");
+    token = strtok_r(temp, "/", &save_ptr);
     while (token != NULL && segment_count < (sizeof(segments) / sizeof(segments[0])))
     {
         if (strcmp(token, ".") == 0)
         {
-            token = strtok(NULL, "/");
+            token = strtok_r(NULL, "/", &save_ptr);
             continue;
         }
         if (strcmp(token, "..") == 0)
@@ -1280,22 +1504,34 @@ static void reading_epub_resolve_path(const char *base_path,
             {
                 --segment_count;
             }
-            token = strtok(NULL, "/");
+            token = strtok_r(NULL, "/", &save_ptr);
             continue;
         }
         segments[segment_count++] = token;
-        token = strtok(NULL, "/");
+        token = strtok_r(NULL, "/", &save_ptr);
+    }
+    if (token != NULL)
+    {
+        buffer[0] = '\0';
+        return false;
     }
 
     buffer[0] = '\0';
     for (uint16_t i = 0; i < segment_count; ++i)
     {
-        if (i > 0U)
+        written = rt_snprintf(buffer + used,
+                              buffer_size - used,
+                              "%s%s",
+                              i > 0U ? "/" : "",
+                              segments[i]);
+        if (written < 0 || (size_t)written >= (buffer_size - used))
         {
-            strncat(buffer, "/", buffer_size - strlen(buffer) - 1U);
+            buffer[0] = '\0';
+            return false;
         }
-        strncat(buffer, segments[i], buffer_size - strlen(buffer) - 1U);
+        used += (size_t)written;
     }
+    return buffer[0] != '\0';
 }
 
 static uint8_t reading_epub_choose_jpeg_scale(unsigned src_width,
@@ -1332,6 +1568,7 @@ static bool reading_epub_load_package(const char *epub_path,
     char opf_path[READING_EPUB_MAX_INTERNAL_PATH];
     const char *cursor;
     const char *spine_cursor;
+    int written;
 
     if (!reading_epub_zip_read(epub_path, zip, "META-INF/container.xml", &container_data, &container_size))
     {
@@ -1346,7 +1583,11 @@ static bool reading_epub_load_package(const char *epub_path,
     }
     reading_epub_free_bytes(container_data);
 
-    rt_snprintf(package->opf_path, sizeof(package->opf_path), "%s", opf_path);
+    written = rt_snprintf(package->opf_path, sizeof(package->opf_path), "%s", opf_path);
+    if (written < 0 || (size_t)written >= sizeof(package->opf_path))
+    {
+        return false;
+    }
     reading_epub_get_directory(opf_path, package->root_dir, sizeof(package->root_dir));
 
     if (!reading_epub_zip_read(epub_path, zip, package->opf_path, &opf_data, &opf_size))
@@ -1355,29 +1596,114 @@ static bool reading_epub_load_package(const char *epub_path,
     }
 
     cursor = (const char *)opf_data;
-    while ((cursor = strstr(cursor, "<item ")) != NULL &&
-           package->item_count < READING_EPUB_MAX_MANIFEST_ITEMS)
+    while ((cursor = reading_epub_find_xml_start_tag(cursor, "meta")) != NULL)
     {
         const char *tag_end = strchr(cursor, '>');
         char tag[READING_EPUB_MAX_TAG];
+        char name[READING_EPUB_MAX_NAME];
+        char content[READING_EPUB_MAX_NAME];
 
         if (tag_end == NULL)
         {
             break;
         }
 
-        rt_snprintf(tag, sizeof(tag), "%.*s", (int)(tag_end - cursor + 1), cursor);
-        if (reading_epub_extract_attribute(tag, "id", package->items[package->item_count].id, sizeof(package->items[package->item_count].id)) &&
-            reading_epub_extract_attribute(tag, "href", package->items[package->item_count].href, sizeof(package->items[package->item_count].href)) &&
-            reading_epub_extract_attribute(tag, "media-type", package->items[package->item_count].media_type, sizeof(package->items[package->item_count].media_type)))
+        if (!reading_epub_copy_xml_span(tag, sizeof(tag), cursor, (size_t)(tag_end - cursor + 1)))
         {
-            ++package->item_count;
+            cursor = tag_end + 1;
+            continue;
+        }
+        name[0] = '\0';
+        content[0] = '\0';
+        if (reading_epub_extract_attribute(tag, "name", name, sizeof(name)) &&
+            reading_epub_extract_attribute(tag, "content", content, sizeof(content)) &&
+            strcasecmp(name, "cover") == 0)
+        {
+            written = rt_snprintf(package->cover_id,
+                                  sizeof(package->cover_id),
+                                  "%s",
+                                  content);
+            if (written < 0 || (size_t)written >= sizeof(package->cover_id))
+            {
+                package->cover_id[0] = '\0';
+                cursor = tag_end + 1;
+                continue;
+            }
+            break;
         }
 
         cursor = tag_end + 1;
     }
 
-    spine_cursor = strstr((const char *)opf_data, "<spine");
+    cursor = (const char *)opf_data;
+    while ((cursor = reading_epub_find_xml_start_tag(cursor, "item")) != NULL)
+    {
+        const char *tag_end = strchr(cursor, '>');
+        char tag[READING_EPUB_MAX_TAG];
+        reading_epub_manifest_item_t item;
+
+        if (tag_end == NULL)
+        {
+            break;
+        }
+
+        if (!reading_epub_copy_xml_span(tag, sizeof(tag), cursor, (size_t)(tag_end - cursor + 1)))
+        {
+            cursor = tag_end + 1;
+            continue;
+        }
+        memset(&item, 0, sizeof(item));
+        if (reading_epub_extract_attribute(tag, "id", item.id, sizeof(item.id)) &&
+            reading_epub_extract_attribute(tag, "href", item.href, sizeof(item.href)) &&
+            reading_epub_extract_attribute(tag, "media-type", item.media_type, sizeof(item.media_type)))
+        {
+            char resolved_path[READING_EPUB_MAX_INTERNAL_PATH];
+            uint8_t priority = 0U;
+
+            (void)reading_epub_extract_attribute(tag, "properties", item.properties, sizeof(item.properties));
+            if (reading_epub_media_type_is_image(item.media_type))
+            {
+                if (reading_epub_manifest_item_has_property(&item, "cover-image"))
+                {
+                    priority = 3U;
+                }
+                else if (package->cover_id[0] != '\0' && strcmp(item.id, package->cover_id) == 0)
+                {
+                    priority = 2U;
+                }
+                else if (reading_epub_manifest_item_looks_like_cover(&item))
+                {
+                    priority = 1U;
+                }
+
+                if (priority > package->cover_priority)
+                {
+                    if (reading_epub_resolve_path(package->opf_path, item.href, resolved_path, sizeof(resolved_path)))
+                    {
+                        written = rt_snprintf(package->cover_path, sizeof(package->cover_path), "%s", resolved_path);
+                        if (written >= 0 && (size_t)written < sizeof(package->cover_path))
+                        {
+                            package->cover_priority = priority;
+                        }
+                        else
+                        {
+                            package->cover_path[0] = '\0';
+                        }
+                    }
+                }
+            }
+
+            if (package->item_count < READING_EPUB_MAX_MANIFEST_ITEMS)
+            {
+                package->items[package->item_count] = item;
+                ++package->item_count;
+            }
+        }
+
+        cursor = tag_end + 1;
+    }
+
+    spine_cursor = reading_epub_find_xml_start_tag((const char *)opf_data, "spine");
     if (spine_cursor != NULL)
     {
         cursor = spine_cursor;
@@ -1407,6 +1733,265 @@ static const reading_epub_manifest_item_t *reading_epub_manifest_find(const read
     }
 
     return NULL;
+}
+
+static bool reading_epub_contains_case_insensitive(const char *text, const char *needle)
+{
+    size_t needle_len;
+
+    if (text == NULL || needle == NULL || text[0] == '\0' || needle[0] == '\0')
+    {
+        return false;
+    }
+
+    needle_len = strlen(needle);
+    while (*text != '\0')
+    {
+        if (strncasecmp(text, needle, needle_len) == 0)
+        {
+            return true;
+        }
+        ++text;
+    }
+
+    return false;
+}
+
+static bool reading_epub_media_type_is_image(const char *media_type)
+{
+    if (media_type == NULL)
+    {
+        return false;
+    }
+
+    return strncasecmp(media_type, "image/", 6U) == 0;
+}
+
+static bool reading_epub_manifest_item_has_property(const reading_epub_manifest_item_t *item,
+                                                    const char *property)
+{
+    return item != NULL &&
+           property != NULL &&
+           reading_epub_contains_case_insensitive(item->properties, property);
+}
+
+static bool reading_epub_manifest_item_looks_like_cover(const reading_epub_manifest_item_t *item)
+{
+    if (item == NULL)
+    {
+        return false;
+    }
+
+    return reading_epub_contains_case_insensitive(item->id, "cover") ||
+           reading_epub_contains_case_insensitive(item->href, "cover");
+}
+
+static const char *reading_epub_path_basename_for_filter(const char *path)
+{
+    const char *slash;
+    const char *backslash;
+
+    if (path == NULL)
+    {
+        return "";
+    }
+
+    slash = strrchr(path, '/');
+    backslash = strrchr(path, '\\');
+    if (slash == NULL || (backslash != NULL && backslash > slash))
+    {
+        slash = backslash;
+    }
+
+    return slash != NULL ? slash + 1 : path;
+}
+
+static bool reading_epub_spine_item_should_skip(const reading_epub_manifest_item_t *item,
+                                                const char *itemref_tag)
+{
+    char linear[READING_EPUB_MAX_NAME];
+    const char *id;
+    const char *href;
+    const char *base;
+
+    if (item == NULL)
+    {
+        return true;
+    }
+
+    linear[0] = '\0';
+    if (itemref_tag != NULL &&
+        reading_epub_extract_attribute(itemref_tag, "linear", linear, sizeof(linear)) &&
+        strcasecmp(linear, "no") == 0)
+    {
+        return true;
+    }
+
+    if (item->media_type[0] != '\0' &&
+        strcasecmp(item->media_type, "application/xhtml+xml") != 0 &&
+        strcasecmp(item->media_type, "text/html") != 0)
+    {
+        return true;
+    }
+
+    if (reading_epub_manifest_item_looks_like_cover(item) ||
+        reading_epub_manifest_item_has_property(item, "nav"))
+    {
+        return true;
+    }
+
+    id = item->id;
+    href = item->href;
+    base = reading_epub_path_basename_for_filter(href);
+    if (reading_epub_contains_case_insensitive(id, "titlepage") ||
+        reading_epub_contains_case_insensitive(id, "title-page") ||
+        reading_epub_contains_case_insensitive(id, "title_page") ||
+        reading_epub_contains_case_insensitive(id, "nav") ||
+        reading_epub_contains_case_insensitive(id, "toc") ||
+        reading_epub_contains_case_insensitive(base, "titlepage") ||
+        reading_epub_contains_case_insensitive(base, "title-page") ||
+        reading_epub_contains_case_insensitive(base, "title_page") ||
+        reading_epub_contains_case_insensitive(base, "nav") ||
+        reading_epub_contains_case_insensitive(base, "toc") ||
+        reading_epub_contains_case_insensitive(base, "contents"))
+    {
+        return true;
+    }
+
+    return false;
+}
+
+static bool reading_epub_copy_manifest_image_path(const reading_epub_package_t *package,
+                                                  const reading_epub_manifest_item_t *item,
+                                                  char *internal_path,
+                                                  size_t internal_path_size)
+{
+    char resolved_path[READING_EPUB_MAX_INTERNAL_PATH];
+    int written;
+
+    if (package == NULL ||
+        item == NULL ||
+        internal_path == NULL ||
+        internal_path_size == 0U ||
+        !reading_epub_media_type_is_image(item->media_type))
+    {
+        return false;
+    }
+
+    if (!reading_epub_resolve_path(package->opf_path, item->href, resolved_path, sizeof(resolved_path)))
+    {
+        return false;
+    }
+
+    written = rt_snprintf(internal_path, internal_path_size, "%s", resolved_path);
+    if (written < 0 || (size_t)written >= internal_path_size)
+    {
+        internal_path[0] = '\0';
+        return false;
+    }
+
+    return internal_path[0] != '\0';
+}
+
+static bool reading_epub_find_cover_in_package(const reading_epub_package_t *package,
+                                               char *internal_path,
+                                               size_t internal_path_size)
+{
+    const reading_epub_manifest_item_t *item;
+    uint16_t i;
+
+    if (package == NULL || internal_path == NULL || internal_path_size == 0U)
+    {
+        return false;
+    }
+
+    internal_path[0] = '\0';
+    if (package->cover_path[0] != '\0')
+    {
+        int written = rt_snprintf(internal_path, internal_path_size, "%s", package->cover_path);
+        if (written < 0 || (size_t)written >= internal_path_size)
+        {
+            internal_path[0] = '\0';
+            return false;
+        }
+        return internal_path[0] != '\0';
+    }
+
+    for (i = 0U; i < package->item_count; ++i)
+    {
+        item = &package->items[i];
+        if (reading_epub_manifest_item_has_property(item, "cover-image") &&
+            reading_epub_copy_manifest_image_path(package, item, internal_path, internal_path_size))
+        {
+            return true;
+        }
+    }
+
+    if (package->cover_id[0] != '\0')
+    {
+        item = reading_epub_manifest_find(package, package->cover_id);
+        if (reading_epub_copy_manifest_image_path(package, item, internal_path, internal_path_size))
+        {
+            return true;
+        }
+    }
+
+    for (i = 0U; i < package->item_count; ++i)
+    {
+        item = &package->items[i];
+        if (reading_epub_manifest_item_looks_like_cover(item) &&
+            reading_epub_copy_manifest_image_path(package, item, internal_path, internal_path_size))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool reading_epub_find_cover_image(const char *epub_path,
+                                   char *internal_path,
+                                   size_t internal_path_size)
+{
+    reading_epub_zip_t *zip = NULL;
+    reading_epub_package_t *package = NULL;
+    bool ok = false;
+
+    if (internal_path != NULL && internal_path_size > 0U)
+    {
+        internal_path[0] = '\0';
+    }
+
+    if (epub_path == NULL ||
+        internal_path == NULL ||
+        internal_path_size == 0U)
+    {
+        return false;
+    }
+
+    zip = (reading_epub_zip_t *)reading_epub_alloc_zero(sizeof(*zip));
+    package = (reading_epub_package_t *)reading_epub_alloc_zero(sizeof(*package));
+    if (zip == NULL || package == NULL)
+    {
+        goto cleanup;
+    }
+
+    if (!reading_epub_zip_open(epub_path, zip))
+    {
+        goto cleanup;
+    }
+
+    if (!reading_epub_load_package(epub_path, zip, package))
+    {
+        goto cleanup;
+    }
+
+    ok = reading_epub_find_cover_in_package(package, internal_path, internal_path_size);
+
+cleanup:
+    if (package != NULL) reading_epub_free_zero(package);
+    if (zip != NULL) reading_epub_free_zero(zip);
+    return ok;
 }
 
 static bool reading_epub_append_text_char(reading_epub_build_state_t *state, char ch)
@@ -1493,6 +2078,8 @@ static bool reading_epub_append_text_block(reading_epub_build_state_t *state,
 static bool reading_epub_append_image_block(reading_epub_build_state_t *state,
                                             const char *internal_path)
 {
+    int written;
+
     if (state == NULL || internal_path == NULL || internal_path[0] == '\0')
     {
         return false;
@@ -1505,10 +2092,16 @@ static bool reading_epub_append_image_block(reading_epub_build_state_t *state,
         return false;
     }
 
-    rt_snprintf(state->images[state->image_count].internal_path,
-                sizeof(state->images[state->image_count].internal_path),
-                "%s",
-                internal_path);
+    written = rt_snprintf(state->images[state->image_count].internal_path,
+                          sizeof(state->images[state->image_count].internal_path),
+                          "%s",
+                          internal_path);
+    if (written < 0 ||
+        (size_t)written >= sizeof(state->images[state->image_count].internal_path))
+    {
+        reading_epub_set_error(state, "EPUB image path too long");
+        return false;
+    }
     state->blocks[state->block_count].type = READING_EPUB_BLOCK_IMAGE;
     state->blocks[state->block_count].text_start = 0U;
     state->blocks[state->block_count].text_end = 0U;
@@ -1561,6 +2154,34 @@ static bool reading_epub_extract_image_path(const char *tag,
     return reading_epub_extract_attribute(tag, "href", buffer, buffer_size);
 }
 
+static bool reading_epub_tag_name_matches(const char *tag, const char *name)
+{
+    const char *cursor;
+    size_t name_len;
+
+    if (tag == NULL || name == NULL || tag[0] != '<' || name[0] == '\0')
+    {
+        return false;
+    }
+
+    cursor = tag + 1;
+    if (*cursor == '/')
+    {
+        ++cursor;
+    }
+
+    name_len = strlen(name);
+    if (strncasecmp(cursor, name, name_len) != 0)
+    {
+        return false;
+    }
+
+    cursor += name_len;
+    return *cursor == '>' ||
+           *cursor == '/' ||
+           isspace((unsigned char)*cursor);
+}
+
 static bool reading_epub_parse_xhtml(const char *xhtml_path,
                                      const uint8_t *data,
                                      size_t data_size,
@@ -1597,29 +2218,36 @@ static bool reading_epub_parse_xhtml(const char *xhtml_path,
                 break;
             }
 
-            rt_snprintf(tag, sizeof(tag), "%.*s", (int)(tag_end - tag_start + 1U), &data[tag_start]);
+            if (!reading_epub_copy_xml_span(tag,
+                                            sizeof(tag),
+                                            (const char *)&data[tag_start],
+                                            tag_end - tag_start + 1U))
+            {
+                i = tag_end + 1U;
+                continue;
+            }
             closing = tag[1] == '/';
 
             if (!closing &&
-                (strstr(tag, "<p") == tag ||
-                 strstr(tag, "<div") == tag ||
-                 strstr(tag, "<h1") == tag ||
-                 strstr(tag, "<h2") == tag ||
-                 strstr(tag, "<h3") == tag ||
-                 strstr(tag, "<li") == tag))
+                (reading_epub_tag_name_matches(tag, "p") ||
+                 reading_epub_tag_name_matches(tag, "div") ||
+                 reading_epub_tag_name_matches(tag, "h1") ||
+                 reading_epub_tag_name_matches(tag, "h2") ||
+                 reading_epub_tag_name_matches(tag, "h3") ||
+                 reading_epub_tag_name_matches(tag, "li")))
             {
                 if (state->text_length > text_block_start)
                 {
                     reading_epub_append_line_break(state, 1U);
                 }
             }
-            else if (strstr(tag, "<br") == tag)
+            else if (reading_epub_tag_name_matches(tag, "br"))
             {
                 reading_epub_append_line_break(state, 1U);
             }
             else if (!closing &&
-                     (strstr(tag, "<img") == tag ||
-                      strstr(tag, "<image") == tag))
+                     (reading_epub_tag_name_matches(tag, "img") ||
+                      reading_epub_tag_name_matches(tag, "image")))
             {
                 reading_epub_trim_trailing_spaces(state);
                 if (!reading_epub_append_text_block(state, text_block_start, (uint32_t)state->text_length))
@@ -1629,8 +2257,8 @@ static bool reading_epub_parse_xhtml(const char *xhtml_path,
 
                 if (reading_epub_extract_image_path(tag, src_path, sizeof(src_path)))
                 {
-                    reading_epub_resolve_path(xhtml_path, src_path, resolved_path, sizeof(resolved_path));
-                    if (!reading_epub_append_image_block(state, resolved_path))
+                    if (reading_epub_resolve_path(xhtml_path, src_path, resolved_path, sizeof(resolved_path)) &&
+                        !reading_epub_append_image_block(state, resolved_path))
                     {
                         return false;
                     }
@@ -1639,12 +2267,12 @@ static bool reading_epub_parse_xhtml(const char *xhtml_path,
                 text_block_start = (uint32_t)state->text_length;
             }
             else if (closing &&
-                     (strstr(tag, "</p") == tag ||
-                      strstr(tag, "</div") == tag ||
-                      strstr(tag, "</h1") == tag ||
-                      strstr(tag, "</h2") == tag ||
-                      strstr(tag, "</h3") == tag ||
-                      strstr(tag, "</li") == tag))
+                     (reading_epub_tag_name_matches(tag, "p") ||
+                      reading_epub_tag_name_matches(tag, "div") ||
+                      reading_epub_tag_name_matches(tag, "h1") ||
+                      reading_epub_tag_name_matches(tag, "h2") ||
+                      reading_epub_tag_name_matches(tag, "h3") ||
+                      reading_epub_tag_name_matches(tag, "li")))
             {
                 reading_epub_append_line_break(state, 2U);
                 in_space = false;
@@ -1668,8 +2296,13 @@ static bool reading_epub_parse_xhtml(const char *xhtml_path,
 
             if (entity_end < data_size && data[entity_end] == ';')
             {
-                rt_snprintf(entity, sizeof(entity), "%.*s", (int)(entity_end - i - 1U), &data[i + 1U]);
-                (void)reading_epub_append_entity(state, entity);
+                if (reading_epub_copy_xml_span(entity,
+                                               sizeof(entity),
+                                               (const char *)&data[i + 1U],
+                                               entity_end - i - 1U))
+                {
+                    (void)reading_epub_append_entity(state, entity);
+                }
                 i = entity_end + 1U;
                 in_space = false;
                 continue;
@@ -1717,7 +2350,7 @@ static bool reading_epub_collect_spine(const char *epub_path,
         return false;
     }
 
-    cursor = strstr((const char *)opf_data, "<spine");
+    cursor = reading_epub_find_xml_start_tag((const char *)opf_data, "spine");
     if (cursor == NULL)
     {
         reading_epub_free_bytes(opf_data);
@@ -1725,7 +2358,7 @@ static bool reading_epub_collect_spine(const char *epub_path,
         return false;
     }
 
-    while ((cursor = strstr(cursor, "<itemref ")) != NULL)
+    while ((cursor = reading_epub_find_xml_start_tag(cursor, "itemref")) != NULL)
     {
         const char *tag_end = strchr(cursor, '>');
         char tag[READING_EPUB_MAX_TAG];
@@ -1740,7 +2373,11 @@ static bool reading_epub_collect_spine(const char *epub_path,
             break;
         }
 
-        rt_snprintf(tag, sizeof(tag), "%.*s", (int)(tag_end - cursor + 1), cursor);
+        if (!reading_epub_copy_xml_span(tag, sizeof(tag), cursor, (size_t)(tag_end - cursor + 1)))
+        {
+            cursor = tag_end + 1;
+            continue;
+        }
         if (!reading_epub_extract_attribute(tag, "idref", idref, sizeof(idref)))
         {
             cursor = tag_end + 1;
@@ -1753,9 +2390,14 @@ static bool reading_epub_collect_spine(const char *epub_path,
             cursor = tag_end + 1;
             continue;
         }
+        if (reading_epub_spine_item_should_skip(item, tag))
+        {
+            cursor = tag_end + 1;
+            continue;
+        }
 
-        reading_epub_resolve_path(package->opf_path, item->href, resolved_path, sizeof(resolved_path));
-        if (reading_epub_zip_read(epub_path, zip, resolved_path, &xhtml_data, &xhtml_size))
+        if (reading_epub_resolve_path(package->opf_path, item->href, resolved_path, sizeof(resolved_path)) &&
+            reading_epub_zip_read(epub_path, zip, resolved_path, &xhtml_data, &xhtml_size))
         {
             if (!reading_epub_parse_xhtml(resolved_path, xhtml_data, xhtml_size, state))
             {
@@ -1803,7 +2445,7 @@ static bool reading_epub_collect_spine_items(const char *epub_path,
         return false;
     }
 
-    cursor = strstr((const char *)opf_data, "<spine");
+    cursor = reading_epub_find_xml_start_tag((const char *)opf_data, "spine");
     if (cursor == NULL)
     {
         reading_epub_free_bytes(opf_data);
@@ -1811,7 +2453,7 @@ static bool reading_epub_collect_spine_items(const char *epub_path,
         return false;
     }
 
-    while ((cursor = strstr(cursor, "<itemref ")) != NULL)
+    while ((cursor = reading_epub_find_xml_start_tag(cursor, "itemref")) != NULL)
     {
         const char *tag_end = strchr(cursor, '>');
         char tag[READING_EPUB_MAX_TAG];
@@ -1824,7 +2466,11 @@ static bool reading_epub_collect_spine_items(const char *epub_path,
             break;
         }
 
-        rt_snprintf(tag, sizeof(tag), "%.*s", (int)(tag_end - cursor + 1), cursor);
+        if (!reading_epub_copy_xml_span(tag, sizeof(tag), cursor, (size_t)(tag_end - cursor + 1)))
+        {
+            cursor = tag_end + 1;
+            continue;
+        }
         if (!reading_epub_extract_attribute(tag, "idref", idref, sizeof(idref)))
         {
             cursor = tag_end + 1;
@@ -1837,6 +2483,11 @@ static bool reading_epub_collect_spine_items(const char *epub_path,
             cursor = tag_end + 1;
             continue;
         }
+        if (reading_epub_spine_item_should_skip(item, tag))
+        {
+            cursor = tag_end + 1;
+            continue;
+        }
 
         if (item_count >= max_item_count)
         {
@@ -1845,11 +2496,22 @@ static bool reading_epub_collect_spine_items(const char *epub_path,
             return false;
         }
 
-        reading_epub_resolve_path(package->opf_path, item->href, resolved_path, sizeof(resolved_path));
-        rt_snprintf(items[item_count].internal_path,
-                    sizeof(items[item_count].internal_path),
-                    "%s",
-                    resolved_path);
+        if (!reading_epub_resolve_path(package->opf_path, item->href, resolved_path, sizeof(resolved_path)))
+        {
+            cursor = tag_end + 1;
+            continue;
+        }
+        {
+            int written = rt_snprintf(items[item_count].internal_path,
+                                      sizeof(items[item_count].internal_path),
+                                      "%s",
+                                      resolved_path);
+            if (written < 0 || (size_t)written >= sizeof(items[item_count].internal_path))
+            {
+                cursor = tag_end + 1;
+                continue;
+            }
+        }
         ++item_count;
         cursor = tag_end + 1;
     }
@@ -2980,6 +3642,7 @@ bool reading_epub_decode_image(const char *epub_path,
     uint8_t *image_data = NULL;
     size_t image_size = 0U;
     bool ok = false;
+    bool is_png = false;
 
     if (out_image == NULL)
     {
@@ -3004,7 +3667,8 @@ bool reading_epub_decode_image(const char *epub_path,
         goto cleanup;
     }
 
-    if (reading_epub_has_extension(internal_path, ".png"))
+    is_png = (image_size >= 8U && memcmp(image_data, "\x89PNG\r\n\x1a\n", 8U) == 0);
+    if (is_png)
     {
         unsigned char *raw = NULL;
         unsigned width = 0U;
@@ -3118,7 +3782,7 @@ bool reading_epub_probe_image_size(const char *epub_path,
         goto cleanup;
     }
 
-    if (reading_epub_has_extension(internal_path, ".png"))
+    if (image_size >= 8U && memcmp(image_data, "\x89PNG\r\n\x1a\n", 8U) == 0)
     {
         if (image_size >= 24U &&
             memcmp(image_data, "\x89PNG\r\n\x1a\n", 8U) == 0)

@@ -262,12 +262,18 @@ static void app_buttons_dispatch_short(app_key_id_t key_id)
         }
         break;
     case APP_KEY_B:
-        app_buttons_wakeup_only();
+        if (app_buttons_wakeup_only())
+        {
+            return;
+        }
         APP_BUTTON_LOG("app_buttons: b short dispatch\n");
         ui_dispatch_request_hardkey_down();
         break;
     case APP_KEY_T:
-        app_buttons_wakeup_only();
+        if (app_buttons_wakeup_only())
+        {
+            return;
+        }
         APP_BUTTON_LOG("app_buttons: t short dispatch\n");
         ui_dispatch_request_hardkey_up();
         break;

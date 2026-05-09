@@ -28,6 +28,29 @@ static struct {
     bool initialized;
 } s_manager;
 
+static audio_state_callback_t audio_manager_copy_state_callback(void)
+{
+    audio_state_callback_t callback = RT_NULL;
+
+    if (!s_manager.initialized || s_manager.mutex == RT_NULL) {
+        return RT_NULL;
+    }
+
+    rt_mutex_take(s_manager.mutex, RT_WAITING_FOREVER);
+    callback = s_manager.state_cb;
+    rt_mutex_release(s_manager.mutex);
+    return callback;
+}
+
+static void audio_manager_notify_state(audio_owner_t owner, audio_owner_t old_owner)
+{
+    audio_state_callback_t callback = audio_manager_copy_state_callback();
+
+    if (callback) {
+        callback(owner, old_owner);
+    }
+}
+
 int audio_manager_init(void)
 {
     if (s_manager.initialized) {
@@ -125,9 +148,7 @@ bool audio_acquire(audio_owner_t owner, audio_req_mode_t mode)
     LOG_I("Audio acquired: %d -> %d", old_owner, owner);
     
     /* 通知状态变化 */
-    if (s_manager.state_cb) {
-        s_manager.state_cb(owner, old_owner);
-    }
+    audio_manager_notify_state(owner, old_owner);
     
     return true;
 }
@@ -158,14 +179,12 @@ void audio_release(audio_owner_t owner)
     LOG_I("Audio released: %d", old_owner);
     
     /* 通知状态变化 */
-    if (s_manager.state_cb) {
-        s_manager.state_cb(AUDIO_OWNER_NONE, old_owner);
-    }
+    audio_manager_notify_state(AUDIO_OWNER_NONE, old_owner);
 }
 
 audio_owner_t audio_force_acquire(audio_owner_t owner)
 {
-    if (!s_manager.initialized) {
+    if (!s_manager.initialized || owner == AUDIO_OWNER_NONE || s_manager.mutex == RT_NULL) {
         return AUDIO_OWNER_NONE;
     }
     
@@ -182,26 +201,49 @@ audio_owner_t audio_force_acquire(audio_owner_t owner)
     LOG_I("Audio force acquired: %d -> %d", old_owner, owner);
     
     /* 通知状态变化 */
-    if (s_manager.state_cb) {
-        s_manager.state_cb(owner, old_owner);
-    }
+    audio_manager_notify_state(owner, old_owner);
     
     return old_owner;
 }
 
 audio_owner_t audio_get_current_owner(void)
 {
-    return s_manager.current_owner;
+    audio_owner_t owner = AUDIO_OWNER_NONE;
+
+    if (!s_manager.initialized || s_manager.mutex == RT_NULL) {
+        return AUDIO_OWNER_NONE;
+    }
+
+    rt_mutex_take(s_manager.mutex, RT_WAITING_FOREVER);
+    owner = s_manager.current_owner;
+    rt_mutex_release(s_manager.mutex);
+    return owner;
 }
 
 bool audio_is_available(void)
 {
-    return s_manager.initialized && s_manager.current_owner == AUDIO_OWNER_NONE;
+    bool available = false;
+
+    if (!s_manager.initialized || s_manager.mutex == RT_NULL) {
+        return false;
+    }
+
+    rt_mutex_take(s_manager.mutex, RT_WAITING_FOREVER);
+    available = (s_manager.current_owner == AUDIO_OWNER_NONE);
+    rt_mutex_release(s_manager.mutex);
+    return available;
 }
 
 void audio_register_state_callback(audio_state_callback_t callback)
 {
+    if (!s_manager.initialized || s_manager.mutex == RT_NULL) {
+        s_manager.state_cb = callback;
+        return;
+    }
+
+    rt_mutex_take(s_manager.mutex, RT_WAITING_FOREVER);
     s_manager.state_cb = callback;
+    rt_mutex_release(s_manager.mutex);
 }
 
 bool audio_try_preempt(audio_owner_t preemptor)
@@ -218,9 +260,7 @@ bool audio_try_preempt(audio_owner_t preemptor)
         rt_sem_trytake(s_manager.sem);
         rt_mutex_release(s_manager.mutex);
         
-        if (s_manager.state_cb) {
-            s_manager.state_cb(preemptor, AUDIO_OWNER_NONE);
-        }
+        audio_manager_notify_state(preemptor, AUDIO_OWNER_NONE);
         return true;
     }
     
@@ -239,9 +279,7 @@ bool audio_try_preempt(audio_owner_t preemptor)
         
         LOG_I("Audio preempted: %d -> %d", old_owner, preemptor);
         
-        if (s_manager.state_cb) {
-            s_manager.state_cb(preemptor, old_owner);
-        }
+        audio_manager_notify_state(preemptor, old_owner);
         return true;
     }
     

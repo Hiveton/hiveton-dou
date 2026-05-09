@@ -321,7 +321,7 @@ static void EPD_SetBacklight(uint8_t br)
  * Set these to 0 to restore the previous production behavior.
  */
 #define EPD_TEST_FORCE_FULL_REFRESH 0
-#define EPD_TEST_STRICT_BUSY_WAIT 1
+#define EPD_TEST_STRICT_BUSY_WAIT 0
 /*
  * Mono conversion quality switch:
  * 0 = hard threshold (sharper text, less edge noise)
@@ -448,6 +448,7 @@ static uint16_t s_epd_mono_dither_x1 = 0;
 static uint16_t s_epd_mono_dither_y1 = 0;
 static rt_bool_t s_epd_image_refresh_hint = RT_FALSE;
 static rt_bool_t s_epd_force_full_refresh_once = RT_FALSE;
+static rt_bool_t s_epd_last_displayed_frame_has_gray = RT_FALSE;
 static rt_bool_t s_epd_gray4_experiment_region_valid = RT_FALSE;
 static uint16_t s_epd_gray4_experiment_x0 = 0;
 static uint16_t s_epd_gray4_experiment_y0 = 0;
@@ -617,6 +618,26 @@ static void epd_debug_dump_stats(const char *tag)
                (unsigned long)mono_black,
                (unsigned long)mono_white,
                (unsigned long)total_pixels);
+}
+
+static rt_bool_t epd_framebuffer_has_gray2_pixels(void)
+{
+    uint32_t i;
+
+    for (i = 0; i < EPD_GRAY2_FRAME_SIZE; i++)
+    {
+        uint8_t v = mixed_framebuffer[i];
+
+        if (((v >> 6) & 0x3U) == 1U || ((v >> 6) & 0x3U) == 2U ||
+            ((v >> 4) & 0x3U) == 1U || ((v >> 4) & 0x3U) == 2U ||
+            ((v >> 2) & 0x3U) == 1U || ((v >> 2) & 0x3U) == 2U ||
+            (v & 0x3U) == 1U || (v & 0x3U) == 2U)
+        {
+            return RT_TRUE;
+        }
+    }
+
+    return RT_FALSE;
 }
 
 static void EPD_Gray2ToMonoDither(void)
@@ -956,6 +977,11 @@ void lcd_set_epd_image_refresh_hint(rt_bool_t enabled)
 void lcd_request_epd_force_full_refresh_once(void)
 {
     s_epd_force_full_refresh_once = RT_TRUE;
+}
+
+rt_bool_t lcd_epd_last_displayed_frame_has_gray(void)
+{
+    return s_epd_last_displayed_frame_has_gray;
 }
 
 static void EPD_MarkDirtyPhysicalRegion(uint16_t x0, uint16_t y0, uint16_t x1,
@@ -1447,6 +1473,7 @@ static void EPD_FrameBuffer_Flush(LCDC_HandleTypeDef *hlcdc)
 #endif
     memcpy(mixed_framebuffer_prev_mono, mixed_framebuffer_mono,
            sizeof(mixed_framebuffer_prev_mono));
+    s_epd_last_displayed_frame_has_gray = epd_framebuffer_has_gray2_pixels();
     s_partial_refresh_count = 0;
     s_epd_image_refresh_hint = RT_FALSE;
     s_epd_force_full_refresh_once = RT_FALSE;
@@ -1509,6 +1536,7 @@ static void EPD_FrameBuffer_FlushFast(LCDC_HandleTypeDef *hlcdc)
 
     memcpy(mixed_framebuffer_prev_mono, mixed_framebuffer_mono,
            sizeof(mixed_framebuffer_prev_mono));
+    s_epd_last_displayed_frame_has_gray = epd_framebuffer_has_gray2_pixels();
     if (s_partial_refresh_count < 0xFF)
     {
         s_partial_refresh_count++;
@@ -1753,6 +1781,7 @@ static void EPD_FrameBuffer_FlushRegion(LCDC_HandleTypeDef *hlcdc, uint16_t x0,
         memcpy(dst, src, row_bytes);
     }
 
+    s_epd_last_displayed_frame_has_gray = epd_framebuffer_has_gray2_pixels();
     if (s_partial_refresh_count < 0xFF)
     {
         s_partial_refresh_count++;
