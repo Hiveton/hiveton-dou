@@ -30,6 +30,7 @@
 #include "./iot/iot_c_api.h"
 #include "./mcp/mcp_api.h"
 #include "xiaozhi_ui.h"
+#include "xiaozhi_config.h"
 
 
 
@@ -69,7 +70,6 @@ static const char *mode_str[] = {"auto", "manual", "realtime"};
 static rt_tick_t g_speaking_start_tick = 0;  // 讲话开始时间
 static rt_tick_t g_total_speaking_time = 0;  // 累计讲话时间
 static bool g_is_speaking = false;           // 是否正在讲话
-#define SPEAKING_THRESHOLD_MS (5 * 60 * 1000) // 5分钟阈值 (毫秒)
 
 static bool xz_mqtt_copy_session_id(xiaozhi_context_t *ctx, const char *session_id)
 {

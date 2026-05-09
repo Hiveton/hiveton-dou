@@ -44,12 +44,12 @@
 #include "../sleep_manager.h"
 #include "ui/ui_dispatch.h"
 #include "xiaozhi_service.h"
+#include "xiaozhi_config.h"
 
 /* PSRAM内存分配宏 */
 #define XZ_PSRAM_ATTR   __attribute__((section(".psram_nocache")))
 
 #define MAX_WSOCK_HDR_LEN 1024
-#define SPEAKING_THRESHOLD_MS (5 * 60 * 1000) // 小智讲话时间阈值 
 #define XZ_WS_CONNECT_WAIT_MS 45000U
 #define XZ_WS_CONNECT_RETRY_MAX 2U
 #define XZ_WS_READY_POLL_RETRY_MAX 10
