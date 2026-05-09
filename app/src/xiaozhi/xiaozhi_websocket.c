@@ -1388,7 +1388,10 @@ static int xiaozhi_ws_connect_internal(rt_bool_t interactive)
 
     err_t err = ERR_OK;
     uint32_t attempt;
+    char *auth_token;
+    char *Client_Id;
 
+    // 创建信号量（仅首次）
     if (g_xz_ws.sem == NULL)
     {
         g_xz_ws.sem = rt_sem_create("xz_ws", 0, RT_IPC_FLAG_FIFO);
@@ -1401,8 +1404,7 @@ static int xiaozhi_ws_connect_internal(rt_bool_t interactive)
 
     for (attempt = 0U; attempt < XZ_WS_CONNECT_RETRY_MAX; attempt++)
     {
-        const char *auth_token;
-
+        // 清除残留信号量
         while (rt_sem_take(g_xz_ws.sem, 0) == RT_EOK)
         {
         }
@@ -1410,7 +1412,7 @@ static int xiaozhi_ws_connect_internal(rt_bool_t interactive)
         g_xz_ws.is_connected = 0;
         wsock_init(&g_xz_ws.clnt, endpoint.ssl_enabled, 1,
                    my_wsapp_fn); // 初始化websocket,注册回调函数
-        char *Client_Id = get_client_id();
+        Client_Id = get_client_id();
         auth_token = (g_websocket_context.token != RT_NULL &&
                       g_websocket_context.token[0] != '\0')
                          ? g_websocket_context.token
@@ -1473,6 +1475,13 @@ static int xiaozhi_ws_connect_internal(rt_bool_t interactive)
                        (unsigned int)delay_ms);
             rt_thread_mdelay(delay_ms);
         }
+    }
+
+    // 如果连接完全失败，释放信号量资源避免后续连接重复创建
+    if (!g_xz_ws.is_connected)
+    {
+        rt_sem_delete(g_xz_ws.sem);
+        g_xz_ws.sem = NULL;
     }
 
     if (!g_xz_ws.is_connected && interactive)
