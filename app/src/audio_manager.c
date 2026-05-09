@@ -141,7 +141,7 @@ bool audio_acquire(audio_owner_t owner, audio_req_mode_t mode)
                 rt_mutex_release(s_manager.mutex);
                 return false;
             }
-            rt_mutex_release(s_manager.mutex);
+            // 验证通过，保持持有 mutex 继续执行
         } else {
             rt_mutex_release(s_manager.mutex);
             return false;

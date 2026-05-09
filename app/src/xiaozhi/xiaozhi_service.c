@@ -918,24 +918,6 @@ int xiaozhi_service_init(void)
         LOG_E("Failed to start thread: %d", result);
         return result;
     }
-    }
-    
-    result = rt_thread_init(&s_service_thread, "xz_svc",
-                           xiaozhi_service_thread, NULL,
-                           s_thread_stack, XZ_SERVICE_THREAD_STACK_SIZE,
-                           XZ_SERVICE_THREAD_PRIORITY, 10);
-    if (result != RT_EOK)
-    {
-        LOG_E("Failed to init thread: %d", result);
-        return result;
-    }
-        
-        result = rt_thread_startup(&s_service_thread);
-        if (result != RT_EOK) {
-            LOG_E("Failed to start thread: %d", result);
-            return result;
-        }
-    }
     
     s_initialized = true;
     
