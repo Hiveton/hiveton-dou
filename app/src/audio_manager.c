@@ -122,14 +122,26 @@ bool audio_acquire(audio_owner_t owner, audio_req_mode_t mode)
         
         /* 需要等待 */
         if (mode == AUDIO_REQ_BLOCKING) {
+            // 释放 mutex 等待前记录预期拥有者
+            audio_owner_t expected_owner = owner;
             rt_mutex_release(s_manager.mutex);
+            
             /* 等待当前使用者释放 */
             rt_err_t result = rt_sem_take(s_manager.sem, rt_tick_from_millisecond(5000));
             if (result != RT_EOK) {
                 LOG_W("Acquire timeout");
                 return false;
             }
+            
+            // 重新获取 mutex 后验证状态仍然匹配
             rt_mutex_take(s_manager.mutex, RT_WAITING_FOREVER);
+            if (s_manager.current_owner != expected_owner) {
+                // 状态已被更高优先级抢占，释放
+                LOG_I("Ownership preempted by higher priority");
+                rt_mutex_release(s_manager.mutex);
+                return false;
+            }
+            rt_mutex_release(s_manager.mutex);
         } else {
             rt_mutex_release(s_manager.mutex);
             return false;
