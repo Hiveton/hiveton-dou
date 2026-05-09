@@ -70,25 +70,9 @@
 #define XZ_WS_LOG(...) do { } while (0)
 #endif
 
-extern xz_audio_t *thiz;
-extern lv_obj_t *main_container;
-extern lv_obj_t *standby_screen;
-extern uint8_t Initiate_disconnection_flag;
-extern rt_mailbox_t g_ui_task_mb;
-extern rt_tick_t last_listen_tick;
-
-
-xiaozhi_ws_t g_xz_ws;
-rt_mailbox_t g_button_event_mb;
-enum DeviceState web_g_state;
-
-#if defined(__CC_ARM) || defined(__CLANG_ARM)
-L2_RET_BSS_SECT_BEGIN(message) //6000地址
+// Unified message buffer for websocket transport operations.
+// MQTT uses its own static buffer in xiaozhi_mqtt.c with identical size.
 static char message[256];
-L2_RET_BSS_SECT_END
-#else
-static char message[256] L2_RET_BSS_SECT(message);
-#endif
 static const char *mode_str[] = {"auto", "manual", "realtime"};
 static const char *hello_message =
     "{"
