@@ -24,6 +24,10 @@
 #define APP_BUTTON_DEBUG_VERBOSE 1
 #endif
 
+#ifndef APP_BUTTON_HOME_TALK_ENABLE
+#define APP_BUTTON_HOME_TALK_ENABLE 0
+#endif
+
 #if APP_BUTTON_DEBUG_VERBOSE
 #define APP_BUTTON_LOG(...) rt_kprintf(__VA_ARGS__)
 #else
@@ -438,6 +442,9 @@ static bool app_buttons_short_debounce_allow(app_key_state_t *key);
 
 static bool app_buttons_home_talk_enabled(void)
 {
+#if !APP_BUTTON_HOME_TALK_ENABLE
+    return false;
+#else
     ui_screen_id_t active = ui_dispatch_get_active_screen();
 
     if (active == UI_SCREEN_NONE)
@@ -446,6 +453,7 @@ static bool app_buttons_home_talk_enabled(void)
     }
 
     return active == UI_SCREEN_HOME;
+#endif
 }
 
 static rt_uint32_t app_buttons_talk_press_mask(app_key_id_t key_id)
