@@ -74,6 +74,12 @@
 // MQTT uses its own static buffer in xiaozhi_mqtt.c with identical size.
 static char message[256];
 static const char *mode_str[] = {"auto", "manual", "realtime"};
+xiaozhi_ws_t g_xz_ws = {0};
+enum DeviceState web_g_state = kDeviceStateUnknown;
+static rt_mailbox_t g_button_event_mb = RT_NULL;
+static rt_mailbox_t g_ui_task_mb = RT_NULL;
+extern uint8_t Initiate_disconnection_flag;
+extern rt_tick_t last_listen_tick;
 static const char *hello_message =
     "{"
     "\"type\":\"hello\","
@@ -960,7 +966,10 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
         else
         {
             // 2. 已唤醒，直接进入对话模式
-            rt_mb_send(g_button_event_mb, BUTTON_EVENT_PRESSED);
+            if (g_button_event_mb != RT_NULL)
+            {
+                rt_mb_send(g_button_event_mb, BUTTON_EVENT_PRESSED);
+            }
             xiaozhi_service_notify_state(XZ_SERVICE_LISTENING);
         }
     }
@@ -971,7 +980,10 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
         // 仅在已唤醒时发送停止监听
         if (g_xz_ws.is_connected)
         {
-            rt_mb_send(g_button_event_mb, BUTTON_EVENT_RELEASED);
+            if (g_button_event_mb != RT_NULL)
+            {
+                rt_mb_send(g_button_event_mb, BUTTON_EVENT_RELEASED);
+            }
             xiaozhi_service_notify_state(XZ_SERVICE_READY);
         }
     }
@@ -1026,7 +1038,10 @@ static void xz_button2_event_handler(int32_t pin, button_action_t action)
         shutdown_state = false;
         sleep_manager_request_wakeup();
         rt_thread_mdelay(100);
-        rt_mb_send(g_ui_task_mb, UI_EVENT_SHUTDOWN);
+        if (g_ui_task_mb != RT_NULL)
+        {
+            rt_mb_send(g_ui_task_mb, UI_EVENT_SHUTDOWN);
+        }
     }
 
     else if (action == BUTTON_RELEASED)

@@ -892,7 +892,7 @@ int xiaozhi_service_init(void)
     
     /* 创建线程（首次） */
     {
-        struct rt_thread *existing = rt_thread_get_by_name("xz_svc");
+        rt_thread_t existing = rt_thread_find("xz_svc");
         if (existing != RT_NULL)
         {
             LOG_I("Service thread already exists, skipping startup");
