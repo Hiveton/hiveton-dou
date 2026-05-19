@@ -80,6 +80,8 @@ bool ui_reading_list_prepare_selected_file(void);
 bool ui_reading_list_get_selected_path(char *buffer, size_t buffer_size);
 void ui_reading_list_refresh(void);
 void ui_reading_list_request_enter_refresh(void);
+void ui_reading_list_hardware_prev_page(void);
+void ui_reading_list_hardware_next_page(void);
 bool ui_reading_detail_prepare_selected_async(void);
 bool ui_reading_detail_is_selected_ready(void);
 void ui_Reading_Detail_screen_init(void);

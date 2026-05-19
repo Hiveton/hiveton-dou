@@ -67,6 +67,7 @@
 #define TF_DET_POLL_INTERVAL_MS 1000U
 #define TF_LOG_RATE_LIMIT_MS 5000U
 #define TF_BOOT_DEFER_MS 3000U
+#define APP_DEBUG_AUTO_BOOKS_TEST 0
 
 #ifndef APP_TF_DET_DEBUG_LOG
 #define APP_TF_DET_DEBUG_LOG 0
@@ -104,7 +105,14 @@ static rt_uint8_t s_tf_mount_thread_stack[TF_MOUNT_THREAD_STACK_SIZE]
     L2_RET_BSS_SECT(tf_mount_thread_stack);
 #endif
 
+static volatile rt_uint8_t s_ui_debug_open_books = 0U;
 static volatile rt_uint8_t s_ui_debug_open_reading = 0U;
+static volatile rt_uint8_t s_ui_debug_books_next = 0U;
+static volatile rt_uint8_t s_ui_debug_books_prev = 0U;
+#if APP_DEBUG_AUTO_BOOKS_TEST
+static rt_uint8_t s_ui_debug_auto_books_stage = 0U;
+static rt_tick_t s_ui_debug_auto_books_tick = 0;
+#endif
 static rt_tick_t s_tf_last_no_device_log_tick = 0;
 static rt_tick_t s_tf_last_mount_fail_log_tick = 0;
 static ui_screen_id_t s_petgame_last_screen = UI_SCREEN_NONE;
@@ -894,10 +902,56 @@ static void ui_thread_entry(void *parameter)
 
         petgame_process();
 
+#if APP_DEBUG_AUTO_BOOKS_TEST
+        if (s_ui_debug_auto_books_stage == 0U)
+        {
+            s_ui_debug_auto_books_tick = now + rt_tick_from_millisecond(5000U);
+            s_ui_debug_auto_books_stage = 1U;
+        }
+        else if (s_ui_debug_auto_books_stage == 1U &&
+                 (rt_int32_t)(now - s_ui_debug_auto_books_tick) >= 0)
+        {
+            rt_kprintf("ui: debug auto switch to reading list\n");
+            app_flag_set(&s_ui_debug_open_books, 1U);
+            s_ui_debug_auto_books_tick = now + rt_tick_from_millisecond(18000U);
+            s_ui_debug_auto_books_stage = 2U;
+        }
+        else if (s_ui_debug_auto_books_stage == 2U &&
+                 (rt_int32_t)(now - s_ui_debug_auto_books_tick) >= 0)
+        {
+            rt_kprintf("ui: debug auto reading list next page\n");
+            app_flag_set(&s_ui_debug_books_next, 1U);
+            s_ui_debug_auto_books_tick = now + rt_tick_from_millisecond(16000U);
+            s_ui_debug_auto_books_stage = 3U;
+        }
+        else if (s_ui_debug_auto_books_stage == 3U &&
+                 (rt_int32_t)(now - s_ui_debug_auto_books_tick) >= 0)
+        {
+            rt_kprintf("ui: debug auto reading list prev page\n");
+            app_flag_set(&s_ui_debug_books_prev, 1U);
+            s_ui_debug_auto_books_stage = 4U;
+        }
+#endif
+
         if (app_flag_take(&s_ui_debug_open_reading) != 0U)
         {
             rt_kprintf("ui: debug switch to reading detail\n");
             ui_runtime_switch_to(UI_SCREEN_READING_DETAIL);
+        }
+        if (app_flag_take(&s_ui_debug_open_books) != 0U)
+        {
+            rt_kprintf("ui: debug switch to reading list\n");
+            ui_runtime_switch_to(UI_SCREEN_READING_LIST);
+        }
+        if (app_flag_take(&s_ui_debug_books_next) != 0U)
+        {
+            rt_kprintf("ui: debug reading list next page\n");
+            ui_reading_list_hardware_next_page();
+        }
+        if (app_flag_take(&s_ui_debug_books_prev) != 0U)
+        {
+            rt_kprintf("ui: debug reading list prev page\n");
+            ui_reading_list_hardware_prev_page();
         }
 
         ui_dispatch_process_pending();
@@ -1010,6 +1064,27 @@ static rt_err_t start_tf_mount_thread(void)
     }
     return RT_EOK;
 }
+
+static void ui_dbg_books(void)
+{
+    rt_kprintf("ui_dbg_books: queued switch to reading list\n");
+    app_flag_set(&s_ui_debug_open_books, 1U);
+}
+MSH_CMD_EXPORT(ui_dbg_books, switch to reading list screen);
+
+static void ui_dbg_books_next(void)
+{
+    rt_kprintf("ui_dbg_books_next: queued reading list next page\n");
+    app_flag_set(&s_ui_debug_books_next, 1U);
+}
+MSH_CMD_EXPORT(ui_dbg_books_next, switch reading list to next page);
+
+static void ui_dbg_books_prev(void)
+{
+    rt_kprintf("ui_dbg_books_prev: queued reading list prev page\n");
+    app_flag_set(&s_ui_debug_books_prev, 1U);
+}
+MSH_CMD_EXPORT(ui_dbg_books_prev, switch reading list to previous page);
 
 static void ui_dbg_reading(void)
 {
