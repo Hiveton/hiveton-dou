@@ -83,11 +83,8 @@ static int s_calendar_view_month = 1;
 static void ui_calendar_build_layout(lv_obj_t *content, ui_calendar_layout_t *layout)
 {
     int content_w;
-    int width_padding = 16;
-    int nav_width = 44;
-    int nav_gap = 8;
+    int width_padding = 32;
     int grid_gap = 6;
-    int header_gap = 20;
 
     if (content == NULL || layout == NULL)
     {
@@ -102,46 +99,44 @@ static void ui_calendar_build_layout(lv_obj_t *content, ui_calendar_layout_t *la
         content_w = 528;
     }
 
-    layout->prev_x = width_padding;
-    layout->nav_y = 10;
-    layout->nav_w = nav_width;
-    layout->nav_h = 40;
-    layout->next_x = content_w - width_padding - nav_width;
+    layout->prev_x = 0;
+    layout->nav_y = 0;
+    layout->nav_w = 0;
+    layout->nav_h = 0;
+    layout->next_x = 0;
     layout->today_w = 90;
-    layout->today_h = 36;
-    layout->today_x = layout->next_x - nav_gap - layout->today_w - 2;
-    layout->today_y = 12;
-    layout->title_x = layout->prev_x + nav_width + nav_gap;
-    layout->title_y = 8;
-    layout->title_w = layout->today_x - nav_gap - layout->title_x;
+    layout->today_h = 44;
+    layout->today_x = content_w - width_padding - layout->today_w;
+    layout->today_y = 18;
+    layout->title_x = 32;
+    layout->title_y = 12;
+    layout->title_w = 310;
     layout->meta_x = layout->title_x;
-    layout->meta_y = 40;
+    layout->meta_y = 48;
     layout->meta_w = layout->title_w;
 
     layout->week_x = width_padding;
-    layout->week_y = 82;
+    layout->week_y = 94;
     layout->week_gap = grid_gap;
     layout->week_w = (content_w - width_padding * 2 - grid_gap * ((int)UI_CALENDAR_GRID_COLS - 1)) /
                      (int)UI_CALENDAR_GRID_COLS;
-    if (layout->week_w < 60)
+    if (layout->week_w < 56)
     {
-        layout->week_w = 60;
+        layout->week_w = 56;
     }
     layout->week_h = 24;
 
     layout->grid_x = width_padding;
-    layout->grid_y = layout->week_y + layout->week_h + header_gap;
+    layout->grid_y = 132;
     layout->cell_gap_x = grid_gap;
-    layout->cell_gap_y = 8;
+    layout->cell_gap_y = 6;
     layout->cell_w = layout->week_w;
-    layout->cell_h = 60;
+    layout->cell_h = 54;
 
     layout->summary_x = width_padding;
     layout->summary_w = content_w - width_padding * 2;
-    layout->summary_h = 92;
-    layout->summary_y = layout->grid_y +
-                        (layout->cell_h + layout->cell_gap_y) * (int)UI_CALENDAR_GRID_ROWS +
-                        18;
+    layout->summary_h = 96;
+    layout->summary_y = 552;
 }
 
 static bool ui_calendar_dates_equal(const ui_calendar_date_t *lhs, const ui_calendar_date_t *rhs)
@@ -514,14 +509,17 @@ void ui_Calendar_screen_init(void)
     s_calendar_view_month = s_calendar_today.month;
 
     ui_Calendar = ui_create_screen_base();
-    ui_top_nav_create(ui_Calendar, UI_TOP_TAB_NONE);
-    ui_bottom_nav_create(ui_Calendar, UI_BOTTOM_TAB_CALENDAR);
+    lv_obj_set_style_bg_color(ui_Calendar, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_bg_opa(ui_Calendar, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(ui_Calendar, LV_OBJ_FLAG_SCROLLABLE);
+
+    ui_secondary_top_nav_create(ui_Calendar, ui_i18n_pick("日历", "Calendar"), UI_SCREEN_MORE);
 
     content = lv_obj_create(ui_Calendar);
     lv_obj_remove_style_all(content);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_pos(content, ui_px_x(0), ui_px_y(63));
-    lv_obj_set_size(content, ui_px_w(528), ui_px_h(647));
+    lv_obj_set_pos(content, ui_px_x(0), ui_px_y(90));
+    lv_obj_set_size(content, ui_px_w(528), ui_px_h(702));
     lv_obj_set_style_bg_opa(content, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(content, 0, 0);
 
@@ -533,7 +531,7 @@ void ui_Calendar_screen_init(void)
                                                   layout.title_y,
                                                   layout.title_w,
                                                   30,
-                                                  28,
+                                                  30,
                                                   LV_TEXT_ALIGN_CENTER,
                                                   false,
                                                   false);
@@ -544,7 +542,7 @@ void ui_Calendar_screen_init(void)
                                                  layout.meta_y,
                                                  layout.meta_w,
                                                  20,
-                                                 17,
+                                                 18,
                                                  LV_TEXT_ALIGN_CENTER,
                                                  false,
                                                  false);
@@ -556,29 +554,10 @@ void ui_Calendar_screen_init(void)
                                                     layout.today_w,
                                                     layout.today_h,
                                                     ui_i18n_pick("今天", "Today"),
-                                                    24,
+                                                    22,
                                                     UI_SCREEN_NONE,
                                                     false);
     lv_obj_add_event_cb(s_calendar_refs.today_button, ui_calendar_today_event_cb, LV_EVENT_CLICKED, NULL);
-
-    {
-        lv_obj_t *prev_button = ui_create_nav_button(content,
-                                                     layout.prev_x,
-                                                     layout.nav_y,
-                                                     layout.nav_w,
-                                                     layout.nav_h,
-                                                     "<",
-                                                     UI_SCREEN_NONE);
-        lv_obj_t *next_button = ui_create_nav_button(content,
-                                                     layout.next_x,
-                                                     layout.nav_y,
-                                                     layout.nav_w,
-                                                     layout.nav_h,
-                                                     ">",
-                                                     UI_SCREEN_NONE);
-        lv_obj_add_event_cb(prev_button, ui_calendar_prev_event_cb, LV_EVENT_CLICKED, NULL);
-        lv_obj_add_event_cb(next_button, ui_calendar_next_event_cb, LV_EVENT_CLICKED, NULL);
-    }
 
     for (col = 0; col < UI_CALENDAR_GRID_COLS; ++col)
     {
@@ -588,7 +567,7 @@ void ui_Calendar_screen_init(void)
                         layout.week_y,
                         layout.week_w,
                         layout.week_h,
-                        22,
+                        20,
                         LV_TEXT_ALIGN_CENTER,
                         false,
                         false);
@@ -634,7 +613,7 @@ void ui_Calendar_screen_init(void)
                                               0,
                                               0,
                                               0,
-                                              24,
+                                              22,
                                               LV_TEXT_ALIGN_CENTER,
                                               false,
                                               false);
@@ -655,7 +634,7 @@ void ui_Calendar_screen_init(void)
                                                     14,
                                                     layout.summary_w - 36,
                                                     26,
-                                                    24,
+                                                    22,
                                                     LV_TEXT_ALIGN_LEFT,
                                                     false,
                                                     false);
@@ -665,8 +644,8 @@ void ui_Calendar_screen_init(void)
                                                    18,
                                                    48,
                                                    layout.summary_w - 36,
-                                                   24,
-                                                   17,
+                                                   28,
+                                                   18,
                                                    LV_TEXT_ALIGN_LEFT,
                                                    false,
                                                    true);

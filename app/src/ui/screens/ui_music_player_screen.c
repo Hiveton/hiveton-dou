@@ -16,6 +16,7 @@ static lv_obj_t *s_music_player_play_label = NULL;
 
 static void ui_music_player_render(void)
 {
+    char title[96];
     char subtitle[96];
     uint16_t count = music_service_count();
     uint16_t index = music_service_selected_index();
@@ -45,7 +46,8 @@ static void ui_music_player_render(void)
                 (unsigned int)(index + 1U),
                 (unsigned int)count);
 
-    lv_label_set_text(s_music_player_title, music_service_get_selected_title());
+    music_service_get_selected_title_copy(title, sizeof(title));
+    lv_label_set_text(s_music_player_title, title);
     lv_label_set_text(s_music_player_subtitle, subtitle);
     lv_label_set_text(s_music_player_state, is_playing ? ui_i18n_pick("播放中", "Playing") : ui_i18n_pick("已暂停", "Paused"));
     if (s_music_player_play_label != NULL)
@@ -106,8 +108,7 @@ void ui_Music_Player_screen_init(void)
     (void)music_service_refresh();
 
     ui_Music_Player = ui_create_screen_base();
-    ui_top_nav_create(ui_Music_Player, UI_TOP_TAB_MUSIC);
-    ui_bottom_nav_create(ui_Music_Player, UI_BOTTOM_TAB_NONE);
+    ui_top_nav_create(ui_Music_Player, UI_TOP_TAB_AI);
 
     ui_create_label(ui_Music_Player,
                     ui_i18n_pick("音乐播放", "Player"),

@@ -77,11 +77,16 @@ static void ui_about_create_row(lv_obj_t *parent,
 void ui_About_screen_init(void)
 {
     lv_obj_t *panel;
+    char mac_address[24];
+    char client_id[48];
 
     if (ui_About != NULL)
     {
         return;
     }
+
+    get_mac_address_copy(mac_address, sizeof(mac_address));
+    get_client_id_copy(client_id, sizeof(client_id));
 
     ui_About = ui_create_screen_base();
 
@@ -103,8 +108,8 @@ void ui_About_screen_init(void)
 
     ui_about_create_row(panel, 78, "产品型号", "Model", UI_ABOUT_PRODUCT_MODEL);
     ui_about_create_row(panel, 134, "硬件平台", "Hardware", UI_ABOUT_HARDWARE_MODEL);
-    ui_about_create_row(panel, 190, "MAC 地址", "MAC Address", get_mac_address());
-    ui_about_create_row(panel, 246, "唯一 ID", "Unique ID", get_client_id());
+    ui_about_create_row(panel, 190, "MAC 地址", "MAC Address", mac_address);
+    ui_about_create_row(panel, 246, "唯一 ID", "Unique ID", client_id);
     ui_about_create_row(panel, 302, "版本号", "Version", UI_ABOUT_VERSION);
     ui_about_create_row(panel, 358, "构建时间", "Build Time", __DATE__ " " __TIME__);
 }

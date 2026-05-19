@@ -161,10 +161,24 @@ static void kws_record_callback_log_limited(kws_data_t *thiz, const char *reason
 #endif
 }
 
-static void kws_record_note_abnormal(kws_data_t *thiz, const char *reason, uint32_t data_len, uint32_t dropped_bytes)
+static void kws_record_add_drop_frame(kws_data_t *thiz)
 {
+    rt_enter_critical();
+    thiz->dropped_frame_count++;
+    rt_exit_critical();
+}
+
+static void kws_record_add_abnormal(kws_data_t *thiz, uint32_t dropped_bytes)
+{
+    rt_enter_critical();
     thiz->abnormal_frame_count++;
     thiz->dropped_byte_count += dropped_bytes;
+    rt_exit_critical();
+}
+
+static void kws_record_note_abnormal(kws_data_t *thiz, const char *reason, uint32_t data_len, uint32_t dropped_bytes)
+{
+    kws_record_add_abnormal(thiz, dropped_bytes);
     kws_record_callback_log_limited(thiz, reason, data_len, dropped_bytes);
 }
 
@@ -176,14 +190,14 @@ static void kws_record_enqueue_frame(kws_data_t *thiz, const uint8_t *data)
     rt_exit_critical();
     if (!idle)
     {
-        thiz->dropped_frame_count++;
+        kws_record_add_drop_frame(thiz);
         return;
     }
 
     if (thiz->record_offset + KWS_RECORD_FRAME_SIZE > RECORD_DATA_MAX_SIZE)
     {
         thiz->record_offset = 0;
-        thiz->dropped_frame_count++;
+        kws_record_add_drop_frame(thiz);
         return;
     }
 
@@ -356,7 +370,7 @@ void kws_start(kws_data_t *thiz)
     thiz->abnormal_frame_count = 0;
     thiz->dropped_frame_count = 0;
     thiz->dropped_byte_count = 0;
-    g_kws_running = 1;
+    xz_kws_set_running(1);
     
     et_bsp_ctrl_main_init();
     rt_slist_init(&thiz->recording);
@@ -405,7 +419,7 @@ void kws_stop(kws_data_t *thiz)
     thiz->event = NULL;
     thiz->is_exit = 0;
     thiz->is_inited = 0;
-    g_kws_running = 0;
+    xz_kws_set_running(0);
     et_bsp_ctrl_exit();
 }
 

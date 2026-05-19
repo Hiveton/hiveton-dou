@@ -8,20 +8,18 @@
 #include "rtdevice.h"
 #include "xiaozhi_client_public.h"
 #include "lwip/api.h"
-#include "lwip/dns.h"
 #include <webclient.h>
 #include <cJSON.h>
 #include "ulog.h"
 #include "ntp.h"
 #include "weather.h"
-#include "cat1_modem.h"
-#include "network/net_manager.h"
-#include "network/net_http_lock.h"
+#include "network/app_network.h"
 #include "../../config/app_config.h"
 #include "littlevgl2rtt.h"
 #include "ui.h"
 #include "ui/ui_dispatch.h"
 #include "ui_helpers.h"
+#include "mem_section.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
@@ -44,8 +42,13 @@ static volatile int g_ntp_sync_in_progress = 0;      // NTP同步进行标志
 static volatile int g_weather_service_started = 0;
 static rt_thread_t g_weather_service_thread = RT_NULL;
 static rt_event_t g_weather_service_event = RT_NULL;
+static struct rt_thread g_weather_service_thread_obj;
+static struct rt_event g_weather_service_event_obj;
+static bool g_weather_service_event_ready = false;
 static bool g_weather_home_entry_enabled = true;
 static time_t g_last_ntp_sync_time = 0;
+static struct rt_mutex g_weather_service_mutex;
+static bool g_weather_service_mutex_ready = false;
 
 static void xiaozhi_time_update_system_clock(time_t second)
 {
@@ -88,6 +91,17 @@ static time_t xiaozhi_china_tm_to_utc_epoch(struct tm *tm_value)
 #define WEATHER_FETCH_RETRIES 2
 #define WEATHER_SYNC_RETRY_DELAY_MS 1000U
 #define WEATHER_NTP_SERVER_RETRY_DELAY_MS 200U
+
+#if defined(__CC_ARM) || defined(__CLANG_ARM)
+L2_RET_BSS_SECT_BEGIN(weather_service_stack)
+ALIGN(RT_ALIGN_SIZE)
+static rt_uint8_t g_weather_service_stack[WEATHER_SERVICE_STACK_SIZE];
+L2_RET_BSS_SECT_END
+#else
+ALIGN(RT_ALIGN_SIZE)
+static rt_uint8_t g_weather_service_stack[WEATHER_SERVICE_STACK_SIZE]
+    L2_RET_BSS_SECT(weather_service_stack);
+#endif
 
 extern const lv_image_dsc_t w0;   // 晴
 extern const lv_image_dsc_t w1;   // 多云
@@ -221,6 +235,28 @@ static void weather_sync_end(void)
     rt_exit_critical();
 }
 
+static bool weather_ntp_sync_try_begin(void)
+{
+    bool started = false;
+
+    rt_enter_critical();
+    if (!g_ntp_sync_in_progress)
+    {
+        g_ntp_sync_in_progress = 1;
+        started = true;
+    }
+    rt_exit_critical();
+
+    return started;
+}
+
+static void weather_ntp_sync_end(void)
+{
+    rt_enter_critical();
+    g_ntp_sync_in_progress = 0;
+    rt_exit_critical();
+}
+
 static rt_err_t weather_data_ensure_mutex(void)
 {
     rt_err_t result = RT_EOK;
@@ -273,8 +309,7 @@ static bool weather_current_snapshot(weather_info_t *weather_info)
 
     if (!weather_data_lock())
     {
-        *weather_info = g_current_weather;
-        return weather_info->last_update > 0;
+        return false;
     }
 
     *weather_info = g_current_weather;
@@ -295,10 +330,7 @@ static bool weather_current_update_if_changed(const weather_info_t *latest_weath
 
     if (!weather_data_lock())
     {
-        changed = (g_current_weather.last_update <= 0) ||
-                  !weather_info_same_payload(&g_current_weather, latest_weather);
-        g_current_weather = *latest_weather;
-        return changed;
+        return false;
     }
 
     changed = (g_current_weather.last_update <= 0) ||
@@ -307,6 +339,65 @@ static bool weather_current_update_if_changed(const weather_info_t *latest_weath
     weather_data_unlock();
 
     return changed;
+}
+
+static rt_err_t weather_service_ensure_mutex(void)
+{
+    rt_err_t result = RT_EOK;
+
+    if (g_weather_service_mutex_ready)
+    {
+        return RT_EOK;
+    }
+
+    rt_enter_critical();
+    if (!g_weather_service_mutex_ready)
+    {
+        result = rt_mutex_init(&g_weather_service_mutex, "wsvc", RT_IPC_FLAG_PRIO);
+        if (result == RT_EOK)
+        {
+            g_weather_service_mutex_ready = true;
+        }
+    }
+    rt_exit_critical();
+
+    return result;
+}
+
+static bool weather_service_lock(void)
+{
+    if (weather_service_ensure_mutex() != RT_EOK)
+    {
+        return false;
+    }
+
+    return rt_mutex_take(&g_weather_service_mutex, RT_WAITING_FOREVER) == RT_EOK;
+}
+
+static void weather_service_unlock(void)
+{
+    if (g_weather_service_mutex_ready)
+    {
+        (void)rt_mutex_release(&g_weather_service_mutex);
+    }
+}
+
+static time_t weather_last_ntp_sync_time_get(void)
+{
+    time_t last_sync_time;
+
+    rt_enter_critical();
+    last_sync_time = g_last_ntp_sync_time;
+    rt_exit_critical();
+
+    return last_sync_time;
+}
+
+static void weather_last_ntp_sync_time_set(time_t sync_time)
+{
+    rt_enter_critical();
+    g_last_ntp_sync_time = sync_time;
+    rt_exit_critical();
 }
 
 static bool xiaozhi_time_set_rtc_utc(time_t utc_time)
@@ -424,24 +515,25 @@ static uint32_t weather_next_refresh_delay_ms(void)
 
 static bool weather_network_ready(void)
 {
-    return net_manager_can_run_weather();
+    return app_network_can_run(APP_NETWORK_CLIENT_WEATHER);
 }
 
 static bool weather_ntp_refresh_due(void)
 {
     time_t now = time(RT_NULL);
+    time_t last_sync_time = weather_last_ntp_sync_time_get();
 
     if (now <= 0)
     {
         return true;
     }
 
-    if (g_last_ntp_sync_time <= 0)
+    if (last_sync_time <= 0)
     {
         return true;
     }
 
-    return (now - g_last_ntp_sync_time) >= (30 * 60);
+    return (now - last_sync_time) >= (30 * 60);
 }
 
 static void xiaozhi_time_apply_default_rtc_if_needed(void)
@@ -707,12 +799,20 @@ int xiaozhi_weather_peek(weather_info_t *weather_info)
 
 bool xiaozhi_weather_is_home_entry_enabled(void)
 {
-    return g_weather_home_entry_enabled;
+    bool enabled;
+
+    rt_enter_critical();
+    enabled = g_weather_home_entry_enabled;
+    rt_exit_critical();
+
+    return enabled;
 }
 
 void xiaozhi_weather_set_home_entry_enabled(bool enabled)
 {
+    rt_enter_critical();
     g_weather_home_entry_enabled = enabled;
+    rt_exit_critical();
 }
 
 static void weather_service_thread_entry(void *parameter)
@@ -757,35 +857,58 @@ static void weather_service_thread_entry(void *parameter)
 
 int xiaozhi_weather_service_start(void)
 {
+    rt_err_t result = RT_EOK;
+
+    if (!weather_service_lock())
+    {
+        return -RT_ERROR;
+    }
+
     if (g_weather_service_started)
     {
+        weather_service_unlock();
         return RT_EOK;
     }
 
     if (g_weather_service_event == RT_NULL)
     {
-        g_weather_service_event = rt_event_create("weather", RT_IPC_FLAG_FIFO);
-        if (g_weather_service_event == RT_NULL)
+        if (!g_weather_service_event_ready)
         {
-            return -RT_ENOMEM;
+            result = rt_event_init(&g_weather_service_event_obj, "weather", RT_IPC_FLAG_FIFO);
+            if (result != RT_EOK)
+            {
+                weather_service_unlock();
+                return result;
+            }
+            g_weather_service_event_ready = true;
         }
+        g_weather_service_event = &g_weather_service_event_obj;
     }
 
-    g_weather_service_thread =
-        rt_thread_create("weather_sync",
-                         weather_service_thread_entry,
-                         RT_NULL,
-                         WEATHER_SERVICE_STACK_SIZE,
-                         WEATHER_SERVICE_PRIORITY,
-                         WEATHER_SERVICE_TICK);
-    if (g_weather_service_thread == RT_NULL)
+    result = rt_thread_init(&g_weather_service_thread_obj,
+                            "weather_",
+                            weather_service_thread_entry,
+                            RT_NULL,
+                            g_weather_service_stack,
+                            sizeof(g_weather_service_stack),
+                            WEATHER_SERVICE_PRIORITY,
+                            WEATHER_SERVICE_TICK);
+    if (result != RT_EOK)
     {
-        return -RT_ENOMEM;
+        weather_service_unlock();
+        return result;
     }
+    g_weather_service_thread = &g_weather_service_thread_obj;
 
     g_weather_service_started = 1;
-    rt_thread_startup(g_weather_service_thread);
-    return RT_EOK;
+    result = rt_thread_startup(g_weather_service_thread);
+    if (result != RT_EOK)
+    {
+        g_weather_service_started = 0;
+        g_weather_service_thread = RT_NULL;
+    }
+    weather_service_unlock();
+    return result;
 }
 
 void xiaozhi_weather_request_refresh(void)
@@ -948,6 +1071,8 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
     if (!weather_info)
         return -RT_ERROR;
 
+    memset(weather_info, 0, sizeof(*weather_info));
+
     // 检查是否有同步正在进行中，避免并发调用
     if (!weather_sync_try_begin()) {
         LOG_W("Weather sync already in progress, skipping...");
@@ -960,15 +1085,6 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
         return -RT_ERROR;
     }
 
-    if (net_http_should_defer_generic())
-    {
-        LOG_W("Weather sync deferred while Xiaozhi HTTPS is active");
-        weather_sync_end();
-        return -RT_EBUSY;
-    }
-
-
-
     int ret = -RT_ERROR;
     struct webclient_session *session = RT_NULL;
     char *weather_url = RT_NULL;
@@ -978,9 +1094,12 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
     int content_pos = 0;
     int buffer_capacity = 0;
     bool content_truncated = false;
+    bool read_timeout = false;
     bool http_lock_taken = false;
+    rt_tick_t request_started_tick = rt_tick_get();
+    rt_tick_t request_timeout_ticks = rt_tick_from_millisecond(WEATHER_HTTP_TIMEOUT_MS);
 
-    if (net_http_lock_take(NET_HTTP_CLIENT_GENERIC, WEATHER_HTTP_LOCK_TIMEOUT_MS) != RT_EOK)
+    if (app_network_http_begin(APP_NETWORK_CLIENT_WEATHER, WEATHER_HTTP_LOCK_TIMEOUT_MS) != RT_EOK)
     {
         LOG_W("Weather sync skipped: HTTP client busy");
         ret = -RT_EBUSY;
@@ -1023,6 +1142,7 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
     if ((resp_status = webclient_get(session, weather_url)) != 200)
     {
         LOG_E("Weather API request failed, response(%d) error.", resp_status);
+        ret = -RT_ERROR;
         goto __exit;
     }
 
@@ -1051,6 +1171,14 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
         do
         {
             int read_size;
+            rt_tick_t elapsed_ticks = rt_tick_get() - request_started_tick;
+
+            if (elapsed_ticks >= request_timeout_ticks)
+            {
+                read_timeout = true;
+                content_truncated = true;
+                break;
+            }
 
             if (content_truncated)
             {
@@ -1086,6 +1214,14 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
         do
         {
             int available = buffer_capacity - content_pos - 1;
+            rt_tick_t elapsed_ticks = rt_tick_get() - request_started_tick;
+
+            if (elapsed_ticks >= request_timeout_ticks)
+            {
+                read_timeout = true;
+                content_truncated = true;
+                break;
+            }
 
             if (available <= 0)
             {
@@ -1123,7 +1259,25 @@ int xiaozhi_weather_get(weather_info_t *weather_info)
 
     if (content_truncated)
     {
-        LOG_W("Weather response truncated: expected=%d, buffered=%d, status=%d", content_length, content_pos, resp_status);
+        rt_tick_t timeout_ticks = rt_tick_get() - request_started_tick;
+        uint32_t elapsed_ms = (uint32_t)((timeout_ticks * 1000UL) / RT_TICK_PER_SECOND);
+        if (read_timeout)
+        {
+            LOG_W("Weather response timeout: expected=%d, buffered=%d, status=%d elapsed=%dms",
+                  content_length,
+                  content_pos,
+                  resp_status,
+                  elapsed_ms);
+            ret = -RT_ETIMEOUT;
+        }
+        else
+        {
+            LOG_W("Weather response truncated: expected=%d, buffered=%d, status=%d",
+                  content_length,
+                  content_pos,
+                  resp_status);
+            ret = -RT_ERROR;
+        }
         goto __exit;
     }
 
@@ -1252,7 +1406,7 @@ __exit:
 
     if (http_lock_taken)
     {
-        net_http_lock_release(NET_HTTP_CLIENT_GENERIC);
+        app_network_http_end(APP_NETWORK_CLIENT_WEATHER);
     }
 
     if (ret != RT_EOK)
@@ -1442,17 +1596,14 @@ void update_xiaozhi_ui_weather(void *parameter)
 int xiaozhi_ntp_sync(void)
 {
     // 检查是否有同步正在进行中，避免并发调用
-    if (g_ntp_sync_in_progress) {
+    if (!weather_ntp_sync_try_begin()) {
         LOG_W("NTP sync already in progress, skipping...");
         return -RT_EBUSY;
     }
 
-    // 设置同步进行标志
-    g_ntp_sync_in_progress = 1;
-
     if (!weather_network_ready())
     {
-        g_ntp_sync_in_progress = 0;
+        weather_ntp_sync_end();
         return -RT_ERROR;
     }
 
@@ -1528,7 +1679,7 @@ int xiaozhi_ntp_sync(void)
                 LOG_W("System time mismatch. NTP: %ld, SYS: %ld", (long)cur_time, (long)verify_now);
             }
             // 清除同步进行标志
-            g_ntp_sync_in_progress = 0;
+            weather_ntp_sync_end();
             return RT_EOK;
         }
 
@@ -1537,21 +1688,21 @@ int xiaozhi_ntp_sync(void)
             rt_thread_mdelay(WEATHER_NTP_SERVER_RETRY_DELAY_MS);
         }
     }
-    if (cat1_modem_get_network_time(&cur_time))
+    if (app_network_get_network_time(&cur_time))
     {
         cur_time = xiaozhi_china_wall_epoch_to_utc(cur_time);
         if (xiaozhi_time_set_rtc_utc(cur_time))
         {
             update_xiaozhi_ui_time(NULL);
             LOG_I("Time synchronized from CAT1 network: %ld", (long)cur_time);
-            g_ntp_sync_in_progress = 0;
+            weather_ntp_sync_end();
             return RT_EOK;
         }
         LOG_W("RTC set time failed for CAT1 network time");
     }
 
     // 清除同步进行标志
-    g_ntp_sync_in_progress = 0;
+    weather_ntp_sync_end();
     return -RT_ERROR;
 }
 
@@ -1575,7 +1726,7 @@ void xiaozhi_time_weather(void)//获取最新时间和天气
             ntp_result = xiaozhi_ntp_sync();//同步网络服务时间
             if (ntp_result == RT_EOK)
             {
-                g_last_ntp_sync_time = time(RT_NULL);
+                weather_last_ntp_sync_time_set(time(RT_NULL));
                 update_xiaozhi_ui_time(NULL);//更新界面时间显示
                 LOG_I("Time synchronization successful, next sync in 30min");
                 break;

@@ -37,6 +37,7 @@ rt_bool_t xz_websocket_is_connected(void);
 int xz_websocket_connect(void);
 void xz_websocket_disconnect(void);
 const char* xz_websocket_get_session_id(void);
+rt_bool_t xz_websocket_has_session_id(void);
 void xz_websocket_begin_barge_in(void);
     /**
      * @brief xiaozhi websocket cntext 数据结构体

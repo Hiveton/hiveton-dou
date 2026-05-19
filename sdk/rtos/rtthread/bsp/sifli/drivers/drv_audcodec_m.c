@@ -767,6 +767,8 @@ const AUDCODE_ADC_CLK_CONFIG_TYPE   codec_adc_clk_config[9] =
 
 
 static struct bf0_audio_codec h_aud_codec;
+static struct rt_ringbuffer h_aud_codec_rbf_tx;
+static struct rt_ringbuffer h_aud_codec_rbf_rx;
 
 AUDCODEC_HandleTypeDef *get_audcodec_handle()
 {
@@ -1035,8 +1037,8 @@ static rt_err_t bf0_audio_init(struct rt_audio_device *audio)
     {
         audcodec->queue_buf[i] = NULL;
     }
-    audcodec->rbf_tx_instanc = malloc(sizeof(struct rt_ringbuffer));
-    audcodec->rbf_rx_instanc = malloc(sizeof(struct rt_ringbuffer));
+    audcodec->rbf_tx_instanc = &h_aud_codec_rbf_tx;
+    audcodec->rbf_rx_instanc = &h_aud_codec_rbf_rx;
     rt_ringbuffer_init(audcodec->rbf_tx_instanc, audcodec->rbf_tx_pool, AUDCODEC_DMA_RBF_NUM);
     rt_ringbuffer_init(audcodec->rbf_rx_instanc, audcodec->rbf_rx_pool, AUDCODEC_DMA_RBF_NUM);
 

@@ -156,14 +156,30 @@ static void app_watchdog_mark_heartbeat(app_watchdog_module_t module, rt_bool_t 
 void app_watchdog_set_mode(app_watchdog_mode_t mode)
 {
     rt_base_t level;
+    app_watchdog_mode_t old_mode;
+    rt_tick_t now;
+    app_watchdog_module_t module;
 
     if (!app_watchdog_mode_valid(mode))
     {
         return;
     }
 
+    now = rt_tick_get();
     level = app_watchdog_lock();
+    old_mode = s_app_watchdog_state.mode;
     s_app_watchdog_state.mode = mode;
+    if (mode == APP_WDT_MODE_ACTIVE && old_mode != APP_WDT_MODE_ACTIVE)
+    {
+        for (module = APP_WDT_MODULE_UI; module < APP_WDT_MODULE_COUNT; module++)
+        {
+            if (s_app_watchdog_state.required[module])
+            {
+                s_app_watchdog_state.last_heartbeat[module] = now;
+                s_app_watchdog_state.last_progress[module] = now;
+            }
+        }
+    }
     app_watchdog_unlock(level);
 }
 
@@ -222,14 +238,22 @@ void app_watchdog_end_long_task(app_watchdog_module_t module)
 void app_watchdog_set_module_required(app_watchdog_module_t module, bool required)
 {
     rt_base_t level;
+    rt_tick_t now;
 
     if (!app_watchdog_module_valid(module))
     {
         return;
     }
 
+    now = rt_tick_get();
     level = app_watchdog_lock();
     s_app_watchdog_state.required[module] = required ? RT_TRUE : RT_FALSE;
+    if (required &&
+        s_app_watchdog_state.last_heartbeat[module] == 0)
+    {
+        s_app_watchdog_state.last_heartbeat[module] = now;
+        s_app_watchdog_state.last_progress[module] = now;
+    }
     app_watchdog_unlock(level);
 }
 
@@ -284,8 +308,16 @@ static rt_bool_t app_watchdog_check_active(const app_watchdog_snapshot_t *snapsh
             continue;
         }
 
-        last_tick = snapshot->last_heartbeat[module];
-        timeout_ticks = app_watchdog_ms_to_ticks(app_watchdog_default_timeout_ms(module));
+        if (snapshot->long_task_active[module])
+        {
+            last_tick = snapshot->last_progress[module];
+            timeout_ticks = snapshot->long_task_timeout[module];
+        }
+        else
+        {
+            last_tick = snapshot->last_heartbeat[module];
+            timeout_ticks = app_watchdog_ms_to_ticks(app_watchdog_default_timeout_ms(module));
+        }
         if (last_tick == 0)
         {
             *failed_module = module;

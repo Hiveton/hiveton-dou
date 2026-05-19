@@ -10,7 +10,7 @@
 #include "mem_section.h"
 
 #define APP_AUDIO_PSRAM_HEAP_SIZE (1024 * 1024)
-#define APP_AUDIO_PSRAM_THRESHOLD 256U
+#define APP_AUDIO_PSRAM_THRESHOLD 1U
 #define APP_AUDIO_MEM_MAGIC_PSRAM 0x5053524DU
 #define APP_AUDIO_MEM_MAGIC_SYS   0x5359524DU
 #define APP_AUDIO_MEM_LOG_FAIL_VERBOSE_LIMIT 3U
@@ -39,6 +39,24 @@ ALIGN(4) static uint8_t s_app_audio_psram_heap_pool[APP_AUDIO_PSRAM_HEAP_SIZE]
     L2_RET_BSS_SECT(app_audio_psram_heap_pool);
 #endif
 
+static rt_bool_t app_audio_mem_psram_ready(void)
+{
+    rt_bool_t ready;
+
+    rt_enter_critical();
+    ready = s_app_audio_psram_heap_ready;
+    rt_exit_critical();
+
+    return ready;
+}
+
+static void app_audio_mem_set_psram_ready(rt_bool_t ready)
+{
+    rt_enter_critical();
+    s_app_audio_psram_heap_ready = ready;
+    rt_exit_critical();
+}
+
 static rt_bool_t app_audio_mem_calc_total_size(uint32_t size,
                                                rt_size_t *total_size)
 {
@@ -61,18 +79,21 @@ static void app_audio_mem_record_pool_alloc(rt_size_t total_size)
 {
     uint32_t bytes = (uint32_t)total_size;
 
+    rt_enter_critical();
     s_app_audio_pool_alloc_count++;
     s_app_audio_pool_active_bytes += bytes;
     if (s_app_audio_pool_active_bytes > s_app_audio_pool_high_water_bytes)
     {
         s_app_audio_pool_high_water_bytes = s_app_audio_pool_active_bytes;
     }
+    rt_exit_critical();
 }
 
 static void app_audio_mem_record_pool_free(rt_size_t total_size)
 {
     uint32_t bytes = (uint32_t)total_size;
 
+    rt_enter_critical();
     s_app_audio_pool_free_count++;
     if (s_app_audio_pool_active_bytes >= bytes)
     {
@@ -82,19 +103,36 @@ static void app_audio_mem_record_pool_free(rt_size_t total_size)
     {
         s_app_audio_pool_active_bytes = 0;
     }
+    rt_exit_critical();
 }
 
 static void app_audio_mem_record_pool_fail(uint32_t size,
                                            rt_size_t total_size,
                                            const char *reason)
 {
+    uint32_t fail_count;
+    uint32_t max_fail_size;
+    uint32_t alloc_count;
+    uint32_t free_count;
+    uint32_t active_bytes;
+    uint32_t high_water_bytes;
+
+    rt_enter_critical();
     s_app_audio_pool_fail_count++;
     if (size > s_app_audio_pool_max_fail_size)
     {
         s_app_audio_pool_max_fail_size = size;
     }
 
-    if (!app_audio_mem_should_log_pool_fail(s_app_audio_pool_fail_count))
+    fail_count = s_app_audio_pool_fail_count;
+    max_fail_size = s_app_audio_pool_max_fail_size;
+    alloc_count = s_app_audio_pool_alloc_count;
+    free_count = s_app_audio_pool_free_count;
+    active_bytes = s_app_audio_pool_active_bytes;
+    high_water_bytes = s_app_audio_pool_high_water_bytes;
+    rt_exit_critical();
+
+    if (!app_audio_mem_should_log_pool_fail(fail_count))
     {
         return;
     }
@@ -104,12 +142,12 @@ static void app_audio_mem_record_pool_fail(uint32_t size,
                (unsigned int)size,
                (unsigned int)total_size,
                reason,
-               (unsigned int)s_app_audio_pool_fail_count,
-               (unsigned int)s_app_audio_pool_max_fail_size,
-               (unsigned int)s_app_audio_pool_alloc_count,
-               (unsigned int)s_app_audio_pool_free_count,
-               (unsigned int)s_app_audio_pool_active_bytes,
-               (unsigned int)s_app_audio_pool_high_water_bytes);
+               (unsigned int)fail_count,
+               (unsigned int)max_fail_size,
+               (unsigned int)alloc_count,
+               (unsigned int)free_count,
+               (unsigned int)active_bytes,
+               (unsigned int)high_water_bytes);
 }
 
 static int app_audio_mem_init(void)
@@ -122,7 +160,7 @@ static int app_audio_mem_init(void)
                           sizeof(s_app_audio_psram_heap_pool));
     if (err == RT_EOK)
     {
-        s_app_audio_psram_heap_ready = RT_TRUE;
+        app_audio_mem_set_psram_ready(RT_TRUE);
         rt_kprintf("app audio psram heap ready: %u bytes, fallback < %u bytes\n",
                    (unsigned int)sizeof(s_app_audio_psram_heap_pool),
                    (unsigned int)APP_AUDIO_PSRAM_THRESHOLD);
@@ -153,7 +191,7 @@ static void *app_audio_mem_alloc_internal(uint32_t size, rt_bool_t zeroed)
 
     if (size >= APP_AUDIO_PSRAM_THRESHOLD)
     {
-        if (!s_app_audio_psram_heap_ready)
+        if (!app_audio_mem_psram_ready())
         {
             app_audio_mem_record_pool_fail(size, total_size, "not-ready");
             return RT_NULL;

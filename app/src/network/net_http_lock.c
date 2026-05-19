@@ -6,11 +6,56 @@ static volatile rt_uint8_t s_xiaozhi_active = 0U;
 static volatile rt_uint8_t s_owner_valid = 0U;
 static volatile net_http_client_t s_owner_client = NET_HTTP_CLIENT_GENERIC;
 
+typedef struct
+{
+    rt_uint8_t valid;
+    net_http_client_t client;
+} net_http_owner_snapshot_t;
+
+static rt_uint8_t net_http_mutex_ready_snapshot(void)
+{
+    rt_uint8_t ready;
+
+    rt_enter_critical();
+    ready = s_net_http_mutex_ready;
+    rt_exit_critical();
+
+    return ready;
+}
+
+static net_http_owner_snapshot_t net_http_owner_snapshot(void)
+{
+    net_http_owner_snapshot_t snapshot;
+
+    rt_enter_critical();
+    snapshot.valid = s_owner_valid;
+    snapshot.client = s_owner_client;
+    rt_exit_critical();
+
+    return snapshot;
+}
+
+static void net_http_owner_set(net_http_client_t client)
+{
+    rt_enter_critical();
+    s_owner_client = client;
+    s_owner_valid = 1U;
+    rt_exit_critical();
+}
+
+static void net_http_owner_clear(void)
+{
+    rt_enter_critical();
+    s_owner_client = NET_HTTP_CLIENT_GENERIC;
+    s_owner_valid = 0U;
+    rt_exit_critical();
+}
+
 static rt_err_t net_http_lock_ensure_ready(void)
 {
     rt_err_t result = RT_EOK;
 
-    if (s_net_http_mutex_ready != 0U)
+    if (net_http_mutex_ready_snapshot() != 0U)
     {
         return RT_EOK;
     }
@@ -57,7 +102,9 @@ static const char *net_http_client_name(net_http_client_t client)
 
 static void net_http_set_xiaozhi_active_internal(bool active)
 {
+    rt_enter_critical();
     s_xiaozhi_active = active ? 1U : 0U;
+    rt_exit_critical();
 }
 
 rt_err_t net_http_lock_take(net_http_client_t client, rt_int32_t timeout_ms)
@@ -96,16 +143,16 @@ rt_err_t net_http_lock_take(net_http_client_t client, rt_int32_t timeout_ms)
         return result;
     }
 
-    s_owner_client = client;
-    s_owner_valid = 1U;
+    net_http_owner_set(client);
     return RT_EOK;
 }
 
 void net_http_lock_release(net_http_client_t client)
 {
     rt_err_t result;
+    net_http_owner_snapshot_t owner;
 
-    if (s_net_http_mutex_ready == 0U)
+    if (net_http_mutex_ready_snapshot() == 0U)
     {
         if (client == NET_HTTP_CLIENT_XIAOZHI)
         {
@@ -114,28 +161,19 @@ void net_http_lock_release(net_http_client_t client)
         return;
     }
 
-    if (s_owner_valid == 0U)
+    owner = net_http_owner_snapshot();
+    if (owner.valid == 0U)
     {
         rt_kprintf("net_http: %s lock release ignored, no owner\n",
                    net_http_client_name(client));
         return;
     }
 
-    if (s_owner_client != client)
+    if (owner.client != client)
     {
         rt_kprintf("net_http: %s lock release ignored, owner=%s\n",
                    net_http_client_name(client),
-                   net_http_client_name(s_owner_client));
-        return;
-    }
-
-    result = rt_mutex_release(&s_net_http_mutex);
-    if (result != RT_EOK)
-    {
-        rt_kprintf("net_http: %s lock release failed (%d, owner=%s)\n",
-                   net_http_client_name(client),
-                   result,
-                   net_http_client_name(s_owner_client));
+                   net_http_client_name(owner.client));
         return;
     }
 
@@ -144,8 +182,22 @@ void net_http_lock_release(net_http_client_t client)
         net_http_set_xiaozhi_active_internal(false);
     }
 
-    s_owner_client = NET_HTTP_CLIENT_GENERIC;
-    s_owner_valid = 0U;
+    net_http_owner_clear();
+
+    result = rt_mutex_release(&s_net_http_mutex);
+    if (result != RT_EOK)
+    {
+        net_http_owner_set(owner.client);
+        if (client == NET_HTTP_CLIENT_XIAOZHI)
+        {
+            net_http_set_xiaozhi_active_internal(true);
+        }
+        rt_kprintf("net_http: %s lock release failed (%d, owner=%s)\n",
+                   net_http_client_name(client),
+                   result,
+                   net_http_client_name(owner.client));
+        return;
+    }
 }
 
 void net_http_set_xiaozhi_active(bool active)
@@ -155,7 +207,13 @@ void net_http_set_xiaozhi_active(bool active)
 
 bool net_http_xiaozhi_active(void)
 {
-    return (s_xiaozhi_active != 0U);
+    bool active;
+
+    rt_enter_critical();
+    active = (s_xiaozhi_active != 0U);
+    rt_exit_critical();
+
+    return active;
 }
 
 bool net_http_should_defer_generic(void)

@@ -6,6 +6,7 @@
 
 #include "rtthread.h"
 #include "rtdevice.h"
+#include "rthw.h"
 #include "dfs_fs.h"
 #include "dfs_posix.h"
 #include "drv_io.h"
@@ -40,6 +41,9 @@
 #include "aw32001_debug.h"
 #include "bq27220_monitor.h"
 #include "petgame.h"
+#include "app_tf_storage.h"
+#include <errno.h>
+#include <string.h>
 
 #define LCD_DEVICE_NAME "lcd"
 #define UI_BRIGHTNESS 100U
@@ -53,16 +57,23 @@
 #define BACKLIGHT_LEVEL_MAX 100U
 #define BACKLIGHT_PWM_VISIBLE_MIN 15U
 #define TF_MOUNT_THREAD_STACK_SIZE 4096
-#define TF_MOUNT_THREAD_PRIORITY 18
-#define TF_MOUNT_RETRY_COUNT 120
+#define TF_MOUNT_THREAD_PRIORITY 25
+#define TF_MOUNT_PATH "/"
+#define TF_BOOT_MOUNT_RETRY_COUNT 1
+#define TF_MOUNT_RETRY_COUNT 3
 #define TF_MOUNT_RETRY_DELAY_MS 100U
 #define TF_DET_PIN 33
 #define TF_DET_DEBOUNCE_MS 80U
 #define TF_DET_POLL_INTERVAL_MS 1000U
 #define TF_LOG_RATE_LIMIT_MS 5000U
+#define TF_BOOT_DEFER_MS 3000U
 
 #ifndef APP_TF_DET_DEBUG_LOG
 #define APP_TF_DET_DEBUG_LOG 0
+#endif
+
+#ifndef APP_TF_ALLOW_AUTO_FORMAT
+#define APP_TF_ALLOW_AUTO_FORMAT 0
 #endif
 
 #ifndef APP_KEEP_EPD_CONTENT_ON_SLEEP
@@ -94,16 +105,52 @@ static rt_uint8_t s_tf_mount_thread_stack[TF_MOUNT_THREAD_STACK_SIZE]
 #endif
 
 static volatile rt_uint8_t s_ui_debug_open_reading = 0U;
-static volatile rt_uint8_t s_xiaozhi_registered = 0U;
-static volatile rt_uint8_t s_xiaozhi_registering = 0U;
-static rt_tick_t s_xiaozhi_register_last_try = 0;
 static rt_tick_t s_tf_last_no_device_log_tick = 0;
 static rt_tick_t s_tf_last_mount_fail_log_tick = 0;
 static ui_screen_id_t s_petgame_last_screen = UI_SCREEN_NONE;
+static rt_tick_t s_petgame_reading_last_tick = 0;
+static rt_uint8_t s_backlight_target_brightness = UI_BRIGHTNESS;
+static volatile rt_uint8_t s_tf_det_available = 0U;
+static volatile rt_uint8_t s_tf_det_irq_pending = 0U;
+static volatile rt_uint8_t s_tf_mount_sem_ready = 0U;
+static volatile rt_uint8_t s_tf_card_present = 0U;
+static volatile rt_uint8_t s_tf_storage_ready = 0U;
+static volatile rt_uint8_t s_tf_format_attempted = 0U;
+static volatile rt_uint8_t s_tf_mount_blocked_until_change = 0U;
+static volatile rt_uint8_t s_ui_ready_for_tf = 0U;
+static rt_tick_t s_tf_mount_allowed_tick = 0;
 bt_app_t g_bt_app_env = {0};
 rt_mailbox_t g_bt_app_mb = RT_NULL;
+static struct rt_mailbox s_bt_app_mb;
+static rt_uint32_t s_bt_app_mb_pool[8];
 BOOL g_pan_connected = FALSE;
 extern BOOL first_pan_connected;
+
+static void app_flag_set(volatile rt_uint8_t *flag, rt_uint8_t value)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    *flag = value;
+    rt_hw_interrupt_enable(level);
+}
+
+static rt_uint8_t app_flag_get(volatile rt_uint8_t *flag)
+{
+    rt_uint8_t value;
+    rt_base_t level = rt_hw_interrupt_disable();
+    value = *flag;
+    rt_hw_interrupt_enable(level);
+    return value;
+}
+
+static rt_uint8_t app_flag_take(volatile rt_uint8_t *flag)
+{
+    rt_uint8_t value;
+    rt_base_t level = rt_hw_interrupt_disable();
+    value = *flag;
+    *flag = 0U;
+    rt_hw_interrupt_enable(level);
+    return value;
+}
 
 #ifdef BSP_USING_PM
 extern bool lv_refreshing_done(void);
@@ -125,11 +172,7 @@ static void pm_event_handler(gui_pm_event_type_t event)
 }
 #endif
 
-#ifdef BLUETOOTH_NAME
-static const char *s_local_bt_name = BLUETOOTH_NAME;
-#else
-static const char *s_local_bt_name = "ink";
-#endif
+static const char *s_local_bt_name = "wodle";
 
 void HAL_MspInit(void)
 {
@@ -231,9 +274,9 @@ static const char *tf_find_device_name(void)
 
 static rt_uint8_t tf_detect_card_present(void)
 {
-    if (s_tf_det_available != 0U)
+    if (app_flag_get(&s_tf_det_available) != 0U)
     {
-        return (rt_pin_read(TF_DET_PIN) == PIN_HIGH) ? 1U : 0U;
+        return (rt_pin_read(TF_DET_PIN) == PIN_LOW) ? 1U : 0U;
     }
 
     return (tf_find_device_name() != RT_NULL) ? 1U : 0U;
@@ -245,9 +288,88 @@ static void tf_notify_state_changed(void)
     ui_dispatch_request_time_refresh();
 }
 
+static const char *tf_mount_path(void)
+{
+    return TF_MOUNT_PATH;
+}
+
+bool app_tf_card_inserted(void)
+{
+    return app_flag_get(&s_tf_card_present) != 0U;
+}
+
+bool app_tf_storage_ready(void)
+{
+    return app_flag_get(&s_tf_storage_ready) != 0U;
+}
+
+const char *app_tf_mount_root(void)
+{
+    return app_tf_storage_ready() ? tf_mount_path() : RT_NULL;
+}
+
+bool app_tf_build_path(const char *relative_path, char *buffer, size_t buffer_size)
+{
+    const char *root;
+    const char *suffix;
+    int written;
+
+    if (relative_path == RT_NULL || buffer == RT_NULL || buffer_size == 0U)
+    {
+        return false;
+    }
+
+    buffer[0] = '\0';
+    root = app_tf_mount_root();
+    if (root == RT_NULL || root[0] == '\0')
+    {
+        return false;
+    }
+
+    suffix = relative_path;
+    while (*suffix == '/')
+    {
+        suffix++;
+    }
+
+    if (suffix[0] == '\0')
+    {
+        written = rt_snprintf(buffer, buffer_size, "%s", root);
+    }
+    else if (strcmp(root, "/") == 0)
+    {
+        written = rt_snprintf(buffer, buffer_size, "/%s", suffix);
+    }
+    else
+    {
+        written = rt_snprintf(buffer, buffer_size, "%s/%s", root, suffix);
+    }
+
+    if (written < 0 || (size_t)written >= buffer_size)
+    {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    return true;
+}
+
 static void tf_ensure_media_dirs(const char *mount_path)
 {
-    static const char *const dir_names[] = {"record", "books", "mp3", "pic", "font", "config"};
+    static const char *const dir_names[] = {
+        "record",
+        "books",
+        "mp3",
+        "pic",
+        "font",
+        "config",
+        "config/cache",
+        "config/cache/covers",
+        "cache",
+        "cache/covers",
+        "games",
+        "games/petgame",
+    };
     char path[64];
     rt_size_t i;
 
@@ -277,8 +399,43 @@ static void tf_ensure_media_dirs(const char *mount_path)
             continue;
         }
 
-        mkdir(path, 0);
+        if (mkdir(path, 0777) == 0)
+        {
+            rt_kprintf("tf: mkdir %s ok\n", path);
+        }
+        else
+        {
+            int err = rt_get_errno();
+            if (err != -EEXIST && err != EEXIST)
+            {
+                rt_kprintf("tf: mkdir %s failed errno=%d\n", path, err);
+            }
+        }
     }
+}
+
+static rt_err_t tf_try_format(const char *device_name)
+{
+    int result;
+
+    if (device_name == RT_NULL)
+    {
+        return -RT_ERROR;
+    }
+
+    rt_kprintf("tf: formatting %s as elm\n", device_name);
+    result = dfs_mkfs("elm", device_name);
+    if (result == 0)
+    {
+        rt_kprintf("tf: formatted %s\n", device_name);
+        return RT_EOK;
+    }
+
+    rt_kprintf("tf: format %s failed result=%d errno=%d\n",
+               device_name,
+               result,
+               rt_get_errno());
+    return -RT_ERROR;
 }
 
 static rt_uint8_t tf_log_rate_limit(rt_tick_t *last_tick)
@@ -350,12 +507,13 @@ static rt_err_t tf_try_mount(const char *device_name, const char *mount_path)
 #if APP_TF_DET_DEBUG_LOG
         rt_kprintf("tf: %s already mounted at %s\n", device_name, mounted);
 #endif
+        tf_ensure_media_dirs(mounted);
         return RT_EOK;
     }
 
     if (strcmp(mount_path, "/") != 0)
     {
-        mkdir(mount_path, 0);
+        mkdir(mount_path, 0777);
     }
 
     if (dfs_mount(device_name, mount_path, "elm", 0, 0) == RT_EOK)
@@ -368,25 +526,80 @@ static rt_err_t tf_try_mount(const char *device_name, const char *mount_path)
     return -RT_ERROR;
 }
 
+static rt_err_t tf_try_mount_or_format(const char *device_name, const char *mount_path)
+{
+    rt_err_t result;
+    int mount_errno;
+
+    result = tf_try_mount(device_name, mount_path);
+    if (result == RT_EOK)
+    {
+        return RT_EOK;
+    }
+    mount_errno = rt_get_errno();
+    if (mount_errno == -ENOMEM ||
+        mount_errno == -ENOSPC)
+    {
+        rt_kprintf("tf: mount %s at %s failed errno=%d, skip format\n",
+                   device_name,
+                   mount_path,
+                   mount_errno);
+        return -RT_ERROR;
+    }
+
+#if !APP_TF_ALLOW_AUTO_FORMAT
+    rt_kprintf("tf: mount %s at %s failed errno=%d, auto format disabled\n",
+               device_name,
+               mount_path,
+               mount_errno);
+    return -RT_ERROR;
+#endif
+
+    if (app_flag_get(&s_tf_format_attempted) != 0U)
+    {
+        rt_kprintf("tf: mount %s at %s failed errno=%d, format already attempted\n",
+                   device_name,
+                   mount_path,
+                   mount_errno);
+        return -RT_ERROR;
+    }
+    app_flag_set(&s_tf_format_attempted, 1U);
+
+    rt_kprintf("tf: mount %s at %s failed errno=%d, try format\n",
+               device_name,
+               mount_path,
+               mount_errno);
+
+    if (tf_try_format(device_name) != RT_EOK)
+    {
+        return -RT_ERROR;
+    }
+
+    rt_thread_mdelay(200U);
+    return tf_try_mount(device_name, mount_path);
+}
+
 static void tf_try_boot_mount_for_config(void)
 {
     const char *device_name;
     rt_uint32_t retry;
 
-    for (retry = 0; retry < TF_MOUNT_RETRY_COUNT; ++retry)
+    for (retry = 0; retry < TF_BOOT_MOUNT_RETRY_COUNT; ++retry)
     {
         device_name = tf_find_device_name();
         if (device_name != RT_NULL)
         {
-            if (tf_try_mount(device_name, "/") == RT_EOK)
+            if (tf_try_mount_or_format(device_name, tf_mount_path()) == RT_EOK)
             {
-                s_tf_storage_ready = 1U;
-                s_tf_card_present = 1U;
+                app_flag_set(&s_tf_storage_ready, 1U);
+                app_flag_set(&s_tf_card_present, 1U);
                 return;
             }
         }
-
-        rt_thread_mdelay(TF_MOUNT_RETRY_DELAY_MS);
+        if (retry + 1U < TF_BOOT_MOUNT_RETRY_COUNT)
+        {
+            rt_thread_mdelay(TF_MOUNT_RETRY_DELAY_MS);
+        }
     }
 }
 
@@ -394,8 +607,8 @@ static void tf_det_irq_handler(void *args)
 {
     (void)args;
 
-    s_tf_det_irq_pending = 1U;
-    if (s_tf_mount_sem_ready != 0U)
+    app_flag_set(&s_tf_det_irq_pending, 1U);
+    if (app_flag_get(&s_tf_mount_sem_ready) != 0U)
     {
         rt_sem_release(&s_tf_mount_sem);
     }
@@ -423,11 +636,11 @@ static rt_err_t tf_det_init(void)
         return result;
     }
 
-    s_tf_det_available = 1U;
-    s_tf_card_present = (rt_pin_read(TF_DET_PIN) == PIN_HIGH) ? 1U : 0U;
+    app_flag_set(&s_tf_det_available, 1U);
+    app_flag_set(&s_tf_card_present, (rt_pin_read(TF_DET_PIN) == PIN_LOW) ? 1U : 0U);
     rt_kprintf("tf: det init pin=%d present=%u level=%d\n",
                TF_DET_PIN,
-               (unsigned int)s_tf_card_present,
+               (unsigned int)app_flag_get(&s_tf_card_present),
                rt_pin_read(TF_DET_PIN));
     return RT_EOK;
 }
@@ -436,17 +649,17 @@ static void tf_det_disable_irq(void)
 {
     rt_err_t result;
 
-    s_tf_mount_sem_ready = 0U;
-    if (s_tf_det_available != 0U)
+    app_flag_set(&s_tf_mount_sem_ready, 0U);
+    if (app_flag_get(&s_tf_det_available) != 0U)
     {
         result = rt_pin_irq_enable(TF_DET_PIN, PIN_IRQ_DISABLE);
         if (result != RT_EOK)
         {
             rt_kprintf("tf: disable det irq failed=%d\n", result);
         }
-        s_tf_det_available = 0U;
+        app_flag_set(&s_tf_det_available, 0U);
     }
-    s_tf_det_irq_pending = 0U;
+    app_flag_set(&s_tf_det_irq_pending, 0U);
 }
 
 static void tf_mount_thread_entry(void *parameter)
@@ -461,23 +674,31 @@ static void tf_mount_thread_entry(void *parameter)
 
     while (1)
     {
-        if (s_tf_det_available != 0U && s_tf_mount_sem_ready != 0U)
+        if (app_flag_get(&s_ui_ready_for_tf) == 0U ||
+            (rt_int32_t)(rt_tick_get() - s_tf_mount_allowed_tick) < 0)
+        {
+            rt_thread_mdelay(500U);
+            continue;
+        }
+
+        if (app_flag_get(&s_tf_det_available) != 0U &&
+            app_flag_get(&s_tf_mount_sem_ready) != 0U)
         {
             rt_sem_take(&s_tf_mount_sem, RT_WAITING_FOREVER);
             rt_thread_mdelay(TF_DET_DEBOUNCE_MS);
             while (rt_sem_take(&s_tf_mount_sem, RT_WAITING_NO) == RT_EOK)
             {
-                s_tf_det_irq_pending = 0U;
+                app_flag_set(&s_tf_det_irq_pending, 0U);
             }
 #if APP_TF_DET_DEBUG_LOG
-            if (s_tf_det_irq_pending != 0U)
+            if (app_flag_get(&s_tf_det_irq_pending) != 0U)
             {
                 rt_kprintf("tf: det event pin=%d level=%d\n",
                            TF_DET_PIN,
                            rt_pin_read(TF_DET_PIN));
             }
 #endif
-            s_tf_det_irq_pending = 0U;
+            app_flag_set(&s_tf_det_irq_pending, 0U);
         }
         else if (first_scan == 0U)
         {
@@ -486,16 +707,18 @@ static void tf_mount_thread_entry(void *parameter)
         first_scan = 0U;
 
         present = tf_detect_card_present();
-        state_changed = (present != s_tf_card_present) ? 1U : 0U;
+        state_changed = (present != app_flag_get(&s_tf_card_present)) ? 1U : 0U;
         if (state_changed != 0U)
         {
-            s_tf_card_present = present;
+            app_flag_set(&s_tf_card_present, present);
+            app_flag_set(&s_tf_format_attempted, 0U);
+            app_flag_set(&s_tf_mount_blocked_until_change, 0U);
             tf_notify_state_changed();
         }
 
         if (!present)
         {
-            if (state_changed != 0U || s_tf_storage_ready != 0U)
+            if (state_changed != 0U || app_flag_get(&s_tf_storage_ready) != 0U)
             {
                 device_name = tf_find_device_name();
                 if (device_name != RT_NULL)
@@ -503,13 +726,20 @@ static void tf_mount_thread_entry(void *parameter)
                     (void)tf_try_unmount(device_name);
                 }
                 ui_font_manager_notify_storage_removed();
-                s_tf_storage_ready = 0U;
+                app_flag_set(&s_tf_storage_ready, 0U);
+                app_flag_set(&s_tf_format_attempted, 0U);
+                app_flag_set(&s_tf_mount_blocked_until_change, 0U);
                 rt_kprintf("tf: card removed\n");
             }
             continue;
         }
 
-        if (s_tf_storage_ready != 0U && state_changed == 0U)
+        if (app_flag_get(&s_tf_mount_blocked_until_change) != 0U && state_changed == 0U)
+        {
+            continue;
+        }
+
+        if (app_flag_get(&s_tf_storage_ready) != 0U && state_changed == 0U)
         {
             continue;
         }
@@ -523,14 +753,15 @@ static void tf_mount_thread_entry(void *parameter)
 #if APP_TF_DET_DEBUG_LOG
                 rt_kprintf("tf: found storage device %s\n", device_name);
 #endif
-                if (tf_try_mount(device_name, "/") == RT_EOK)
+                if (tf_try_mount_or_format(device_name, tf_mount_path()) == RT_EOK)
                 {
-                    rt_uint8_t first_ready = (s_tf_storage_ready == 0U) ? 1U : 0U;
+                    rt_uint8_t first_ready = (app_flag_get(&s_tf_storage_ready) == 0U) ? 1U : 0U;
 
-                    s_tf_storage_ready = 1U;
+                    app_flag_set(&s_tf_storage_ready, 1U);
                     if (!app_config_is_loaded_from_file())
                     {
                         (void)app_config_load();
+                        net_manager_reload_config_mode();
                         if (!app_config_is_loaded_from_file())
                         {
                             (void)app_config_save();
@@ -541,6 +772,15 @@ static void tf_mount_thread_entry(void *parameter)
                     {
                         ui_font_manager_notify_storage_ready();
                     }
+                    app_flag_set(&s_tf_mount_blocked_until_change, 0U);
+                    break;
+                }
+
+                if (app_flag_get(&s_tf_format_attempted) != 0U ||
+                    rt_get_errno() == -ENOMEM ||
+                    rt_get_errno() == -ENOSPC)
+                {
+                    app_flag_set(&s_tf_mount_blocked_until_change, 1U);
                     break;
                 }
             }
@@ -555,7 +795,7 @@ static void tf_mount_thread_entry(void *parameter)
                            (unsigned int)(TF_MOUNT_RETRY_COUNT * TF_MOUNT_RETRY_DELAY_MS));
             }
         }
-        else if (s_tf_storage_ready == 0U)
+        else if (app_flag_get(&s_tf_storage_ready) == 0U)
         {
             if (tf_log_rate_limit(&s_tf_last_mount_fail_log_tick) != 0U)
             {
@@ -613,6 +853,7 @@ static void ui_thread_entry(void *parameter)
     rt_kprintf("ui: after switch home\n");
     ui_font_manager_notify_storage_ready();
     rt_kprintf("ui: xz_ui thread ready, ai_dou loaded\n");
+    app_flag_set(&s_ui_ready_for_tf, 1U);
     app_watchdog_heartbeat(APP_WDT_MODULE_UI);
     app_watchdog_set_mode(APP_WDT_MODE_ACTIVE);
     petgame_init();
@@ -653,9 +894,8 @@ static void ui_thread_entry(void *parameter)
 
         petgame_process();
 
-        if (s_ui_debug_open_reading != 0U)
+        if (app_flag_take(&s_ui_debug_open_reading) != 0U)
         {
-            s_ui_debug_open_reading = 0U;
             rt_kprintf("ui: debug switch to reading detail\n");
             ui_runtime_switch_to(UI_SCREEN_READING_DETAIL);
         }
@@ -718,6 +958,8 @@ static rt_err_t start_tf_mount_thread(void)
 {
     rt_err_t result;
 
+    s_tf_mount_allowed_tick = rt_tick_get() + rt_tick_from_millisecond(TF_BOOT_DEFER_MS);
+
     result = rt_sem_init(&s_tf_mount_sem, "tf_det", 0, RT_IPC_FLAG_FIFO);
     if (result != RT_EOK)
     {
@@ -725,15 +967,15 @@ static rt_err_t start_tf_mount_thread(void)
     }
     else
     {
-        s_tf_mount_sem_ready = 1U;
+        app_flag_set(&s_tf_mount_sem_ready, 1U);
     }
 
-    if (s_tf_mount_sem_ready != 0U)
+    if (app_flag_get(&s_tf_mount_sem_ready) != 0U)
     {
         result = tf_det_init();
         if (result != RT_EOK)
         {
-            s_tf_det_available = 0U;
+            app_flag_set(&s_tf_det_available, 0U);
             rt_kprintf("tf: det unavailable, fallback to polling\n");
         }
     }
@@ -761,7 +1003,8 @@ static rt_err_t start_tf_mount_thread(void)
         return RT_EOK;
     }
 
-    if (s_tf_det_available != 0U && s_tf_mount_sem_ready != 0U)
+    if (app_flag_get(&s_tf_det_available) != 0U &&
+        app_flag_get(&s_tf_mount_sem_ready) != 0U)
     {
         rt_sem_release(&s_tf_mount_sem);
     }
@@ -777,7 +1020,7 @@ static void ui_dbg_reading(void)
     }
 
     rt_kprintf("ui_dbg_reading: queued switch to reading detail\n");
-    s_ui_debug_open_reading = 1U;
+    app_flag_set(&s_ui_debug_open_reading, 1U);
 }
 MSH_CMD_EXPORT(ui_dbg_reading, switch to reading detail screen);
 
@@ -797,6 +1040,14 @@ int main(void)
     tf_try_boot_mount_for_config();
     app_config_init();
     app_config_load();
+
+    rt_kprintf("ui: boot\n");
+    result = start_ui_thread();
+    if (result != RT_EOK)
+    {
+        rt_kprintf("ui: start failed=%d\n", result);
+    }
+
     (void)reading_state_init();
     audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC,
                                     (int)app_config_get_audio_music_volume());
@@ -805,7 +1056,6 @@ int main(void)
     app_buttons_init();
     touch_wakeup_init();
     aw32001_debug_ensure_charge_enabled();
-    rt_kprintf("ui: boot\n");
 
     result = start_tf_mount_thread();
     if (result != RT_EOK)
@@ -822,18 +1072,25 @@ int main(void)
         rt_kprintf("weather: service start failed=%d\n", result);
     }
 
-    g_bt_app_mb = rt_mb_create("bt_app", 8, RT_IPC_FLAG_FIFO);
-    if (g_bt_app_mb == RT_NULL)
+    result = rt_mb_init(&s_bt_app_mb,
+                        "bt_app",
+                        s_bt_app_mb_pool,
+                        sizeof(s_bt_app_mb_pool) / sizeof(s_bt_app_mb_pool[0]),
+                        RT_IPC_FLAG_FIFO);
+    if (result != RT_EOK)
     {
-        rt_kprintf("bt: mailbox create failed\n");
-        return 0;
+        g_bt_app_mb = RT_NULL;
+        rt_kprintf("bt: mailbox init failed=%d\n", result);
     }
-
+    else
+    {
+        g_bt_app_mb = &s_bt_app_mb;
 #ifdef BSP_BT_CONNECTION_MANAGER
-    bt_cm_set_profile_target(BT_CM_HID, BT_LINK_PHONE, 1);
+        bt_cm_set_profile_target(BT_CM_HID, BT_LINK_PHONE, 1);
 #endif
-    bt_interface_register_bt_event_notify_callback(
-        bt_app_interface_event_handle);
+        bt_interface_register_bt_event_notify_callback(
+            bt_app_interface_event_handle);
+    }
 
     result = net_manager_init();
     if (result != RT_EOK)
@@ -841,14 +1098,14 @@ int main(void)
         rt_kprintf("net: manager init failed=%d\n", result);
     }
 
-    result = start_ui_thread();
-    if (result != RT_EOK)
-    {
-        return 0;
-    }
-
     while (1)
     {
+        if (g_bt_app_mb == RT_NULL)
+        {
+            rt_thread_mdelay(1000);
+            continue;
+        }
+
         if (rt_mb_recv(g_bt_app_mb, &bt_event,
                        rt_tick_from_millisecond(1000)) != RT_EOK)
         {

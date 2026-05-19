@@ -7,19 +7,19 @@
 #include "dfs_fs.h"
 #include "dfs_posix.h"
 #include "rtdevice.h"
-
-static const char *const s_tf_devices[] = {"sd0", "sd1", "sd2", "sdio0"};
+#include "app_tf_storage.h"
 
 #define PETGAME_PATH_BUF_SIZE 256U
 #define PETGAME_FILE_NAME "petgame.dat"
 #define PETGAME_TEMP_SUFFIX ".tmp"
+#define PETGAME_BACKUP_SUFFIX ".bak"
 #define PETGAME_GAMES_DIR "games"
 #define PETGAME_DATA_DIR "petgame"
 #define PETGAME_MAX_FILE_SIZE 2048U
 
 static bool petgame_storage_find_mount_root(char *buffer, size_t buffer_size)
 {
-    size_t i;
+    const char *mounted;
     int written;
 
     if (buffer == NULL || buffer_size == 0U)
@@ -27,24 +27,20 @@ static bool petgame_storage_find_mount_root(char *buffer, size_t buffer_size)
         return false;
     }
 
-    for (i = 0; i < sizeof(s_tf_devices) / sizeof(s_tf_devices[0]); ++i)
+    mounted = app_tf_mount_root();
+    if (mounted == NULL || mounted[0] == '\0')
     {
-        rt_device_t device = rt_device_find(s_tf_devices[i]);
-        const char *mounted = (device != RT_NULL) ? dfs_filesystem_get_mounted_path(device) : RT_NULL;
-
-        if (mounted != NULL && mounted[0] != '\0')
-        {
-            written = rt_snprintf(buffer, buffer_size, "%s", mounted);
-            if (written < 0 || (size_t)written >= buffer_size)
-            {
-                buffer[0] = '\0';
-                return false;
-            }
-            return true;
-        }
+        return false;
     }
 
-    return false;
+    written = rt_snprintf(buffer, buffer_size, "%s", mounted);
+    if (written < 0 || (size_t)written >= buffer_size)
+    {
+        buffer[0] = '\0';
+        return false;
+    }
+
+    return true;
 }
 
 static bool petgame_storage_join_path(char *buffer,
@@ -362,12 +358,56 @@ static bool petgame_storage_write_all(int fd, const char *data, size_t size)
     return true;
 }
 
+static bool petgame_storage_sync_parent_dir(const char *path)
+{
+    char dir_path[PETGAME_PATH_BUF_SIZE];
+    char *cursor;
+    int fd;
+    bool ok = true;
+
+    if (path == NULL || path[0] == '\0')
+    {
+        return false;
+    }
+
+    if (rt_snprintf(dir_path, sizeof(dir_path), "%s", path) < 0)
+    {
+        return false;
+    }
+
+    cursor = strrchr(dir_path, '/');
+    if (cursor == NULL || cursor == dir_path)
+    {
+        return true;
+    }
+
+    *cursor = '\0';
+    fd = open(dir_path, O_RDONLY, 0);
+    if (fd < 0)
+    {
+        return false;
+    }
+
+    if (fsync(fd) != 0)
+    {
+        ok = false;
+    }
+    if (close(fd) != 0)
+    {
+        ok = false;
+    }
+
+    return ok;
+}
+
 bool petgame_storage_load(petgame_state_t *state)
 {
     char games_dir[PETGAME_PATH_BUF_SIZE] = {0};
     char data_dir[PETGAME_PATH_BUF_SIZE] = {0};
     char data_file[PETGAME_PATH_BUF_SIZE] = {0};
+    char backup_file[PETGAME_PATH_BUF_SIZE] = {0};
     char file_content[PETGAME_MAX_FILE_SIZE] = {0};
+    int written;
 
     if (state == NULL)
     {
@@ -385,7 +425,16 @@ bool petgame_storage_load(petgame_state_t *state)
         return false;
     }
 
-    if (!petgame_storage_read_file(data_file, file_content, sizeof(file_content)))
+    if (petgame_storage_read_file(data_file, file_content, sizeof(file_content)) &&
+        petgame_storage_parse_state(file_content, state))
+    {
+        (void)games_dir;
+        (void)data_dir;
+        return true;
+    }
+
+    written = rt_snprintf(backup_file, sizeof(backup_file), "%s%s", data_file, PETGAME_BACKUP_SUFFIX);
+    if (written < 0 || (size_t)written >= sizeof(backup_file))
     {
         return false;
     }
@@ -393,7 +442,22 @@ bool petgame_storage_load(petgame_state_t *state)
     (void)games_dir;
     (void)data_dir;
 
-    return petgame_storage_parse_state(file_content, state);
+    if (petgame_storage_read_file(backup_file, file_content, sizeof(file_content)) &&
+        petgame_storage_parse_state(file_content, state))
+    {
+        rt_kprintf("petgame: restored state from backup %s\n", backup_file);
+        if (rename(backup_file, data_file) == 0)
+        {
+            (void)petgame_storage_sync_parent_dir(data_file);
+        }
+        else
+        {
+            rt_kprintf("petgame: restore backup file failed path=%s backup=%s\n", data_file, backup_file);
+        }
+        return true;
+    }
+
+    return false;
 }
 
 bool petgame_storage_save(const petgame_state_t *state)
@@ -402,10 +466,12 @@ bool petgame_storage_save(const petgame_state_t *state)
     char data_dir[PETGAME_PATH_BUF_SIZE] = {0};
     char data_file[PETGAME_PATH_BUF_SIZE] = {0};
     char temp_file[PETGAME_PATH_BUF_SIZE] = {0};
+    char backup_file[PETGAME_PATH_BUF_SIZE] = {0};
     char content[PETGAME_MAX_FILE_SIZE] = {0};
     int fd;
     int written;
     size_t content_len;
+    bool backup_created = false;
 
     if (state == NULL)
     {
@@ -474,7 +540,16 @@ bool petgame_storage_save(const petgame_state_t *state)
     {
         return false;
     }
+    written = rt_snprintf(backup_file, sizeof(backup_file), "%s%s", data_file, PETGAME_BACKUP_SUFFIX);
+    if (written < 0 || (size_t)written >= sizeof(backup_file))
+    {
+        return false;
+    }
 
+    if (unlink(temp_file) == 0)
+    {
+        (void)petgame_storage_sync_parent_dir(temp_file);
+    }
     fd = open(temp_file, O_WRONLY | O_CREAT | O_TRUNC, 0);
     if (fd < 0)
     {
@@ -485,21 +560,65 @@ bool petgame_storage_save(const petgame_state_t *state)
         fsync(fd) != 0)
     {
         (void)close(fd);
-        (void)unlink(temp_file);
+        if (unlink(temp_file) == 0)
+        {
+            (void)petgame_storage_sync_parent_dir(temp_file);
+        }
         return false;
     }
 
     if (close(fd) != 0)
     {
-        (void)unlink(temp_file);
+        if (unlink(temp_file) == 0)
+        {
+            (void)petgame_storage_sync_parent_dir(temp_file);
+        }
         return false;
     }
 
     if (rename(temp_file, data_file) == 0)
     {
+        (void)petgame_storage_sync_parent_dir(data_file);
         return true;
     }
 
-    (void)unlink(temp_file);
+    if (access(data_file, 0) == 0)
+    {
+        (void)unlink(backup_file);
+        if (rename(data_file, backup_file) != 0)
+        {
+            if (unlink(temp_file) == 0)
+            {
+                (void)petgame_storage_sync_parent_dir(temp_file);
+            }
+            return false;
+        }
+        backup_created = true;
+        (void)petgame_storage_sync_parent_dir(data_file);
+    }
+
+    if (rename(temp_file, data_file) == 0)
+    {
+        if (backup_created)
+        {
+            (void)unlink(backup_file);
+        }
+        (void)petgame_storage_sync_parent_dir(data_file);
+        return true;
+    }
+
+    if (backup_created && rename(backup_file, data_file) != 0)
+    {
+        rt_kprintf("petgame: rollback failed path=%s backup=%s\n", data_file, backup_file);
+    }
+    else if (backup_created)
+    {
+        (void)petgame_storage_sync_parent_dir(data_file);
+    }
+
+    if (unlink(temp_file) == 0)
+    {
+        (void)petgame_storage_sync_parent_dir(temp_file);
+    }
     return false;
 }

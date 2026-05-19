@@ -515,8 +515,6 @@ void ui_Pomodoro_screen_init(void)
     lv_label_set_long_mode(s_pomodoro_ui.hint_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(s_pomodoro_ui.hint_label, lv_color_hex(0x666666), 0);
 
-    ui_bottom_nav_create(ui_Pomodoro, UI_BOTTOM_TAB_NONE);
-
     s_pomodoro_ui.screen = ui_Pomodoro;
     pomodoro_update_timer_state();
     pomodoro_refresh_ui();

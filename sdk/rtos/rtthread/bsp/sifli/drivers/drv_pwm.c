@@ -1256,7 +1256,7 @@ static int bf0_pwm_init(void)
             bf0_hw_pwm_config_dma(&bf0_pwm_obj[i]);
 
             /* register pwm device */
-            if (rt_device_pwm_register(rt_calloc(1, sizeof(struct rt_device_pwm)), bf0_pwm_obj[i].name, &drv_ops, &bf0_pwm_obj[i]) == RT_EOK)
+            if (rt_device_pwm_register(&bf0_pwm_obj[i].pwm_device, bf0_pwm_obj[i].name, &drv_ops, &bf0_pwm_obj[i]) == RT_EOK)
             {
 
                 LOG_D("%s register success", bf0_pwm_obj[i].name);

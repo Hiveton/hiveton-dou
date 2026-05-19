@@ -150,9 +150,9 @@ ALIGN(4) static uint8_t g_xz_audio_psram_heap_pool[XZ_AUDIO_PSRAM_HEAP_SIZE]
 #define XZ_AUDIO_VERSION            "xz_audio_verson: 1.0"
 
 #ifdef XIAOZHI_USING_MQTT
-    #define XZ_DEVICE_STATE mqtt_g_state
+    #define XZ_DEVICE_STATE xz_mqtt_get_device_state()
 #else
-    #define XZ_DEVICE_STATE web_g_state
+    #define XZ_DEVICE_STATE xz_websocket_get_device_state()
 #endif
 extern uint8_t vad_is_enable(void);
 extern uint8_t Initiate_disconnection_flag;
@@ -171,6 +171,80 @@ static volatile uint32_t g_xz_downlink_drop_no_idle_count = 0;
 static volatile uint32_t g_xz_downlink_drop_close_count = 0;
 static volatile uint32_t g_xz_speaker_close_timeout_count = 0;
 static volatile uint32_t g_xz_audio_thread_exit_timeout_count = 0;
+#ifdef XIAOZHI_USING_MQTT
+static button_action_t g_mqtt_last_button_action = BUTTON_RELEASED;
+
+static rt_bool_t xz_mqtt_button_action_should_handle(button_action_t action)
+{
+    rt_bool_t should_handle;
+    rt_base_t level = rt_hw_interrupt_disable();
+
+    should_handle = (g_mqtt_last_button_action != action) ? RT_TRUE : RT_FALSE;
+    if (should_handle)
+    {
+        g_mqtt_last_button_action = action;
+    }
+
+    rt_hw_interrupt_enable(level);
+    return should_handle;
+}
+#endif
+
+static void xz_audio_set_speaker_target_on(rt_uint8_t on)
+{
+    rt_enter_critical();
+    g_speaker_target_on = on ? 1U : 0U;
+    rt_exit_critical();
+}
+
+static rt_uint8_t xz_audio_get_speaker_target_on(void)
+{
+    rt_uint8_t on;
+    rt_enter_critical();
+    on = g_speaker_target_on;
+    rt_exit_critical();
+    return on;
+}
+
+static uint32_t xz_audio_add_drop_no_idle_count(uint32_t delta)
+{
+    uint32_t total;
+    rt_enter_critical();
+    g_xz_downlink_drop_no_idle_count += delta;
+    total = g_xz_downlink_drop_no_idle_count;
+    rt_exit_critical();
+    return total;
+}
+
+static uint32_t xz_audio_add_drop_close_count(uint32_t delta)
+{
+    uint32_t total;
+    rt_enter_critical();
+    g_xz_downlink_drop_close_count += delta;
+    total = g_xz_downlink_drop_close_count;
+    rt_exit_critical();
+    return total;
+}
+
+static uint32_t xz_audio_inc_speaker_close_timeout_count(void)
+{
+    uint32_t total;
+    rt_enter_critical();
+    ++g_xz_speaker_close_timeout_count;
+    total = g_xz_speaker_close_timeout_count;
+    rt_exit_critical();
+    return total;
+}
+
+static uint32_t xz_audio_inc_thread_exit_timeout_count(void)
+{
+    uint32_t total;
+    rt_enter_critical();
+    ++g_xz_audio_thread_exit_timeout_count;
+    total = g_xz_audio_thread_exit_timeout_count;
+    rt_exit_critical();
+    return total;
+}
 
 static inline void xz_audio_watchdog_heartbeat(void)
 {
@@ -1046,7 +1120,7 @@ void xz_speaker(int on)
     // each packet should be g_xz_context.frame_duration(typical 60ms)
     xz_audio_t *thiz = &xz_audio;
 
-    g_speaker_target_on = on ? 1U : 0U;
+    xz_audio_set_speaker_target_on(on ? 1U : 0U);
 
     if (thiz->inited && thiz->event != RT_NULL &&
         rt_thread_self() != &thiz->thread)
@@ -1072,18 +1146,16 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
     sleep_manager_request_wakeup();
     rt_kprintf("in mqtt button handle2\n");
     // 如果当前处于KWS模式，则退出KWS模式
-    if (g_kws_running) 
-    {  
+    if (xz_kws_is_running())
+    {
         rt_kprintf("KWS exit\n");
-        g_kws_force_exit = 1;
+        xz_kws_request_force_exit();
     }
-    static button_action_t last_action = BUTTON_RELEASED;
     rt_kprintf("button(%d) %d:", pin, action);
-    if (last_action == action)
+    if (!xz_mqtt_button_action_should_handle(action))
     {
         return;
     }
-    last_action = action;
 
         if (action == BUTTON_PRESSED)
         {
@@ -1094,13 +1166,13 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
             {
                 ui_switch_to_xiaozhi_screen();
             }
-            if (mqtt_g_state == kDeviceStateUnknown) // goodby唤醒
+            if (xz_mqtt_get_device_state() == kDeviceStateUnknown) // goodby唤醒
             {
                 mqtt_hello(&g_xz_context);
             }
-            if (mqtt_g_state == kDeviceStateSpeaking)
+            if (xz_mqtt_get_device_state() == kDeviceStateSpeaking)
             {
-                mqtt_g_state = kDeviceStateListening;
+                xz_mqtt_set_device_state(kDeviceStateListening);
             }
 
             xiaozhi_ui_chat_status("聆听中...");
@@ -1338,7 +1410,7 @@ static void xz_opus_thread_entry(void *p)
         }
         if (evt & XZ_EVENT_SPK_CTRL)
         {
-            if (g_speaker_target_on)
+            if (xz_audio_get_speaker_target_on())
             {
                 xz_speaker_open(thiz);
             }
@@ -1707,7 +1779,7 @@ void xz_speaker_open(xz_audio_t *thiz)
         {
             LOG_E("speaker open failed");
             thiz->is_tx_enable = 0;
-            g_speaker_target_on = 0U;
+            xz_audio_set_speaker_target_on(0U);
             return;
         }
         thiz->speaker_sample_rate = speaker_rate;
@@ -1731,8 +1803,8 @@ void xz_speaker_close(xz_audio_t *thiz)
     LOG_I("speaker off");
     xiaozhi_ui_chat_status("\u5f85\u547d\u4e2d...");
         thiz->is_tx_enable = 0;
-        g_xz_downlink_drop_close_count +=
-            xz_audio_move_downlink_busy_to_idle(thiz);
+        (void)xz_audio_add_drop_close_count(
+            xz_audio_move_downlink_busy_to_idle(thiz));
     #endif
 #else
 
@@ -1741,9 +1813,8 @@ void xz_speaker_close(xz_audio_t *thiz)
         if (!xz_audio_wait_downlink_drain(thiz,
                                           XZ_SPK_CLOSE_DRAIN_TIMEOUT_MS))
         {
-            g_xz_speaker_close_timeout_count++;
             XZ_AUDIO_HOT_LOG("speaker close drain timeout count=%u",
-                             g_xz_speaker_close_timeout_count);
+                             xz_audio_inc_speaker_close_timeout_count());
         }
         uint32_t cache_time_ms = 150;
         audio_ioctl(thiz->speaker, 1, &cache_time_ms);
@@ -1762,9 +1833,9 @@ void xz_speaker_close(xz_audio_t *thiz)
         uint32_t dropped = xz_audio_move_downlink_busy_to_idle(thiz);
         if (dropped > 0)
         {
-            g_xz_downlink_drop_close_count += dropped;
+            uint32_t total = xz_audio_add_drop_close_count(dropped);
             XZ_AUDIO_HOT_LOG("drop %u downlink packets on speaker close total=%u",
-                             dropped, g_xz_downlink_drop_close_count);
+                             dropped, total);
         }
     }
 #endif
@@ -1774,14 +1845,14 @@ void xz_speaker_abort(xz_audio_t *thiz)
 {
     thiz = xz_audio_resolve(thiz);
     xz_audio_watchdog_heartbeat();
-    g_speaker_target_on = 0U;
+    xz_audio_set_speaker_target_on(0U);
     LOG_I("speaker abort");
 
     thiz->is_tx_enable = 0;
     thiz->speaker_sample_rate = 0U;
     thiz->downlink_force_drain = false;
     thiz->downlink_buffering = true;
-    g_xz_downlink_drop_close_count += xz_audio_move_downlink_busy_to_idle(thiz);
+    (void)xz_audio_add_drop_close_count(xz_audio_move_downlink_busy_to_idle(thiz));
 
     if (thiz->speaker)
     {
@@ -2096,9 +2167,8 @@ void xz_audio_decoder_encoder_close(void)
                     rt_tick_from_millisecond(XZ_AUDIO_THREAD_EXIT_TIMEOUT_MS)) !=
             RT_EOK)
     {
-        g_xz_audio_thread_exit_timeout_count++;
         LOG_E("wait thread %s exit timeout total=%u", XZ_THREAD_NAME,
-              g_xz_audio_thread_exit_timeout_count);
+              xz_audio_inc_thread_exit_timeout_count());
     }
 
     // 释放 ringbuffer 结构体（缓冲区在 PSRAM 中静态分配，不需要释放）
@@ -2234,9 +2304,9 @@ void xz_audio_downlink(uint8_t *data, uint32_t size, uint32_t *aes_value,
     }
     else
     {
-        g_xz_downlink_drop_no_idle_count++;
+        uint32_t total = xz_audio_add_drop_no_idle_count(1U);
         XZ_AUDIO_HOT_LOG("drop downlink no idle total=%u mic=%u speaker=%u",
-                         g_xz_downlink_drop_no_idle_count,
+                         total,
                          (uint32_t)(uintptr_t)thiz->mic,
                          (uint32_t)(uintptr_t)thiz->speaker);
         xz_audio_kick_downlink_decode(thiz);

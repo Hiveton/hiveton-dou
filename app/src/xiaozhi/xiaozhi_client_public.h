@@ -68,6 +68,11 @@ extern volatile int g_kws_force_exit;
 extern volatile int g_kws_running;
 extern volatile uint8_t she_bei_ma;
 
+int xz_kws_is_running(void);
+void xz_kws_set_running(int running);
+void xz_kws_request_force_exit(void);
+uint8_t xz_device_activation_code_visible(void);
+void xz_device_set_activation_code_visible(uint8_t visible);
 
 typedef struct
 {
@@ -119,14 +124,16 @@ typedef struct
 
 // 可复用函数
 char *get_mac_address(void);
+void get_mac_address_copy(char *buffer, rt_size_t buffer_size);
 void hash_run(uint8_t algo, uint8_t *raw_data, uint32_t raw_data_len,uint8_t *result, uint32_t result_len);
 void hex_2_asc(uint8_t n, char *str);
 char *get_client_id();
+void get_client_id_copy(char *buffer, rt_size_t buffer_size);
 int check_internet_access();
 int xiaozhi_network_service_ready(void);
 void xz_prepare_tls_allocator(void);
 char *get_xiaozhi();
-const char *get_xiaozhi_last_error(void);
+void get_xiaozhi_last_error_copy(char *buffer, rt_size_t buffer_size);
 char *my_json_string(cJSON *json, char *key);
 void xz_aec_mic_close(xz_audio_t *thiz);
 void xz_aec_mic_open(xz_audio_t *thiz);

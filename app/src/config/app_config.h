@@ -23,6 +23,7 @@ typedef enum
 {
     APP_CONFIG_LANGUAGE_ZH_CN = 0,
     APP_CONFIG_LANGUAGE_EN_US = 1,
+    APP_CONFIG_LANGUAGE_ZH_TW = 2,
 } app_config_language_t;
 
 typedef struct

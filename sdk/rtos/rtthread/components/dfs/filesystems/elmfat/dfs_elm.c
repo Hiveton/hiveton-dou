@@ -79,6 +79,27 @@ static int elm_result_to_dfs(FRESULT result)
         status = -EINVAL;
         break;
 
+    case FR_NOT_ENOUGH_CORE:
+        status = -ENOMEM;
+        break;
+
+    case FR_INVALID_DRIVE:
+    case FR_NOT_ENABLED:
+        status = -ENODEV;
+        break;
+
+    case FR_TIMEOUT:
+        status = -ETIMEDOUT;
+        break;
+
+    case FR_TOO_MANY_OPEN_FILES:
+        status = -ENFILE;
+        break;
+
+    case FR_INVALID_PARAMETER:
+        status = -EINVAL;
+        break;
+
     default:
         status = -1;
         break;
@@ -162,7 +183,10 @@ int dfs_elm_mount(struct dfs_filesystem *fs, unsigned long rwflag, const void *d
         /* open the root directory to test whether the fatfs is valid */
         result = f_opendir(dir, drive);
         if (result != FR_OK)
+        {
+            rt_kprintf("f_opendir %s fail with result = %d\n", drive, result);
             goto __err;
+        }
 
         /* mount succeed! */
         fs->data = fat;
@@ -519,6 +543,11 @@ int dfs_elm_close(struct dfs_fd *file)
         if (result == FR_OK)
         {
             /* release memory */
+            if (fd->cltbl)
+            {
+                rt_free(fd->cltbl);
+                fd->cltbl = NULL;
+            }
             rt_free(fd);
         }
     }
@@ -530,9 +559,35 @@ int dfs_elm_ioctl(struct dfs_fd *file, int cmd, void *args)
 {
     FIL *fd;
     int res = -ENOSYS;
-
     fd = (FIL *)(file->data);
-    if (F_GET_PHY_ADDR == cmd)
+    switch (cmd)
+    {
+#ifdef RT_FIOFTRUNCATE
+    case RT_FIOFTRUNCATE:
+    {
+        FSIZE_t fptr, length;
+        FRESULT result = FR_OK;
+        RT_ASSERT(fd != RT_NULL);
+
+        /* save file read/write point */
+        fptr = fd->fptr;
+        length = *(off_t *)args;
+        if (length <= fd->obj.objsize)
+        {
+            fd->fptr = length;
+            result = f_truncate(fd);
+        }
+        else
+        {
+            result = f_lseek(fd, length);
+        }
+        /* restore file read/write point */
+        fd->fptr = fptr;
+        res = elm_result_to_dfs(result);
+        break;
+    }
+#endif
+    case F_GET_PHY_ADDR:
     {
         if (args)
         {
@@ -541,14 +596,18 @@ int dfs_elm_ioctl(struct dfs_fd *file, int cmd, void *args)
                 res = 0;
             }
         }
+        break;
     }
-    else if (F_RESERVE_CONT_SPACE == cmd)
+
+    case F_RESERVE_CONT_SPACE:
     {
         FSIZE_t size = (FSIZE_t)args;
         if (FR_OK == f_expand(fd, size, 1))
         {
             res = 0;
         }
+        break;
+    }
     }
 
     return res;
@@ -659,6 +718,38 @@ int dfs_elm_lseek(struct dfs_fd *file, rt_off_t offset)
 
     return elm_result_to_dfs(result);
 }
+#ifdef FLSEEK_SZ_TBL
+int dfs_elm_enable_fast_lseek(struct dfs_fd *fd, uint8_t enable)
+{
+    FRESULT result;
+    if (fd->type != FT_REGULAR)
+        return -EISDIR;
+    FIL *fd_t = (FIL *)(fd->data);
+    RT_ASSERT(fd_t != RT_NULL);
+    if (!fd_t->obj.fs)
+        return -EMFILE;//no open
+    if (enable)
+    {
+        if (NULL == fd_t->cltbl)
+        {
+            DWORD *clmt = rt_malloc(FLSEEK_SZ_TBL);
+            result = f_lseek(fd_t, 0);
+            fd_t->cltbl = clmt;
+            clmt[0] = FLSEEK_SZ_TBL / sizeof(DWORD);
+            result = f_lseek(fd_t, CREATE_LINKMAP);
+        }
+    }
+    else
+    {
+        if (fd_t->cltbl)
+        {
+            rt_free(fd_t->cltbl);
+            fd_t->cltbl = NULL;
+        }
+    }
+    return elm_result_to_dfs(result);
+}
+#endif
 
 int dfs_elm_getdents(struct dfs_fd *file, struct dirent *dirp, uint32_t count)
 {
@@ -874,6 +965,9 @@ static const struct dfs_file_ops dfs_elm_fops =
     dfs_elm_lseek,
     dfs_elm_getdents,
     RT_NULL, /* poll interface */
+#ifdef FLSEEK_SZ_TBL
+    dfs_elm_enable_fast_lseek,
+#endif
 };
 
 static const struct dfs_filesystem_ops dfs_elm =
@@ -1671,4 +1765,3 @@ void ff_memfree(void *mem)
     rt_free(mem);
 }
 #endif /* FF_USE_LFN == 3 */
-

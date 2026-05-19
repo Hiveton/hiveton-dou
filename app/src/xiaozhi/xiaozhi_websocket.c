@@ -6,10 +6,10 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <rthw.h>
 #include <rtthread.h>
 #include "lwip/api.h"
 #include "lwip/tcpip.h"
-#include "lwip/dns.h"
 #include "lwip/apps/websocket_client.h"
 #include "lwip/apps/mqtt_priv.h"
 #include "lwip/apps/mqtt.h"
@@ -38,7 +38,6 @@
 #include "xiaozhi_client_public.h"
 #include "xiaozhi_audio.h"
 #include "audio_mem.h"
-#include "network/net_manager.h"
 #include "network/network_mem.h"
 #include "../config/app_config.h"
 #include "../sleep_manager.h"
@@ -108,6 +107,13 @@ typedef struct
 
 typedef struct
 {
+    char code[7];
+    bool is_activated;
+    rt_sem_t sem;
+} activation_snapshot_t;
+
+typedef struct
+{
     char host[128];
     char path[256];
     u16_t port;
@@ -120,6 +126,236 @@ static rt_tick_t g_speaking_start_tick = 0;  // 讲话开始时间
 static rt_tick_t g_total_speaking_time = 0;  // 累计讲话时间
 static bool g_is_speaking = false;           // 是否正在讲话
 static volatile rt_bool_t g_drop_interrupted_reply = RT_FALSE;
+static button_action_t g_ws_last_button_action = BUTTON_RELEASED;
+extern rt_tick_t last_listen_tick;
+extern uint8_t Initiate_disconnection_flag;
+
+static rt_bool_t xz_ws_button_action_should_handle(button_action_t action)
+{
+    rt_bool_t should_handle;
+    rt_base_t level = rt_hw_interrupt_disable();
+
+    should_handle = (g_ws_last_button_action != action) ? RT_TRUE : RT_FALSE;
+    if (should_handle)
+    {
+        g_ws_last_button_action = action;
+    }
+
+    rt_hw_interrupt_enable(level);
+    return should_handle;
+}
+
+static void xz_websocket_speaking_start(void)
+{
+    rt_tick_t now_tick = rt_tick_get();
+    rt_base_t level = rt_hw_interrupt_disable();
+    g_is_speaking = true;
+    g_speaking_start_tick = now_tick;
+    rt_hw_interrupt_enable(level);
+}
+
+static rt_bool_t xz_websocket_speaking_stop(rt_tick_t *total_ticks)
+{
+    rt_bool_t should_reinit = RT_FALSE;
+    rt_tick_t now_tick = rt_tick_get();
+    rt_tick_t threshold = rt_tick_from_millisecond(SPEAKING_THRESHOLD_MS);
+    rt_tick_t total = 0;
+    rt_base_t level = rt_hw_interrupt_disable();
+
+    if (g_is_speaking)
+    {
+        rt_tick_t speaking_duration = now_tick - g_speaking_start_tick;
+        g_total_speaking_time += speaking_duration;
+        g_is_speaking = false;
+
+        total = g_total_speaking_time;
+        if (g_total_speaking_time >= threshold)
+        {
+            g_total_speaking_time = 0;
+            should_reinit = RT_TRUE;
+        }
+    }
+    else
+    {
+        total = g_total_speaking_time;
+    }
+
+    rt_hw_interrupt_enable(level);
+
+    if (total_ticks != RT_NULL)
+    {
+        *total_ticks = total;
+    }
+
+    return should_reinit;
+}
+
+static activation_snapshot_t xz_activation_snapshot(void)
+{
+    activation_snapshot_t snapshot;
+    rt_base_t level;
+
+    memset(&snapshot, 0, sizeof(snapshot));
+
+    level = rt_hw_interrupt_disable();
+    rt_snprintf(snapshot.code,
+                sizeof(snapshot.code),
+                "%s",
+                g_activation_context.code);
+    snapshot.is_activated = g_activation_context.is_activated;
+    snapshot.sem = g_activation_context.sem;
+    rt_hw_interrupt_enable(level);
+
+    return snapshot;
+}
+
+static void xz_activation_commit(activation_context_t *active,
+                                 const char *code,
+                                 bool is_activated)
+{
+    rt_base_t level;
+
+    if (active == RT_NULL)
+    {
+        return;
+    }
+
+    level = rt_hw_interrupt_disable();
+    if (code != RT_NULL)
+    {
+        rt_snprintf(active->code, sizeof(active->code), "%s", code);
+    }
+    else
+    {
+        active->code[0] = '\0';
+    }
+    active->is_activated = is_activated;
+    rt_hw_interrupt_enable(level);
+}
+
+static rt_bool_t xz_websocket_context_copy_token(char *buffer,
+                                                 size_t buffer_size)
+{
+    rt_bool_t has_token = RT_FALSE;
+    rt_base_t level;
+
+    if (buffer == RT_NULL || buffer_size == 0U)
+    {
+        return RT_FALSE;
+    }
+
+    buffer[0] = '\0';
+
+    level = rt_hw_interrupt_disable();
+    if (g_websocket_context.token != RT_NULL &&
+        g_websocket_context.token[0] != '\0')
+    {
+        rt_snprintf(buffer, buffer_size, "%s", g_websocket_context.token);
+        buffer[buffer_size - 1U] = '\0';
+        has_token = RT_TRUE;
+    }
+    rt_hw_interrupt_enable(level);
+
+    return has_token;
+}
+
+static rt_bool_t xz_websocket_context_has_url(void)
+{
+    rt_bool_t has_url;
+    rt_base_t level;
+
+    level = rt_hw_interrupt_disable();
+    has_url = (g_websocket_context.url != RT_NULL &&
+               g_websocket_context.url[0] != '\0') ? RT_TRUE : RT_FALSE;
+    rt_hw_interrupt_enable(level);
+
+    return has_url;
+}
+
+static void xz_websocket_context_replace(websocket_context_t *websocket,
+                                         char *new_url,
+                                         char *new_token)
+{
+    char *old_url;
+    char *old_token;
+    rt_base_t level;
+
+    if (websocket == RT_NULL)
+    {
+        if (new_url != RT_NULL)
+        {
+            network_mem_free(new_url);
+        }
+        if (new_token != RT_NULL)
+        {
+            network_mem_free(new_token);
+        }
+        return;
+    }
+
+    level = rt_hw_interrupt_disable();
+    old_url = websocket->url;
+    old_token = websocket->token;
+    websocket->url = new_url;
+    websocket->token = new_token;
+    rt_hw_interrupt_enable(level);
+
+    if (old_url != RT_NULL)
+    {
+        network_mem_free(old_url);
+    }
+    if (old_token != RT_NULL)
+    {
+        network_mem_free(old_token);
+    }
+}
+
+static void xz_websocket_context_free_pending(char *url, char *token)
+{
+    if (url != RT_NULL)
+    {
+        network_mem_free(url);
+    }
+    if (token != RT_NULL)
+    {
+        network_mem_free(token);
+    }
+}
+
+static rt_bool_t xz_websocket_get_drop_interrupted_reply(void)
+{
+    rt_bool_t drop;
+    rt_base_t level = rt_hw_interrupt_disable();
+    drop = g_drop_interrupted_reply;
+    rt_hw_interrupt_enable(level);
+    return drop;
+}
+
+static void xz_websocket_set_drop_interrupted_reply(rt_bool_t drop)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    g_drop_interrupted_reply = drop;
+    rt_hw_interrupt_enable(level);
+}
+
+xiaozhi_ws_t g_xz_ws = {0};
+enum DeviceState web_g_state = kDeviceStateUnknown;
+
+enum DeviceState xz_websocket_get_device_state(void)
+{
+    enum DeviceState state;
+    rt_base_t level = rt_hw_interrupt_disable();
+    state = web_g_state;
+    rt_hw_interrupt_enable(level);
+    return state;
+}
+
+void xz_websocket_set_device_state(enum DeviceState state)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    web_g_state = state;
+    rt_hw_interrupt_enable(level);
+}
 
 static int parse_ota_response(const char *response,
                               activation_context_t *active,
@@ -232,16 +468,16 @@ static void xz_ws_abort_pending_connection(void)
 
 static void xz_websocket_end_barge_in_drop(void)
 {
-    if (g_drop_interrupted_reply)
+    if (xz_websocket_get_drop_interrupted_reply())
     {
         XZ_WS_LOG("Barge-in drop window closed\n");
-        g_drop_interrupted_reply = RT_FALSE;
+        xz_websocket_set_drop_interrupted_reply(RT_FALSE);
     }
 }
 
 void xz_websocket_begin_barge_in(void)
 {
-    g_drop_interrupted_reply = RT_TRUE;
+    xz_websocket_set_drop_interrupted_reply(RT_TRUE);
     XZ_WS_LOG("Barge-in drop window opened\n");
 }
 
@@ -381,12 +617,13 @@ static rt_bool_t xz_json_get_int(cJSON *object, const char *name, int *value)
 
 static void xz_show_activation_prompt(rt_bool_t interactive)
 {
+    activation_snapshot_t activation = xz_activation_snapshot();
     char str_temp[256];
 
-    she_bei_ma = 0;
+    xz_device_set_activation_code_visible(0U);
     snprintf(str_temp, sizeof(str_temp),
              "设备未添加，请前往 xiaozhi.me 输入绑定码: \n %s \n ",
-             g_activation_context.code);
+             activation.code);
     xz_notify_chat_output(str_temp);
 
     if (interactive)
@@ -402,10 +639,11 @@ static int xz_wait_for_activation_completion(rt_bool_t interactive,
     const rt_tick_t poll_wait = rt_tick_from_millisecond(3000);
     uint32_t retry = 120;
     char last_code[sizeof(g_activation_context.code)] = {0};
+    activation_snapshot_t activation = xz_activation_snapshot();
 
-    if (g_activation_context.sem != RT_NULL)
+    if (activation.sem != RT_NULL)
     {
-        while (rt_sem_take(g_activation_context.sem, 0) == RT_EOK)
+        while (rt_sem_take(activation.sem, 0) == RT_EOK)
         {
         }
     }
@@ -415,13 +653,14 @@ static int xz_wait_for_activation_completion(rt_bool_t interactive,
         char *ota_version;
         char server_message[160] = {0};
         int parse_result;
-        const char *ota_error;
+        char ota_error[160] = {0};
 
-        if (strncmp(last_code, g_activation_context.code, sizeof(last_code)) != 0)
+        activation = xz_activation_snapshot();
+        if (strncmp(last_code, activation.code, sizeof(last_code)) != 0)
         {
             (void)xz_ws_copy_fixed_string(last_code,
                                           sizeof(last_code),
-                                          g_activation_context.code);
+                                          activation.code);
             xz_show_activation_prompt(interactive);
         }
         else if (interactive)
@@ -430,8 +669,9 @@ static int xz_wait_for_activation_completion(rt_bool_t interactive,
             xz_notify_chat_output("请在 xiaozhi.me 完成绑定，设备将自动继续连接");
         }
 
-        if (g_activation_context.sem != RT_NULL &&
-            rt_sem_take(g_activation_context.sem, poll_wait) == RT_EOK)
+        activation = xz_activation_snapshot();
+        if (activation.sem != RT_NULL &&
+            rt_sem_take(activation.sem, poll_wait) == RT_EOK)
         {
             xz_set_error_text(error_text, error_text_size, "连接已取消");
             return -RT_EINTR;
@@ -440,8 +680,8 @@ static int xz_wait_for_activation_completion(rt_bool_t interactive,
         ota_version = get_xiaozhi();
         if (ota_version == RT_NULL)
         {
-            ota_error = get_xiaozhi_last_error();
-            if (ota_error != RT_NULL && ota_error[0] != '\0')
+            get_xiaozhi_last_error_copy(ota_error, sizeof(ota_error));
+            if (ota_error[0] != '\0')
             {
                 xz_set_error_text(error_text, error_text_size, ota_error);
             }
@@ -461,9 +701,10 @@ static int xz_wait_for_activation_completion(rt_bool_t interactive,
             return parse_result;
         }
 
-        if (!g_activation_context.is_activated)
+        activation = xz_activation_snapshot();
+        if (!activation.is_activated)
         {
-            she_bei_ma = 1;
+            xz_device_set_activation_code_visible(1U);
             ui_dispatch_request_activity();
             return RT_EOK;
         }
@@ -906,7 +1147,7 @@ err_t my_wsapp_fn(int code, char *buf, size_t len)
     else
     {
         // Receive Audio Data
-        if (g_drop_interrupted_reply)
+        if (xz_websocket_get_drop_interrupted_reply())
         {
             XZ_WS_LOG("drop interrupted reply audio len=%d\n", (int)len);
             return 0;
@@ -924,15 +1165,15 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
     sleep_manager_request_wakeup();
      rt_kprintf("in ws button handle2\n");
     // 如果当前处于KWS模式，则退出KWS模式
-        if (g_kws_running) 
-        {  
+        if (xz_kws_is_running())
+        {
             rt_kprintf("KWS exit\n");
-            g_kws_force_exit = 1;
+            xz_kws_request_force_exit();
         }
-    static button_action_t last_action = BUTTON_RELEASED;
-    if (last_action == action)
+    if (!xz_ws_button_action_should_handle(action))
+    {
         return;
-    last_action = action;
+    }
 
     if (action == BUTTON_PRESSED)
     {
@@ -960,7 +1201,6 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
         else
         {
             // 2. 已唤醒，直接进入对话模式
-            rt_mb_send(g_button_event_mb, BUTTON_EVENT_PRESSED);
             xiaozhi_service_notify_state(XZ_SERVICE_LISTENING);
         }
     }
@@ -971,7 +1211,6 @@ static void xz_button_event_handler(int32_t pin, button_action_t action)
         // 仅在已唤醒时发送停止监听
         if (g_xz_ws.is_connected)
         {
-            rt_mb_send(g_button_event_mb, BUTTON_EVENT_RELEASED);
             xiaozhi_service_notify_state(XZ_SERVICE_READY);
         }
     }
@@ -1026,7 +1265,7 @@ static void xz_button2_event_handler(int32_t pin, button_action_t action)
         shutdown_state = false;
         sleep_manager_request_wakeup();
         rt_thread_mdelay(100);
-        rt_mb_send(g_ui_task_mb, UI_EVENT_SHUTDOWN);
+        ui_dispatch_request_poweroff_confirm();
     }
 
     else if (action == BUTTON_RELEASED)
@@ -1116,7 +1355,7 @@ void parse_helLo(const u8_t *data, u16_t len)
             return;
         }
 
-        web_g_state = kDeviceStateIdle;
+        xz_websocket_set_device_state(kDeviceStateIdle);
         
 #ifndef CONFIG_IOT_PROTOCOL_MCP
         send_iot_descriptors(); // 发送iot描述
@@ -1133,7 +1372,7 @@ void parse_helLo(const u8_t *data, u16_t len)
     else if (strcmp(type, "goodbye") == 0)
     {
         xz_websocket_end_barge_in_drop();
-        web_g_state = kDeviceStateUnknown;
+        xz_websocket_set_device_state(kDeviceStateUnknown);
         rt_kprintf("session ended\n");
         xiaozhi_service_notify_state(XZ_SERVICE_READY);
         xz_notify_chat_output("等待唤醒...");
@@ -1154,12 +1393,12 @@ void parse_helLo(const u8_t *data, u16_t len)
 
         xz_notify_chat_output(txt);
         last_listen_tick = rt_tick_get();
-        web_g_state = kDeviceStateIdle;
+        xz_websocket_set_device_state(kDeviceStateIdle);
         xiaozhi_service_notify_state(XZ_SERVICE_READY);
     }
     else if (strcmp(type, "tts") == 0)
     {
-        if (g_drop_interrupted_reply)
+        if (xz_websocket_get_drop_interrupted_reply())
         {
             XZ_WS_LOG("drop interrupted reply tts\n");
             cJSON_Delete(root);
@@ -1180,39 +1419,29 @@ void parse_helLo(const u8_t *data, u16_t len)
 
         if (strcmp(state, "start") == 0)
         {
-            if (web_g_state == kDeviceStateIdle ||
-                web_g_state == kDeviceStateListening)
+            enum DeviceState device_state = xz_websocket_get_device_state();
+            if (device_state == kDeviceStateIdle ||
+                device_state == kDeviceStateListening)
             {
-                web_g_state = kDeviceStateSpeaking;
+                xz_websocket_set_device_state(kDeviceStateSpeaking);
                 xz_speaker(1); // 打开扬声器
                 xiaozhi_service_notify_state(XZ_SERVICE_SPEAKING);
 
-                // 开始累计讲话时间
-                g_is_speaking = true;
-                g_speaking_start_tick = rt_tick_get();
+                xz_websocket_speaking_start();
             }
         }
         else if (strcmp(state, "stop") == 0)
-        {           
-            // 计算本次讲话时间并累加
-            if (g_is_speaking) 
-            {
-                rt_tick_t current_tick = rt_tick_get();
-                rt_tick_t speaking_duration = current_tick - g_speaking_start_tick;
-                g_total_speaking_time += speaking_duration;
-                g_is_speaking = false;
+        {
+            rt_tick_t total_speaking_time = 0;
 
-                XZ_WS_LOG("xiaozhi total_speaking_time: %d ticks\n", g_total_speaking_time);
-                // 检查是否达到5分钟阈值
-                if (g_total_speaking_time >= rt_tick_from_millisecond(SPEAKING_THRESHOLD_MS)) 
-                {
-                    rt_kprintf("Speaking time reached 5 minutes, reinitializing audio\n");
-                    g_total_speaking_time = 0; // 重置累计时间
-                    reinit_audio();
-                }
+            if (xz_websocket_speaking_stop(&total_speaking_time))
+            {
+                XZ_WS_LOG("xiaozhi total_speaking_time: %d ticks\n", total_speaking_time);
+                rt_kprintf("Speaking time reached 5 minutes, reinitializing audio\n");
+                reinit_audio();
             }
             
-            web_g_state = kDeviceStateIdle;
+            xz_websocket_set_device_state(kDeviceStateIdle);
             xz_speaker(0); // 关闭扬声器
             xiaozhi_service_notify_state(XZ_SERVICE_READY);
         }
@@ -1237,7 +1466,7 @@ void parse_helLo(const u8_t *data, u16_t len)
     {
         const char *emotion;
 
-        if (g_drop_interrupted_reply)
+        if (xz_websocket_get_drop_interrupted_reply())
         {
             XZ_WS_LOG("drop interrupted reply emotion\n");
             cJSON_Delete(root);
@@ -1311,15 +1540,6 @@ void parse_helLo(const u8_t *data, u16_t len)
     cJSON_Delete(root); /*每次调用cJSON_Parse函数后，都要释放内存*/
 }
 
-static void svr_found_callback(const char *name, const ip_addr_t *ipaddr,
-                               void *callback_arg)
-{
-    if (ipaddr != NULL)
-    {
-        rt_kprintf("DNS lookup succeeded, IP: %s\n", ipaddr_ntoa(ipaddr));
-    }
-}
-
 static int xiaozhi_ws_connect_internal(rt_bool_t interactive)
 {
     websocket_endpoint_t endpoint;
@@ -1334,7 +1554,7 @@ static int xiaozhi_ws_connect_internal(rt_bool_t interactive)
         return -RT_ERROR;
     }
 
-    if (g_activation_context.is_activated)
+    if (xz_activation_snapshot().is_activated)
     {
         if (!interactive)
         {
@@ -1379,7 +1599,7 @@ static int xiaozhi_ws_connect_internal(rt_bool_t interactive)
         return -RT_EFULL;
     }
 
-    if (g_websocket_context.url != RT_NULL && g_websocket_context.url[0] != '\0')
+    if (xz_websocket_context_has_url())
     {
         rt_kprintf("OTA websocket url present, use fixed endpoint: wss://%s%s\n",
                    endpoint.host,
@@ -1388,7 +1608,8 @@ static int xiaozhi_ws_connect_internal(rt_bool_t interactive)
 
     err_t err = ERR_OK;
     uint32_t attempt;
-    char *auth_token;
+    const char *auth_token;
+    char auth_token_buf[XZ_WS_OTA_TOKEN_MAX_LEN + 1U];
     char *Client_Id;
 
     // 创建信号量（仅首次）
@@ -1413,9 +1634,9 @@ static int xiaozhi_ws_connect_internal(rt_bool_t interactive)
         wsock_init(&g_xz_ws.clnt, endpoint.ssl_enabled, 1,
                    my_wsapp_fn); // 初始化websocket,注册回调函数
         Client_Id = get_client_id();
-        auth_token = (g_websocket_context.token != RT_NULL &&
-                      g_websocket_context.token[0] != '\0')
-                         ? g_websocket_context.token
+        auth_token = xz_websocket_context_copy_token(auth_token_buf,
+                                                     sizeof(auth_token_buf))
+                         ? auth_token_buf
                          : XIAOZHI_TOKEN;
         err = wsock_connect(
             &g_xz_ws.clnt, MAX_WSOCK_HDR_LEN, endpoint.host, endpoint.path,
@@ -1502,6 +1723,10 @@ static int parse_ota_response(const char *response,
     cJSON *websocket_obj;
     cJSON *activation_obj;
     rt_bool_t has_ws_token = RT_FALSE;
+    char parsed_activation_code[sizeof(active->code)] = {0};
+    bool parsed_is_activated = false;
+    char *parsed_ws_url = RT_NULL;
+    char *parsed_ws_token = RT_NULL;
 
     if (!response || !active || !websocket)
     {
@@ -1521,20 +1746,6 @@ static int parse_ota_response(const char *response,
         server_message[0] = '\0';
     }
 
-    // 初始化结构体
-    active->code[0] = '\0';
-    active->is_activated = false;
-    if (websocket->url)
-    {
-        network_mem_free(websocket->url);
-        websocket->url = NULL;
-    }
-    if (websocket->token)
-    {
-        network_mem_free(websocket->token);
-        websocket->token = NULL;
-    }
-
     message_obj = cJSON_GetObjectItem(root, "message");
     if (message_obj && cJSON_IsString(message_obj) &&
         server_message != RT_NULL && server_message_size > 0U)
@@ -1550,9 +1761,9 @@ static int parse_ota_response(const char *response,
         cJSON *url_item = cJSON_GetObjectItem(websocket_obj, "url");
         if (url_item && cJSON_IsString(url_item))
         {
-            websocket->url = xz_ws_dup_bounded_string(url_item->valuestring,
-                                                      XZ_WS_OTA_URL_MAX_LEN);
-            if (websocket->url != RT_NULL)
+            parsed_ws_url = xz_ws_dup_bounded_string(url_item->valuestring,
+                                                     XZ_WS_OTA_URL_MAX_LEN);
+            if (parsed_ws_url != RT_NULL)
             {
                 XZ_WS_LOG("Websocket URL from OTA present (ignored for connect)\n");
             }
@@ -1565,9 +1776,9 @@ static int parse_ota_response(const char *response,
         cJSON *token_item = cJSON_GetObjectItem(websocket_obj, "token");
         if (token_item && cJSON_IsString(token_item))
         {
-            websocket->token = xz_ws_dup_bounded_string(token_item->valuestring,
-                                                        XZ_WS_OTA_TOKEN_MAX_LEN);
-            if (websocket->token != RT_NULL)
+            parsed_ws_token = xz_ws_dup_bounded_string(token_item->valuestring,
+                                                       XZ_WS_OTA_TOKEN_MAX_LEN);
+            if (parsed_ws_token != RT_NULL)
             {
                 XZ_WS_LOG("Websocket token received\n");
                 has_ws_token = RT_TRUE;
@@ -1594,19 +1805,21 @@ static int parse_ota_response(const char *response,
                 xz_ws_set_parse_error(server_message,
                                       server_message_size,
                                       "小智服务器返回的激活码无效");
+                xz_websocket_context_free_pending(parsed_ws_url,
+                                                  parsed_ws_token);
                 cJSON_Delete(root);
                 return -RT_ERROR;
             }
 
-            memcpy(active->code, code_item->valuestring, code_len + 1U);
-            active->is_activated = true;
+            memcpy(parsed_activation_code, code_item->valuestring, code_len + 1U);
+            parsed_is_activated = true;
             XZ_WS_LOG("Activation code received\n");
         }
     }
     else
     {
         XZ_WS_LOG("No activation section found, device is activated\n");
-        active->is_activated = false;
+        parsed_is_activated = false;
     }
 
     if (!has_ws_token)
@@ -1617,10 +1830,13 @@ static int parse_ota_response(const char *response,
             rt_snprintf(server_message, server_message_size,
                         "小智服务器未返回 websocket token");
         }
+        xz_websocket_context_free_pending(parsed_ws_url, parsed_ws_token);
         cJSON_Delete(root);
         return -RT_ERROR;
     }
 
+    xz_websocket_context_replace(websocket, parsed_ws_url, parsed_ws_token);
+    xz_activation_commit(active, parsed_activation_code, parsed_is_activated);
     cJSON_Delete(root);
     return RT_EOK;
 }
@@ -1679,9 +1895,10 @@ static int xiaozhi_prepare_session(rt_bool_t interactive)
         my_ota_version = get_xiaozhi();
         if (my_ota_version == RT_NULL)
         {
-            const char *ota_error = get_xiaozhi_last_error();
+            char ota_error[160] = {0};
 
-            if (ota_error != RT_NULL && ota_error[0] != '\0')
+            get_xiaozhi_last_error_copy(ota_error, sizeof(ota_error));
+            if (ota_error[0] != '\0')
             {
                 rt_snprintf(last_error, sizeof(last_error), "%s", ota_error);
             }
@@ -1716,7 +1933,7 @@ static int xiaozhi_prepare_session(rt_bool_t interactive)
             return -RT_ERROR;
         }
 
-        if (g_activation_context.is_activated)
+        if (xz_activation_snapshot().is_activated)
         {
             if (!interactive)
             {
@@ -1795,14 +2012,14 @@ rt_bool_t xz_websocket_is_connected(void)
 
 void xz_websocket_disconnect(void)
 {
-    if (!g_xz_ws.is_connected) {
+    if (!g_xz_ws.is_connected &&
+        g_xz_ws.clnt.pcb == RT_NULL &&
+        g_xz_ws.clnt.tcp_state == WS_TCP_CLOSED) {
         return;
     }
     
     /* 关闭WebSocket连接 */
-    wsock_close(&g_xz_ws.clnt, WSOCK_RESULT_LOCAL_ABORT, ERR_OK);
-    g_xz_ws.is_connected = 0;
-    memset(g_xz_ws.session_id, 0, sizeof(g_xz_ws.session_id));
+    xz_ws_abort_pending_connection();
     xz_websocket_end_barge_in_drop();
 }
 
@@ -1812,6 +2029,17 @@ const char* xz_websocket_get_session_id(void)
         return NULL;
     }
     return (const char*)g_xz_ws.session_id;
+}
+
+rt_bool_t xz_websocket_has_session_id(void)
+{
+    rt_bool_t has_session;
+
+    rt_enter_critical();
+    has_session = (g_xz_ws.is_connected && g_xz_ws.session_id[0] != '\0') ? RT_TRUE : RT_FALSE;
+    rt_exit_critical();
+
+    return has_session;
 }
 
 /************************ (C) COPYRIGHT Sifli Technology *******END OF FILE****/

@@ -11,10 +11,11 @@ extern "C" {
 typedef enum
 {
     UI_TOP_TAB_AI = 0,
+    UI_TOP_TAB_NAV,
+    UI_TOP_TAB_SETTINGS,
     UI_TOP_TAB_MUSIC,
     UI_TOP_TAB_WEATHER,
     UI_TOP_TAB_POMODORO,
-    UI_TOP_TAB_SETTINGS,
     UI_TOP_TAB_NONE = 255,
 } ui_top_tab_t;
 
@@ -23,11 +24,18 @@ typedef enum
     UI_BOTTOM_TAB_AI = 0,
     UI_BOTTOM_TAB_PET,
     UI_BOTTOM_TAB_BOOKS,
-    UI_BOTTOM_TAB_CALENDAR,
+    UI_BOTTOM_TAB_MUSIC,
     UI_BOTTOM_TAB_NONE = 255,
 } ui_bottom_tab_t;
 
 lv_obj_t *ui_top_nav_create(lv_obj_t *parent, ui_top_tab_t active);
+lv_obj_t *ui_secondary_top_nav_create(lv_obj_t *parent, const char *title, ui_screen_id_t back_target);
+lv_obj_t *ui_secondary_top_nav_action_create(lv_obj_t *parent,
+                                             const char *title,
+                                             ui_screen_id_t back_target,
+                                             const void *right_icon_src,
+                                             lv_event_cb_t right_cb,
+                                             void *right_user_data);
 lv_obj_t *ui_bottom_nav_create(lv_obj_t *parent, ui_bottom_tab_t active);
 void ui_top_nav_update_battery(uint8_t percent, uint8_t is_charging);
 

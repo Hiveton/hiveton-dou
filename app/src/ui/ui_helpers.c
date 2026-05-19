@@ -8,6 +8,7 @@
 
 #include "audio_server.h"
 #include "audio_mem.h"
+#include "app_watchdog.h"
 #include "drv_lcd.h"
 #include "lv_tiny_ttf.h"
 #include "rtdevice.h"
@@ -20,6 +21,7 @@
 #include "ui_runtime_adapter.h"
 #include "../sleep_manager.h"
 #include "../bq27220_monitor.h"
+#include "../network/app_network.h"
 #include "../network/net_manager.h"
 #include "../config/app_config.h"
 #include "cat1_modem.h"
@@ -77,6 +79,11 @@ extern const lv_image_dsc_t home_mic;
 extern const lv_image_dsc_t home_volume;
 extern const lv_image_dsc_t network_icon_img;
 extern const lv_image_dsc_t network_icon_img_close;
+extern const lv_image_dsc_t status_dropdown_4g_signal;
+extern const lv_image_dsc_t status_dropdown_4g_top;
+extern const lv_image_dsc_t status_dropdown_battery_top;
+extern const lv_image_dsc_t status_dropdown_bluetooth;
+extern const lv_image_dsc_t status_dropdown_bluetooth_top;
 void ui_Status_Detail_screen_set_return_target(ui_screen_id_t target);
 extern void app_set_panel_brightness(rt_uint8_t brightness);
 extern rt_uint8_t app_get_panel_brightness(void);
@@ -164,10 +171,11 @@ typedef struct
     uint8_t aw_fault_status;
     int bt_visual_state;
     int network_visual_state;
-    net_manager_mode_t desired_mode;
-    net_manager_link_t active_link;
+    app_network_mode_t desired_mode;
+    app_network_link_t active_link;
     bool bt_enabled;
     bool net_4g_enabled;
+    bool radios_suspended;
     char network_detail[16];
 } ui_status_bar_snapshot_t;
 
@@ -208,6 +216,119 @@ static int s_status_last_network_icon_state = -1;
 static bool s_status_last_net_4g_enabled = false;
 static char s_status_last_network_text[16];
 static ui_status_bar_snapshot_t s_status_bar_snapshot = {0};
+
+static bool ui_helpers_initialized(void)
+{
+    bool initialized;
+    rt_base_t level = rt_hw_interrupt_disable();
+    initialized = s_ui_helpers_initialized;
+    rt_hw_interrupt_enable(level);
+    return initialized;
+}
+
+static void ui_helpers_set_initialized(bool initialized)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    s_ui_helpers_initialized = initialized;
+    rt_hw_interrupt_enable(level);
+}
+
+static void ui_status_set_pending_brightness(int brightness)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    s_status_pending_brightness = brightness;
+    rt_hw_interrupt_enable(level);
+}
+
+static int ui_status_consume_pending_brightness(void)
+{
+    int brightness;
+    rt_base_t level = rt_hw_interrupt_disable();
+    brightness = s_status_pending_brightness;
+    s_status_pending_brightness = -1;
+    rt_hw_interrupt_enable(level);
+    return brightness;
+}
+
+static void ui_status_set_pending_volume(int volume)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    s_status_pending_volume = volume;
+    rt_hw_interrupt_enable(level);
+}
+
+static int ui_status_consume_pending_volume(void)
+{
+    int volume;
+    rt_base_t level = rt_hw_interrupt_disable();
+    volume = s_status_pending_volume;
+    s_status_pending_volume = -1;
+    rt_hw_interrupt_enable(level);
+    return volume;
+}
+
+static void ui_status_get_legacy_power_pending(int *charge_state,
+                                               int *battery_percent)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (charge_state != NULL)
+    {
+        *charge_state = (s_status_pending_charge >= 0) ?
+                        s_status_pending_charge :
+                        s_status_applied_charge;
+    }
+    if (battery_percent != NULL)
+    {
+        *battery_percent = (s_status_pending_battery_percent >= 0) ?
+                           s_status_pending_battery_percent :
+                           s_status_applied_battery_percent;
+    }
+    rt_hw_interrupt_enable(level);
+}
+
+static int ui_status_consume_pending_charge(void)
+{
+    int charge;
+    rt_base_t level = rt_hw_interrupt_disable();
+    charge = s_status_pending_charge;
+    if (charge >= 0)
+    {
+        s_status_applied_charge = charge;
+    }
+    rt_hw_interrupt_enable(level);
+    return charge;
+}
+
+static int ui_status_consume_pending_battery_percent(void)
+{
+    int percent;
+    rt_base_t level = rt_hw_interrupt_disable();
+    percent = s_status_pending_battery_percent;
+    if (percent >= 0)
+    {
+        s_status_applied_battery_percent = percent;
+    }
+    rt_hw_interrupt_enable(level);
+    return percent;
+}
+
+static void ui_status_set_pending_battery_percent(int percent)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    s_status_pending_battery_percent = percent;
+    rt_hw_interrupt_enable(level);
+}
+
+static void ui_status_reset_legacy_power_pending(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    s_status_pending_charge = -1;
+    s_status_applied_charge = -1;
+    s_status_pending_battery_percent = -1;
+    s_status_applied_battery_percent = -1;
+    rt_hw_interrupt_enable(level);
+}
+
 static const char *ui_status_weekday_from_index(int weekday)
 {
     static const char *const k_weekdays[] = {
@@ -345,18 +466,18 @@ static bool ui_status_panel_event_is_top_down_swipe(lv_event_t *e)
 
 static bool ui_bt_connection_active(void)
 {
-    net_manager_snapshot_t snapshot;
+    app_network_snapshot_t snapshot;
 
-    net_manager_get_snapshot(&snapshot);
-    return snapshot.active_link == NET_MANAGER_LINK_BT_PAN;
+    app_network_get_snapshot(&snapshot);
+    return snapshot.active_link == APP_NETWORK_LINK_BT_PAN;
 }
 
 static bool ui_bt_network_ready(void)
 {
-    net_manager_snapshot_t snapshot;
+    app_network_snapshot_t snapshot;
 
-    net_manager_get_snapshot(&snapshot);
-    return snapshot.active_link == NET_MANAGER_LINK_4G_CAT1;
+    app_network_get_snapshot(&snapshot);
+    return snapshot.active_link == APP_NETWORK_LINK_4G_CAT1;
 }
 
 static uint32_t ui_status_bar_next_refresh_delay_ms(void)
@@ -691,6 +812,7 @@ static bool ui_font_cache_load_file(const char *path, void **buffer, size_t *siz
     {
         return false;
     }
+    app_watchdog_progress(APP_WDT_MODULE_UI);
 
     file_size = lseek(fd, 0, SEEK_END);
     if (file_size <= 0)
@@ -728,6 +850,7 @@ static bool ui_font_cache_load_file(const char *path, void **buffer, size_t *siz
     }
 
     read_size = read(fd, data, (size_t)file_size);
+    app_watchdog_progress(APP_WDT_MODULE_UI);
     close(fd);
     if (read_size != file_size)
     {
@@ -978,6 +1101,11 @@ static void ui_nav_event_cb(lv_event_t *e)
         return;
     }
 
+    if (ui_runtime_get_active_screen_id() == target)
+    {
+        return;
+    }
+
     if (!ui_accept_navigation_interaction())
     {
         return;
@@ -996,6 +1124,11 @@ static void ui_nav_async_switch_cb(void *param)
         return;
     }
 
+    if (ui_runtime_get_active_screen_id() == target)
+    {
+        return;
+    }
+
     lv_display_trigger_activity(NULL);
     ui_runtime_switch_to(target);
 }
@@ -1007,6 +1140,11 @@ static void ui_nav_pressed_event_cb(lv_event_t *e)
     lv_indev_t *indev;
 
     if (lv_event_get_code(e) != LV_EVENT_PRESSED || target == UI_SCREEN_NONE)
+    {
+        return;
+    }
+
+    if (ui_runtime_get_active_screen_id() == target)
     {
         return;
     }
@@ -1271,6 +1409,7 @@ static void ui_status_capture_snapshot(ui_status_bar_snapshot_t *snapshot)
     date_time_t current_time;
     bq27220_power_snapshot_t power_snapshot;
     weather_info_t current_weather = {0};
+    app_network_snapshot_t app_snapshot;
     bool use_fallback_time = false;
     char cat1_detail[16];
 
@@ -1336,44 +1475,42 @@ static void ui_status_capture_snapshot(ui_status_bar_snapshot_t *snapshot)
     }
     else
     {
-        snapshot->battery_percent = (s_status_pending_battery_percent >= 0) ?
-                                    s_status_pending_battery_percent :
-                                    s_status_applied_battery_percent;
-        snapshot->charge_state = (s_status_pending_charge >= 0) ?
-                                 s_status_pending_charge :
-                                 s_status_applied_charge;
+        ui_status_get_legacy_power_pending(&snapshot->charge_state,
+                                           &snapshot->battery_percent);
         snapshot->aw_charge_state = 0U;
         snapshot->aw_fault_status = 0U;
     }
 
     snapshot->bt_visual_state = (int)ui_status_get_bluetooth_state();
-    snapshot->desired_mode = net_manager_get_desired_mode();
-    snapshot->active_link = net_manager_get_active_link();
+    app_network_get_snapshot(&app_snapshot);
+    snapshot->desired_mode = app_snapshot.desired_mode;
+    snapshot->active_link = app_snapshot.active_link;
     snapshot->bt_enabled = net_manager_bt_enabled();
     snapshot->net_4g_enabled = net_manager_4g_enabled();
+    snapshot->radios_suspended = app_snapshot.radios_suspended;
     snapshot->network_visual_state = ui_status_get_cat1_visual_state(cat1_detail, sizeof(cat1_detail));
 
-    if (snapshot->active_link == NET_MANAGER_LINK_BT_PAN)
+    if (snapshot->radios_suspended)
+    {
+        rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "睡眠");
+    }
+    else if (snapshot->active_link == APP_NETWORK_LINK_BT_PAN)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "在线");
     }
-    else if (snapshot->active_link == NET_MANAGER_LINK_4G_CAT1)
+    else if (snapshot->active_link == APP_NETWORK_LINK_4G_CAT1)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s", cat1_detail);
     }
-    else if (snapshot->desired_mode == NET_MANAGER_MODE_BT)
+    else if (snapshot->desired_mode == APP_NETWORK_MODE_BT)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s",
                     snapshot->bt_enabled ? "蓝牙" : "蓝牙关闭");
     }
-    else if (snapshot->desired_mode == NET_MANAGER_MODE_4G)
+    else if (snapshot->desired_mode == APP_NETWORK_MODE_4G)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s",
                     snapshot->net_4g_enabled ? cat1_detail : "4G关闭");
-    }
-    else if (snapshot->desired_mode == NET_MANAGER_MODE_SLEEP)
-    {
-        rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "睡眠");
     }
     else
     {
@@ -1408,22 +1545,24 @@ static bool ui_status_snapshot_equal(const ui_status_bar_snapshot_t *lhs,
            lhs->active_link == rhs->active_link &&
            lhs->bt_enabled == rhs->bt_enabled &&
            lhs->net_4g_enabled == rhs->net_4g_enabled &&
+           lhs->radios_suspended == rhs->radios_suspended &&
            strcmp(lhs->network_detail, rhs->network_detail) == 0;
 }
 
 static void ui_status_refresh_connection_icons(bool force)
 {
     const ui_status_bar_snapshot_t *snapshot = &s_status_bar_snapshot;
-    net_manager_link_t active_link = snapshot->active_link;
+    app_network_link_t active_link = snapshot->active_link;
     bool bt_enabled = snapshot->bt_enabled;
     bool net_4g_enabled = snapshot->net_4g_enabled;
+    bool radios_suspended = snapshot->radios_suspended;
     const char *network_text = snapshot->network_detail;
     size_t i;
 
     if (!force &&
         s_status_last_bt_icon_state == (bt_enabled ? 1 : 0) &&
         s_status_last_network_icon_state == (int)active_link &&
-        s_status_last_net_4g_enabled == net_4g_enabled &&
+        s_status_last_net_4g_enabled == (net_4g_enabled && !radios_suspended) &&
         strcmp(s_status_last_network_text, network_text) == 0)
     {
         return;
@@ -1431,7 +1570,7 @@ static void ui_status_refresh_connection_icons(bool force)
 
     s_status_last_bt_icon_state = bt_enabled ? 1 : 0;
     s_status_last_network_icon_state = (int)active_link;
-    s_status_last_net_4g_enabled = net_4g_enabled;
+    s_status_last_net_4g_enabled = net_4g_enabled && !radios_suspended;
     rt_snprintf(s_status_last_network_text, sizeof(s_status_last_network_text), "%s", network_text);
 
     for (i = 0; i < sizeof(s_screen_refs) / sizeof(s_screen_refs[0]); ++i)
@@ -1457,8 +1596,9 @@ static void ui_status_refresh_connection_icons(bool force)
             ui_img_set_src(refs->network_icon, &network_icon_img);
             ui_status_set_object_hidden(refs->network_icon, false);
             lv_obj_set_style_opa(refs->network_icon,
-                                 (active_link == NET_MANAGER_LINK_BT_PAN ||
-                                  active_link == NET_MANAGER_LINK_4G_CAT1) ? LV_OPA_COVER : LV_OPA_50,
+                                 (!radios_suspended &&
+                                  (active_link == APP_NETWORK_LINK_BT_PAN ||
+                                   active_link == APP_NETWORK_LINK_4G_CAT1)) ? LV_OPA_COVER : LV_OPA_50,
                                  0);
         }
 
@@ -1505,14 +1645,14 @@ static ui_status_bluetooth_state_t ui_status_get_bluetooth_state(void)
 static void ui_status_refresh_charging_icons(void)
 {
     size_t i;
+    int charge = ui_status_consume_pending_charge();
 
-    if (s_status_pending_charge < 0)
+    if (charge < 0)
     {
         return;
     }
 
-    s_status_applied_charge = s_status_pending_charge;
-    s_status_panel.charging = s_status_applied_charge != 0;
+    s_status_panel.charging = charge != 0;
 
     for (i = 0; i < sizeof(s_screen_refs) / sizeof(s_screen_refs[0]); ++i)
     {
@@ -1552,7 +1692,7 @@ static void ui_status_refresh_battery_percent(void)
 {
     size_t i;
     char battery_text[8];
-    int percent = s_status_pending_battery_percent;
+    int percent = ui_status_consume_pending_battery_percent();
 
     if (percent < 0)
     {
@@ -1563,7 +1703,6 @@ static void ui_status_refresh_battery_percent(void)
         percent = 100;
     }
 
-    s_status_applied_battery_percent = percent;
     rt_snprintf(battery_text, sizeof(battery_text), "%d%%", percent);
 
     for (i = 0; i < sizeof(s_screen_refs) / sizeof(s_screen_refs[0]); ++i)
@@ -1679,8 +1818,9 @@ static void ui_status_update_panel_visuals(void)
     bool network_ready = ui_bt_network_ready();
     bool bt_enabled = snapshot->bt_enabled;
     bool net_4g_enabled = snapshot->net_4g_enabled;
-    bool bt_switch_on = (snapshot->desired_mode == NET_MANAGER_MODE_BT);
-    bool network_switch_on = (snapshot->desired_mode == NET_MANAGER_MODE_4G);
+    bool bt_switch_on = (snapshot->desired_mode == APP_NETWORK_MODE_BT);
+    bool network_switch_on = (!snapshot->radios_suspended &&
+                              snapshot->desired_mode == APP_NETWORK_MODE_4G);
     const char *bt_subtitle;
     const char *network_subtitle;
 
@@ -1711,7 +1851,7 @@ static void ui_status_update_panel_visuals(void)
 
     if (s_status_panel.volume_value_label != NULL)
     {
-        rt_snprintf(value_text, sizeof(value_text), "%u / 10", s_status_panel.volume_steps);
+        rt_snprintf(value_text, sizeof(value_text), "%u%%", (unsigned int)s_status_panel.volume_steps * 10U);
         lv_label_set_text(s_status_panel.volume_value_label, value_text);
     }
 
@@ -1730,15 +1870,11 @@ static void ui_status_update_panel_visuals(void)
 
     if (s_status_panel.bluetooth_card != NULL)
     {
-        ui_apply_basic_object_style(s_status_panel.bluetooth_card, false, 0, 2);
+        ui_apply_basic_object_style(s_status_panel.bluetooth_card, false, ui_px_x(8), 1);
 
         if (s_status_panel.bluetooth_title_label != NULL)
         {
-            lv_label_set_text(s_status_panel.bluetooth_title_label, ui_i18n_pick("蓝牙", "Bluetooth"));
-        }
-        if (s_status_panel.bluetooth_subtitle_label != NULL)
-        {
-            if (snapshot->active_link == NET_MANAGER_LINK_BT_PAN)
+            if (snapshot->active_link == APP_NETWORK_LINK_BT_PAN)
             {
                 bt_subtitle = ui_i18n_pick("已连接", "Connected");
             }
@@ -1749,10 +1885,10 @@ static void ui_status_update_panel_visuals(void)
                 bt_subtitle = ui_i18n_pick("连接中", "Connecting");
                 break;
             default:
-                bt_subtitle = bt_enabled ? ui_i18n_pick("待连接", "Idle") : ui_i18n_pick("未开启", "Disabled");
+                bt_subtitle = ui_i18n_pick("未连接", "Disconnected");
                 break;
             }
-            lv_label_set_text(s_status_panel.bluetooth_subtitle_label, bt_subtitle);
+            lv_label_set_text(s_status_panel.bluetooth_title_label, bt_subtitle);
         }
         if (s_status_panel.bluetooth_value_label != NULL)
         {
@@ -1763,57 +1899,53 @@ static void ui_status_update_panel_visuals(void)
 
     if (s_status_panel.network_card != NULL)
     {
-        ui_apply_basic_object_style(s_status_panel.network_card, false, 0, 2);
+        ui_apply_basic_object_style(s_status_panel.network_card, false, ui_px_x(8), 1);
 
         if (s_status_panel.network_title_label != NULL)
         {
-            lv_label_set_text(s_status_panel.network_title_label, "4G");
-        }
-        if (s_status_panel.network_subtitle_label != NULL)
-        {
-            if (snapshot->desired_mode == NET_MANAGER_MODE_BT)
+            if (snapshot->radios_suspended)
             {
-                if (snapshot->active_link == NET_MANAGER_LINK_BT_PAN)
+                network_subtitle = ui_i18n_pick("睡眠", "Sleeping");
+            }
+            else if (snapshot->desired_mode == APP_NETWORK_MODE_BT)
+            {
+                if (snapshot->active_link == APP_NETWORK_LINK_BT_PAN)
                 {
-                    network_subtitle = ui_i18n_pick("蓝牙已连接", "Bluetooth connected");
+                    network_subtitle = ui_i18n_pick("已连接", "Connected");
                 }
                 else if (bt_enabled)
                 {
-                    network_subtitle = ui_i18n_pick("等待网络共享", "Waiting for PAN");
+                    network_subtitle = ui_i18n_pick("未连接", "Disconnected");
                 }
                 else
                 {
-                    network_subtitle = ui_i18n_pick("蓝牙未开启", "Bluetooth off");
+                    network_subtitle = ui_i18n_pick("未连接", "Disconnected");
                 }
             }
-            else if (snapshot->desired_mode == NET_MANAGER_MODE_4G)
+            else if (snapshot->desired_mode == APP_NETWORK_MODE_4G)
             {
                 if (network_ready)
                 {
-                    network_subtitle = ui_i18n_pick("已联网", "Online");
+                    network_subtitle = ui_i18n_pick("已连接", "Connected");
                 }
                 else if (net_4g_enabled)
                 {
-                    network_subtitle = ui_i18n_pick("4G启动中", "Starting 4G");
+                    network_subtitle = ui_i18n_pick("未连接", "Disconnected");
                 }
                 else
                 {
-                    network_subtitle = ui_i18n_pick("4G未开启", "Disabled");
+                    network_subtitle = ui_i18n_pick("未连接", "Disconnected");
                 }
-            }
-            else if (snapshot->desired_mode == NET_MANAGER_MODE_SLEEP)
-            {
-                network_subtitle = ui_i18n_pick("休眠中", "Sleeping");
             }
             else if (!net_4g_enabled)
             {
-                network_subtitle = ui_i18n_pick("未开启", "Disabled");
+                network_subtitle = ui_i18n_pick("未连接", "Disconnected");
             }
             else
             {
-                network_subtitle = ui_i18n_pick("未启用", "Disabled");
+                network_subtitle = ui_i18n_pick("未连接", "Disconnected");
             }
-            lv_label_set_text(s_status_panel.network_subtitle_label, network_subtitle);
+            lv_label_set_text(s_status_panel.network_title_label, network_subtitle);
         }
         if (s_status_panel.network_value_label != NULL)
         {
@@ -1879,6 +2011,10 @@ static void ui_status_close_panel(void)
     if (s_status_panel.root != NULL)
     {
         lv_obj_add_flag(s_status_panel.root, LV_OBJ_FLAG_HIDDEN);
+        if (s_status_panel.sync_timer != NULL)
+        {
+            lv_timer_pause(s_status_panel.sync_timer);
+        }
 
         if (s_status_panel.host_screen != NULL)
         {
@@ -1893,12 +2029,13 @@ static void ui_status_sync_timer_cb(lv_timer_t *timer)
 {
     int pending;
     uint32_t saved_brightness = app_config_get_display_brightness();
-    uint32_t saved_volume = app_config_get_audio_music_volume();
     uint8_t brightness = (saved_brightness > 100U) ? 100U : (uint8_t)saved_brightness;
-    uint8_t volume = (saved_volume > 15U) ? 15U : (uint8_t)saved_volume;
+    uint8_t volume = 0U;
     bool bt_connected;
 
     LV_UNUSED(timer);
+
+    ui_status_capture_snapshot(&s_status_bar_snapshot);
 
     if (s_status_panel.lcd_device == RT_NULL)
     {
@@ -1910,30 +2047,36 @@ static void ui_status_sync_timer_cb(lv_timer_t *timer)
         rt_device_control(s_status_panel.lcd_device, RTGRAPHIC_CTRL_GET_BRIGHTNESS, &brightness);
     }
 
-    pending = s_status_pending_brightness;
+    pending = ui_status_consume_pending_brightness();
     if (pending >= 0)
     {
         brightness = (uint8_t)pending;
     }
 
-    pending = s_status_pending_volume;
+    volume = audio_server_get_private_volume(AUDIO_TYPE_LOCAL_MUSIC);
+    if (volume > 15U)
+    {
+        volume = 15U;
+    }
+
+    pending = ui_status_consume_pending_volume();
     if (pending >= 0)
     {
         volume = (uint8_t)pending;
     }
-    else
-    {
-        volume = audio_server_get_private_volume(AUDIO_TYPE_LOCAL_MUSIC);
-    }
 
-    pending = s_status_pending_battery_percent;
+    pending = ui_status_consume_pending_battery_percent();
     if (pending > 100)
     {
-        s_status_pending_battery_percent = 100;
+        ui_status_set_pending_battery_percent(100);
     }
     else if (pending < 0)
     {
-        s_status_pending_battery_percent = pending;
+        ui_status_set_pending_battery_percent(pending);
+    }
+    else
+    {
+        ui_status_set_pending_battery_percent(pending);
     }
 
     s_status_panel.brightness_steps = ui_status_brightness_to_steps(brightness);
@@ -2036,8 +2179,9 @@ static void ui_status_detail_reload_async_cb(void *user_data)
 static void ui_status_toggle_card_event_cb(lv_event_t *e)
 {
     ui_status_toggle_kind_t kind = (ui_status_toggle_kind_t)(uintptr_t)lv_event_get_user_data(e);
-    net_manager_mode_t current_mode;
-    net_manager_mode_t target_mode;
+    app_network_snapshot_t snapshot;
+    app_network_mode_t current_mode;
+    app_network_mode_t target_mode;
 
     if (lv_event_get_code(e) != LV_EVENT_RELEASED)
     {
@@ -2048,31 +2192,25 @@ static void ui_status_toggle_card_event_cb(lv_event_t *e)
         return;
     }
 
-    current_mode = net_manager_get_desired_mode();
+    app_network_get_snapshot(&snapshot);
+    current_mode = snapshot.desired_mode;
     if (kind == UI_STATUS_TOGGLE_BLUETOOTH)
     {
-        target_mode = (current_mode == NET_MANAGER_MODE_BT) ?
-                      NET_MANAGER_MODE_4G :
-                      NET_MANAGER_MODE_BT;
+        target_mode = (current_mode == APP_NETWORK_MODE_BT) ?
+                      APP_NETWORK_MODE_4G :
+                      APP_NETWORK_MODE_BT;
     }
     else
     {
-        target_mode = (current_mode == NET_MANAGER_MODE_4G) ?
-                      NET_MANAGER_MODE_BT :
-                      NET_MANAGER_MODE_4G;
+        target_mode = (current_mode == APP_NETWORK_MODE_4G) ?
+                      APP_NETWORK_MODE_BT :
+                      APP_NETWORK_MODE_4G;
     }
 
-    if (target_mode == NET_MANAGER_MODE_BT)
-    {
-        net_manager_request_bt_mode();
-    }
-    else
-    {
-        net_manager_request_4g_mode();
-    }
+    app_network_request_mode(target_mode);
 
-    s_status_panel.bluetooth_enabled = (target_mode == NET_MANAGER_MODE_BT);
-    s_status_panel.network_enabled = (target_mode == NET_MANAGER_MODE_4G);
+    s_status_panel.bluetooth_enabled = (target_mode == APP_NETWORK_MODE_BT);
+    s_status_panel.network_enabled = (target_mode == APP_NETWORK_MODE_4G);
     s_status_panel.bluetooth_toggle_initialized = true;
     s_status_panel.network_toggle_initialized = true;
 
@@ -2091,12 +2229,6 @@ static void ui_status_toggle_card_event_cb(lv_event_t *e)
         lv_label_set_text(s_status_panel.bluetooth_subtitle_label,
                           s_status_panel.bluetooth_enabled ? ui_i18n_pick("切换中", "Switching") : ui_i18n_pick("未开启", "Disabled"));
     }
-    if (s_status_panel.network_subtitle_label != NULL)
-    {
-        lv_label_set_text(s_status_panel.network_subtitle_label,
-                          s_status_panel.network_enabled ? ui_i18n_pick("切换中", "Switching") : ui_i18n_pick("未开启", "Disabled"));
-    }
-
     ui_status_refresh_connection_icons(true);
     ui_dispatch_request_status_refresh();
 }
@@ -2211,7 +2343,7 @@ static void ui_status_slider_event_cb(lv_event_t *e)
                                                  UI_STATUS_BRIGHTNESS_STEP_MAX);
         actual = ui_status_steps_to_brightness(value);
         s_status_panel.brightness_steps = value;
-        s_status_pending_brightness = actual;
+        ui_status_set_pending_brightness(actual);
         ui_status_backlight_write(actual);
         app_config_set_display_brightness(actual);
     }
@@ -2222,7 +2354,7 @@ static void ui_status_slider_event_cb(lv_event_t *e)
         value = ui_status_slider_step_from_touch(slider, indev, 0U, 10U);
         actual = ui_status_steps_to_volume(value);
         s_status_panel.volume_steps = value;
-        s_status_pending_volume = actual;
+        ui_status_set_pending_volume(actual);
         audio_server_set_private_volume(AUDIO_TYPE_LOCAL_MUSIC, actual);
         app_config_set_audio_music_volume(actual);
         if (code == LV_EVENT_RELEASED || code == LV_EVENT_CLICKED)
@@ -2386,16 +2518,16 @@ static void ui_status_create_slider_visual(lv_obj_t *parent,
 {
     lv_obj_t *track;
     lv_obj_t *fill;
-    const lv_coord_t track_h = ui_px_h(12);
+    const lv_coord_t track_h = ui_px_h(8);
 
     track = lv_obj_create(parent);
-    ui_apply_basic_object_style(track, false, ui_px_h(6), 2);
+    ui_apply_basic_object_style(track, false, ui_px_h(4), 1);
     lv_obj_set_pos(track, ui_px_x(x), ui_px_y(y));
     lv_obj_set_size(track, ui_px_w(w), track_h);
     lv_obj_clear_flag(track, LV_OBJ_FLAG_CLICKABLE);
 
     fill = lv_obj_create(track);
-    ui_apply_basic_object_style(fill, true, ui_px_h(6), 0);
+    ui_apply_basic_object_style(fill, true, ui_px_h(4), 0);
     lv_obj_set_pos(fill, 0, 0);
     lv_obj_set_size(fill, ui_px_w(10), track_h);
     lv_obj_clear_flag(fill, LV_OBJ_FLAG_CLICKABLE);
@@ -2418,7 +2550,7 @@ static void ui_status_create_slider_visual(lv_obj_t *parent,
     {
         lv_obj_t *touch_zone = ui_status_create_touch_zone(parent,
                                                            x,
-                                                           y - 14,
+                                                           y - 18,
                                                            w,
                                                            44,
                                                            NULL,
@@ -2427,6 +2559,68 @@ static void ui_status_create_slider_visual(lv_obj_t *parent,
         lv_obj_add_event_cb(touch_zone, ui_status_slider_event_cb, LV_EVENT_RELEASED, (void *)(uintptr_t)kind);
         lv_obj_move_foreground(touch_zone);
     }
+}
+
+static void ui_status_build_overlay_top_bar(lv_obj_t *parent)
+{
+    lv_obj_t *bar;
+    lv_obj_t *line;
+    lv_obj_t *icon;
+    char time_text[8];
+    const ui_status_bar_snapshot_t *snapshot = &s_status_bar_snapshot;
+    int hour;
+    int minute;
+
+    if (parent == NULL)
+    {
+        return;
+    }
+
+    hour = snapshot->hour;
+    minute = snapshot->minute;
+    if (hour < 0 || hour > 23)
+    {
+        hour = 12;
+    }
+    if (minute < 0 || minute > 59)
+    {
+        minute = 8;
+    }
+    rt_snprintf(time_text, sizeof(time_text), "%02d:%02d", hour, minute);
+
+    bar = lv_obj_create(parent);
+    ui_apply_basic_object_style(bar, false, 0, 0);
+    lv_obj_set_pos(bar, ui_px_x(0), ui_px_y(0));
+    lv_obj_set_size(bar, ui_px_w(528), ui_px_h(90));
+
+    icon = ui_create_image_slot(bar, 292, 31, 28, 28);
+    ui_img_set_src(icon, &status_dropdown_4g_top);
+    lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+
+    icon = ui_create_image_slot(bar, 339, 28, 22, 34);
+    ui_img_set_src(icon, &status_dropdown_bluetooth_top);
+    lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+
+    ui_create_label(bar,
+                    time_text,
+                    376,
+                    29,
+                    58,
+                    29,
+                    24,
+                    LV_TEXT_ALIGN_LEFT,
+                    false,
+                    false);
+
+    icon = ui_create_image_slot(bar, 460, 20, 50, 50);
+    ui_img_set_src(icon, &status_dropdown_battery_top);
+    lv_obj_clear_flag(icon, LV_OBJ_FLAG_CLICKABLE);
+
+    line = lv_obj_create(bar);
+    ui_apply_basic_object_style(line, true, 0, 0);
+    lv_obj_set_pos(line, ui_px_x(0), ui_px_y(89));
+    lv_obj_set_size(line, ui_px_w(528), ui_px_h(1));
+    lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE);
 }
 
 static void ui_status_build_panel_widgets(lv_obj_t *root,
@@ -2438,13 +2632,6 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
     lv_obj_t *panel;
     lv_obj_t *line;
     lv_obj_t *touch_zone;
-    int32_t inner_x;
-    int32_t inner_w;
-    int32_t value_x;
-    int32_t slider_w;
-    int32_t status_gap;
-    int32_t status_card_w;
-    int32_t status_right_x;
 
     if (root == NULL || parent == NULL)
     {
@@ -2453,71 +2640,52 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
 
     panel = lv_obj_create(parent);
     s_status_panel.panel = panel;
-    ui_apply_basic_object_style(panel, false, 0, 2);
-    lv_obj_set_style_border_side(panel,
-                                 LV_BORDER_SIDE_LEFT | LV_BORDER_SIDE_RIGHT | LV_BORDER_SIDE_BOTTOM,
-                                 0);
+    ui_apply_basic_object_style(panel, false, ui_px_x(8), 2);
     lv_obj_set_pos(panel, ui_px_x(panel_x), ui_px_y(panel_y));
-    lv_obj_set_size(panel, ui_px_w(panel_w), ui_px_h(314));
-    inner_x = 18;
-    inner_w = panel_w - (inner_x * 2);
-    value_x = inner_x + inner_w - 92;
-    slider_w = inner_w;
-    status_gap = 12;
-    status_card_w = (inner_w - status_gap) / 2;
-    status_right_x = inner_x + status_card_w + status_gap;
+    lv_obj_set_size(panel, ui_px_w(panel_w), ui_px_h(292));
 
     ui_create_label(panel,
                     ui_i18n_pick("设备控制", "Device Control"),
-                    inner_x,
-                    16,
-                    180,
-                    28,
-                    26,
-                    LV_TEXT_ALIGN_LEFT,
-                    false,
-                    false);
-    ui_create_label(panel,
-                    ui_i18n_pick("亮度、音量、蓝牙和 4G", "Brightness, volume, Bluetooth, and 4G"),
-                    panel_w - 220,
-                    18,
-                    202,
-                    24,
-                    18,
-                    LV_TEXT_ALIGN_RIGHT,
+                    169,
+                    30,
+                    162,
+                    34,
+                    30,
+                    LV_TEXT_ALIGN_CENTER,
                     false,
                     false);
 
     line = lv_obj_create(panel);
     ui_apply_basic_object_style(line, true, 0, 0);
-    lv_obj_set_pos(line, ui_px_x(inner_x), ui_px_y(52));
-    lv_obj_set_size(line, ui_px_w(inner_w), ui_px_h(2));
+    lv_obj_set_pos(line, ui_px_x(25), ui_px_y(70));
+    lv_obj_set_size(line, ui_px_w(450), ui_px_h(1));
+    lv_obj_clear_flag(line, LV_OBJ_FLAG_CLICKABLE);
 
     ui_create_label(panel,
                     ui_i18n_pick("屏幕亮度", "Brightness"),
-                    inner_x,
-                    74,
-                    160,
-                    28,
-                    23,
+                    35,
+                    93,
+                    134,
+                    22,
+                    16,
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     false);
     s_status_panel.brightness_value_label = ui_create_label(panel,
                                                             "50%",
-                                                            value_x,
-                                                            74,
-                                                            92,
-                                                            28,
-                                                            23,
+                                                            331,
+                                                            93,
+                                                            134,
+                                                            22,
+                                                            15,
                                                             LV_TEXT_ALIGN_RIGHT,
                                                             false,
                                                             false);
     s_status_panel.brightness_slider = NULL;
     ui_status_create_slider_visual(panel,
-                                   inner_x,
-                                   108,
-                                   slider_w,
+                                   35,
+                                   118,
+                                   430,
                                    UI_STATUS_BRIGHTNESS_STEP_MIN,
                                    UI_STATUS_BRIGHTNESS_STEP_MAX,
                                    s_status_panel.brightness_steps,
@@ -2525,110 +2693,112 @@ static void ui_status_build_panel_widgets(lv_obj_t *root,
 
     ui_create_label(panel,
                     ui_i18n_pick("声音音量", "Volume"),
-                    inner_x,
-                    152,
-                    160,
-                    28,
-                    23,
+                    35,
+                    159,
+                    134,
+                    22,
+                    16,
                     LV_TEXT_ALIGN_LEFT,
                     false,
                     false);
     s_status_panel.volume_value_label = ui_create_label(panel,
                                                         "5 / 10",
-                                                        value_x,
-                                                        152,
-                                                        92,
-                                                        28,
-                                                        23,
+                                                        331,
+                                                        159,
+                                                        134,
+                                                        22,
+                                                        15,
                                                         LV_TEXT_ALIGN_RIGHT,
                                                         false,
                                                         false);
     s_status_panel.volume_slider = NULL;
     ui_status_create_slider_visual(panel,
-                                   inner_x,
-                                   186,
-                                   slider_w,
+                                   35,
+                                   183,
+                                   430,
                                    0U,
                                    10U,
                                    s_status_panel.volume_steps,
                                    UI_STATUS_SLIDER_VOLUME);
 
-    s_status_panel.bluetooth_card = ui_create_card(panel, inner_x, 236, status_card_w, 60, UI_SCREEN_NONE, false, 0);
+    s_status_panel.bluetooth_card = ui_create_card(panel, 35, 215, 201, 50, UI_SCREEN_NONE, false, 8);
     s_status_panel.bluetooth_title_label = ui_create_label(s_status_panel.bluetooth_card,
-                                                           ui_i18n_pick("蓝牙", "Bluetooth"),
-                                                           14,
-                                                           9,
-                                                           96,
-                                                           24,
-                                                           23,
+                                                           ui_i18n_pick("已连接", "Connected"),
+                                                           16,
+                                                           12,
+                                                           76,
+                                                           28,
+                                                           20,
                                                            LV_TEXT_ALIGN_LEFT,
                                                            false,
                                                            false);
     s_status_panel.bluetooth_subtitle_label = ui_create_label(s_status_panel.bluetooth_card,
-                                                              ui_i18n_pick("未开启", "Disabled"),
-                                                              14,
-                                                              33,
-                                                              110,
-                                                              22,
-                                                              16,
-                                                              LV_TEXT_ALIGN_LEFT,
+                                                              "",
+                                                              83,
+                                                              8,
+                                                              35,
+                                                              35,
+                                                              20,
+                                                              LV_TEXT_ALIGN_CENTER,
                                                               false,
                                                               false);
+    lv_obj_add_flag(s_status_panel.bluetooth_subtitle_label, LV_OBJ_FLAG_HIDDEN);
+    {
+        lv_obj_t *bt_icon = ui_create_image_slot(s_status_panel.bluetooth_card, 83, 8, 35, 35);
+        ui_img_set_src(bt_icon, &status_dropdown_bluetooth);
+        lv_obj_clear_flag(bt_icon, LV_OBJ_FLAG_CLICKABLE);
+    }
     s_status_panel.bluetooth_value_label = ui_create_label(s_status_panel.bluetooth_card,
                                                            ui_i18n_pick("关", "Off"),
-                                                           status_card_w - 56,
-                                                           18,
-                                                           36,
-                                                           24,
-                                                           26,
+                                                           132,
+                                                           12,
+                                                           48,
+                                                           28,
+                                                           20,
                                                            LV_TEXT_ALIGN_CENTER,
                                                            false,
                                                            false);
     touch_zone = ui_status_create_touch_zone(panel,
-                                             inner_x,
-                                             236,
-                                             status_card_w,
-                                             60,
+                                             35,
+                                             215,
+                                             201,
+                                             50,
                                              ui_status_toggle_card_event_cb,
                                              (void *)(uintptr_t)UI_STATUS_TOGGLE_BLUETOOTH);
     lv_obj_move_foreground(touch_zone);
 
-    s_status_panel.network_card = ui_create_card(panel, status_right_x, 236, status_card_w, 60, UI_SCREEN_NONE, false, 0);
+    s_status_panel.network_card = ui_create_card(panel, 264, 215, 201, 50, UI_SCREEN_NONE, false, 8);
     s_status_panel.network_title_label = ui_create_label(s_status_panel.network_card,
-                                                         "4G",
-                                                         14,
-                                                         9,
-                                                         96,
-                                                         24,
-                                                         23,
+                                                         ui_i18n_pick("未连接", "Disconnected"),
+                                                         16,
+                                                         12,
+                                                         76,
+                                                         28,
+                                                         20,
                                                          LV_TEXT_ALIGN_LEFT,
                                                          false,
                                                          false);
-    s_status_panel.network_subtitle_label = ui_create_label(s_status_panel.network_card,
-                                                            ui_i18n_pick("未联网", "Offline"),
-                                                            14,
-                                                            33,
-                                                            110,
-                                                            22,
-                                                            16,
-                                                            LV_TEXT_ALIGN_LEFT,
-                                                            false,
-                                                            false);
+    s_status_panel.network_subtitle_label = NULL;
+    {
+        lv_obj_t *net_icon = ui_create_image_slot(s_status_panel.network_card, 96, 10, 33, 31);
+        ui_img_set_src(net_icon, &status_dropdown_4g_signal);
+        lv_obj_clear_flag(net_icon, LV_OBJ_FLAG_CLICKABLE);
+    }
     s_status_panel.network_value_label = ui_create_label(s_status_panel.network_card,
                                                          ui_i18n_pick("关", "Off"),
-                                                         status_card_w - 56,
-                                                         18,
-                                                         36,
-                                                         24,
-                                                         26,
+                                                         132,
+                                                         12,
+                                                         48,
+                                                         28,
+                                                         20,
                                                          LV_TEXT_ALIGN_CENTER,
                                                          false,
                                                          false);
     touch_zone = ui_status_create_touch_zone(panel,
-                                             status_right_x,
-                                             236,
-                                             status_card_w,
-                                             60,
+                                             264,
+                                             215,
+                                             201,
+                                             50,
                                              ui_status_toggle_card_event_cb,
                                              (void *)(uintptr_t)UI_STATUS_TOGGLE_NETWORK);
     lv_obj_move_foreground(touch_zone);
@@ -2707,6 +2877,14 @@ static void ui_status_build_overlay(lv_obj_t *screen)
     lv_obj_set_size(s_status_panel.root, s_screen_width, s_screen_height);
     lv_obj_add_flag(s_status_panel.root, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(s_status_panel.root, ui_status_root_delete_event_cb, LV_EVENT_DELETE, NULL);
+    if (s_status_panel.sync_timer == NULL)
+    {
+        s_status_panel.sync_timer = lv_timer_create(ui_status_sync_timer_cb, 1000, NULL);
+    }
+    if (s_status_panel.sync_timer != NULL)
+    {
+        lv_timer_pause(s_status_panel.sync_timer);
+    }
 
     s_status_panel.mask = lv_obj_create(s_status_panel.root);
     lv_obj_remove_style_all(s_status_panel.mask);
@@ -2719,9 +2897,10 @@ static void ui_status_build_overlay(lv_obj_t *screen)
 
     ui_status_build_panel_widgets(s_status_panel.root,
                                   s_status_panel.root,
-                                  0,
-                                  UI_STATUS_BAR_HEIGHT,
-                                  s_screen_width);
+                                  15,
+                                  70,
+                                  500);
+    ui_status_build_overlay_top_bar(s_status_panel.root);
 
     lv_obj_move_foreground(s_status_panel.root);
     ui_status_update_panel_visuals();
@@ -2766,6 +2945,11 @@ static void ui_status_panel_toggle_event_cb(lv_event_t *e)
         ui_status_update_panel_visuals();
         lv_obj_clear_flag(s_status_panel.root, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(s_status_panel.root);
+        if (s_status_panel.sync_timer != NULL)
+        {
+            lv_timer_resume(s_status_panel.sync_timer);
+            lv_timer_reset(s_status_panel.sync_timer);
+        }
     }
 }
 
@@ -2776,7 +2960,7 @@ void ui_status_panel_handle_top_swipe(lv_event_t *e)
 
 void ui_helpers_init(void)
 {
-    if (s_ui_helpers_initialized)
+    if (ui_helpers_initialized())
     {
         ui_refresh_metrics();
         if (s_status_panel.toast_timer == NULL)
@@ -2829,7 +3013,7 @@ void ui_helpers_init(void)
     }
     ui_font_manager_init();
     ui_status_bar_refresh_datetime();
-    s_ui_helpers_initialized = true;
+    ui_helpers_set_initialized(true);
 }
 
 void ui_helpers_deinit(void)
@@ -2860,13 +3044,10 @@ void ui_helpers_deinit(void)
     s_status_last_network_icon_state = -1;
     s_status_last_net_4g_enabled = false;
     s_status_last_network_text[0] = '\0';
-    s_status_pending_charge = -1;
-    s_status_applied_charge = -1;
-    s_status_pending_battery_percent = -1;
-    s_status_applied_battery_percent = -1;
+    ui_status_reset_legacy_power_pending();
     memset(&s_status_bar_snapshot, 0, sizeof(s_status_bar_snapshot));
     ui_font_manager_deinit();
-    s_ui_helpers_initialized = false;
+    ui_helpers_set_initialized(false);
 }
 
 void ui_helpers_reset_font_cache(void)
@@ -2957,6 +3138,8 @@ lv_obj_t *ui_create_screen_base(void)
     screen = lv_obj_create(NULL);
     ui_apply_basic_object_style(screen, false, 0, 0);
     lv_obj_set_size(screen, s_screen_width, s_screen_height);
+    lv_obj_add_flag(screen, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(screen, ui_status_panel_toggle_event_bridge, LV_EVENT_GESTURE, NULL);
     return screen;
 }
 
@@ -3171,9 +3354,31 @@ void ui_build_standard_screen_ex(ui_screen_scaffold_t *scaffold,
                                  ui_screen_id_t back_target,
                                  bool enable_detail_touch)
 {
+    ui_build_standard_screen_action(scaffold,
+                                    screen,
+                                    title,
+                                    back_target,
+                                    NULL,
+                                    NULL,
+                                    NULL,
+                                    NULL,
+                                    enable_detail_touch);
+}
+
+void ui_build_standard_screen_action(ui_screen_scaffold_t *scaffold,
+                                     lv_obj_t *screen,
+                                     const char *title,
+                                     ui_screen_id_t back_target,
+                                     const void *right_icon_src,
+                                     const char *right_text,
+                                     ui_standard_screen_action_cb_t right_cb,
+                                     void *right_user_data,
+                                     bool enable_detail_touch)
+{
     lv_obj_t *section;
     lv_obj_t *content;
     lv_obj_t *title_bar;
+    lv_obj_t *right_button;
     char title_buffer[128];
     size_t title_len = 0U;
 
@@ -3217,20 +3422,87 @@ void ui_build_standard_screen_ex(ui_screen_scaffold_t *scaffold,
                     LV_TEXT_ALIGN_CENTER,
                     false,
                     false);
-    ui_create_nav_button(title_bar,
-                         UI_STANDARD_SIDE_MARGIN,
-                         0,
-                         UI_STANDARD_NAV_BUTTON_WIDTH,
-                         UI_STANDARD_NAV_HEIGHT,
-                         ui_i18n_pick("返回", "Back"),
-                         back_target);
-    ui_create_nav_button(title_bar,
-                         s_screen_width - UI_STANDARD_SIDE_MARGIN - UI_STANDARD_NAV_BUTTON_WIDTH,
-                         0,
-                         UI_STANDARD_NAV_BUTTON_WIDTH,
-                         UI_STANDARD_NAV_HEIGHT,
-                         ui_i18n_pick("主页", "Home"),
-                         UI_SCREEN_HOME);
+    if (right_cb != NULL)
+    {
+        lv_obj_t *back_button = ui_create_card(title_bar,
+                                               UI_STANDARD_SIDE_MARGIN,
+                                               0,
+                                               UI_STANDARD_NAV_BUTTON_WIDTH,
+                                               UI_STANDARD_NAV_HEIGHT,
+                                               UI_SCREEN_NONE,
+                                               false,
+                                               0);
+        if (back_button != NULL)
+        {
+            lv_obj_set_style_border_width(back_button, 0, 0);
+            lv_obj_set_style_bg_opa(back_button, LV_OPA_TRANSP, 0);
+            ui_attach_nav_event(back_button, back_target);
+            ui_create_label(back_button,
+                            "<",
+                            0,
+                            8,
+                            UI_STANDARD_NAV_BUTTON_WIDTH,
+                            42,
+                            42,
+                            LV_TEXT_ALIGN_CENTER,
+                            false,
+                            false);
+        }
+
+        right_button = ui_create_card(title_bar,
+                                      s_screen_width - UI_STANDARD_SIDE_MARGIN - UI_STANDARD_NAV_BUTTON_WIDTH,
+                                      0,
+                                      UI_STANDARD_NAV_BUTTON_WIDTH,
+                                      UI_STANDARD_NAV_HEIGHT,
+                                      UI_SCREEN_NONE,
+                                      false,
+                                      0);
+        if (right_button != NULL)
+        {
+            lv_obj_set_style_border_width(right_button, 0, 0);
+            lv_obj_set_style_bg_opa(right_button, LV_OPA_TRANSP, 0);
+            lv_obj_add_flag(right_button, LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_event_cb(right_button, right_cb, LV_EVENT_CLICKED, right_user_data);
+            if (right_icon_src != NULL)
+            {
+                lv_obj_t *icon = ui_create_image_slot(right_button, 22, 9, 40, 40);
+                if (icon != NULL)
+                {
+                    ui_img_set_src(icon, right_icon_src);
+                }
+            }
+            else
+            {
+                ui_create_label(right_button,
+                                right_text != NULL ? right_text : "",
+                                0,
+                                13,
+                                UI_STANDARD_NAV_BUTTON_WIDTH,
+                                32,
+                                UI_STANDARD_NAV_FONT_SIZE,
+                                LV_TEXT_ALIGN_CENTER,
+                                false,
+                                false);
+            }
+        }
+    }
+    else
+    {
+        ui_create_nav_button(title_bar,
+                             UI_STANDARD_SIDE_MARGIN,
+                             0,
+                             UI_STANDARD_NAV_BUTTON_WIDTH,
+                             UI_STANDARD_NAV_HEIGHT,
+                             ui_i18n_pick("返回", "Back"),
+                             back_target);
+        ui_create_nav_button(title_bar,
+                             s_screen_width - UI_STANDARD_SIDE_MARGIN - UI_STANDARD_NAV_BUTTON_WIDTH,
+                             0,
+                             UI_STANDARD_NAV_BUTTON_WIDTH,
+                             UI_STANDARD_NAV_HEIGHT,
+                             ui_i18n_pick("主页", "Home"),
+                             UI_SCREEN_HOME);
+    }
 
     content = lv_obj_create(section);
     ui_apply_basic_object_style(content, false, 0, 0);
@@ -3389,7 +3661,7 @@ void xiaozhi_ui_update_brightness(int brightness)
         brightness = 100;
     }
 
-    s_status_pending_brightness = brightness;
+    ui_status_set_pending_brightness(brightness);
 }
 
 void xiaozhi_ui_update_volume(int volume)
@@ -3403,7 +3675,7 @@ void xiaozhi_ui_update_volume(int volume)
         volume = 15;
     }
 
-    s_status_pending_volume = volume;
+    ui_status_set_pending_volume(volume);
 }
 
 void xiaozhi_ui_update_charge_status(uint8_t is_charging)

@@ -2,9 +2,9 @@
 #include "ui_i18n.h"
 #include "ui_helpers.h"
 #include "ui_runtime_adapter.h"
+#include "network/app_network.h"
 #include "xiaozhi/xiaozhi_client_public.h"
 #include "xiaozhi/xiaozhi_service.h"
-#include "network/net_manager.h"
 #include "rtthread.h"
 #include "petgame.h"
 #include <string.h>
@@ -22,7 +22,7 @@ static lv_timer_t *s_ai_greeting_timer = NULL;
 static rt_mutex_t s_ai_pending_mutex = RT_NULL;
 static bool s_stop_pending = false;
 static rt_tick_t s_ai_last_tts_tick = 0;
-static net_manager_service_state_t s_ai_last_network_state = (net_manager_service_state_t)-1;
+static app_network_state_t s_ai_last_network_state = (app_network_state_t)-1;
 static xz_service_state_t s_ai_last_service_state = (xz_service_state_t)-1;
 static xz_service_state_t s_ai_prev_service_state = (xz_service_state_t)-1;
 static char s_ai_mouth_cache[48] = {0};
@@ -30,6 +30,22 @@ static char s_ai_copy_cache[200] = {0};
 static char s_ai_button_cache[32] = {0};
 static char s_ai_network_cache[96] = {0};
 static const lv_image_dsc_t *s_ai_face_cache = NULL;
+
+static void ai_ui_set_stop_pending(bool pending)
+{
+    rt_enter_critical();
+    s_stop_pending = pending;
+    rt_exit_critical();
+}
+
+static bool ai_ui_stop_pending(void)
+{
+    bool pending;
+    rt_enter_critical();
+    pending = s_stop_pending;
+    rt_exit_critical();
+    return pending;
+}
 
 #define AI_UI_SYNC_INTERVAL_MS      200
 #define AI_SERVICE_BOOT_DELAY_MS    500
@@ -105,26 +121,26 @@ static const char *ai_ui_service_state_text(xz_service_state_t state)
     }
 }
 
-static const char *ai_ui_network_state_text(net_manager_service_state_t state)
+static const char *ai_ui_network_state_text(app_network_state_t state)
 {
     switch (state)
     {
-    case NET_MANAGER_SERVICE_OFFLINE:
+    case APP_NETWORK_STATE_OFFLINE:
         return ui_i18n_pick("网络未连接", "Network offline");
-    case NET_MANAGER_SERVICE_RADIO_READY:
+    case APP_NETWORK_STATE_RADIO_READY:
         return ui_i18n_pick("网络准备中", "Network readying");
-    case NET_MANAGER_SERVICE_LINK_READY:
+    case APP_NETWORK_STATE_LINK_READY:
         return ui_i18n_pick("链路已连接", "Link connected");
-    case NET_MANAGER_SERVICE_DNS_READY:
+    case APP_NETWORK_STATE_DNS_READY:
         return ui_i18n_pick("DNS已就绪", "DNS ready");
-    case NET_MANAGER_SERVICE_INTERNET_READY:
+    case APP_NETWORK_STATE_INTERNET_READY:
         return ui_i18n_pick("已连接", "Connected");
     default:
         return ui_i18n_pick("网络状态未知", "Network unknown");
     }
 }
 
-static const char *ai_ui_network_status_text(net_manager_service_state_t net_state,
+static const char *ai_ui_network_status_text(app_network_state_t net_state,
                                              xz_service_state_t svc_state)
 {
     (void)svc_state;
@@ -133,22 +149,25 @@ static const char *ai_ui_network_status_text(net_manager_service_state_t net_sta
 
 static const char *ai_ui_network_wait_text(void)
 {
-    net_manager_service_state_t net_state = net_manager_get_service_state();
+    app_network_snapshot_t snapshot;
 
-    switch (net_state)
+    app_network_get_snapshot(&snapshot);
+
+    switch (snapshot.state)
     {
-    case NET_MANAGER_SERVICE_OFFLINE:
-        return ui_i18n_pick("4G正在重新联网，网络恢复后会自动连接小智。",
-                            "4G is reconnecting. Xiaozhi will connect automatically when the network recovers.");
-    case NET_MANAGER_SERVICE_RADIO_READY:
-        return ui_i18n_pick("4G模组已就绪，正在等待链路和DNS完成。",
-                            "4G modem is ready. Waiting for link and DNS.");
-    case NET_MANAGER_SERVICE_LINK_READY:
-        return ui_i18n_pick("4G链路已连接，正在等待DNS和互联网检测。",
-                            "4G link is connected. Waiting for DNS and internet check.");
-    case NET_MANAGER_SERVICE_DNS_READY:
+    case APP_NETWORK_STATE_OFFLINE:
+        return ui_i18n_pick("网络未连接，网络恢复后会自动连接小智。",
+                            "Network is offline. Xiaozhi will connect automatically when the network recovers.");
+    case APP_NETWORK_STATE_RADIO_READY:
+        return ui_i18n_pick("网络硬件已就绪，正在等待链路完成。",
+                            "Network hardware is ready. Waiting for the link to complete.");
+    case APP_NETWORK_STATE_LINK_READY:
+        return ui_i18n_pick("网络链路已连接，正在等待DNS和互联网检测。",
+                            "Network link is connected. Waiting for DNS and internet check.");
+    case APP_NETWORK_STATE_DNS_READY:
         return ui_i18n_pick("DNS已就绪，正在完成小智网络连接。",
                             "DNS is ready. Finishing Xiaozhi network connection.");
+    case APP_NETWORK_STATE_INTERNET_READY:
     default:
         return ui_i18n_pick("网络正在准备，小智会在网络恢复后自动连接。",
                             "Network is preparing. Xiaozhi will connect when it recovers.");
@@ -223,7 +242,7 @@ static void ai_ui_sync_timer_cb(lv_timer_t *timer)
     {
         if (pending.state != XZ_SERVICE_LISTENING)
         {
-            s_stop_pending = false;
+            ai_ui_set_stop_pending(false);
         }
 
         update_talk_button_text(pending.state);
@@ -382,7 +401,7 @@ static void ai_restore_runtime_state(void)
 
     if (state == XZ_SERVICE_READY)
     {
-        if (xiaozhi_service_get_session_id() != NULL)
+        if (xiaozhi_service_has_session_id())
         {
             on_chat_output(ui_i18n_pick("小智已保持连接", "Xiaozhi is still connected"));
         }
@@ -396,13 +415,15 @@ static void ai_restore_runtime_state(void)
 /* 网络状态标签更新 */
 static void update_network_status(void)
 {
-    net_manager_service_state_t net_state;
+    app_network_snapshot_t snapshot;
+    app_network_state_t net_state;
     xz_service_state_t service_state;
     const char *text;
 
     if (s_network_label == NULL) return;
 
-    net_state = net_manager_get_service_state();
+    app_network_get_snapshot(&snapshot);
+    net_state = snapshot.state;
     service_state = xiaozhi_service_get_state();
     text = ai_ui_network_status_text(net_state, service_state);
 
@@ -486,7 +507,7 @@ static void on_error(const char* error_msg)
         rt_snprintf(s_ai_pending.copy_text, sizeof(s_ai_pending.copy_text), "%s", error_msg);
         s_ai_pending.copy_valid = true;
         ai_ui_pending_unlock();
-        s_stop_pending = false;
+        ai_ui_set_stop_pending(false);
     }
 }
 
@@ -507,9 +528,14 @@ static void ai_talk_button_event_cb(lv_event_t *e)
     }
     
     /* 检查网络状态 */
-    if (!net_manager_can_run_ai()) {
-        const char *network_text = ai_ui_network_status_text(net_manager_get_service_state(),
-                                                             xiaozhi_service_get_state());
+    if (!app_network_can_run(APP_NETWORK_CLIENT_AI))
+    {
+        app_network_snapshot_t snapshot;
+        const char *network_text;
+
+        app_network_get_snapshot(&snapshot);
+        network_text = ai_ui_network_status_text(snapshot.state,
+                                                 xiaozhi_service_get_state());
         ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
                                 sizeof(s_ai_copy_cache), network_text);
         update_network_status();
@@ -524,7 +550,7 @@ static void ai_talk_button_event_cb(lv_event_t *e)
         return;
     }
 
-    if (s_stop_pending)
+    if (ai_ui_stop_pending())
     {
         update_talk_button_text(XZ_SERVICE_READY);
         lv_label_set_text(s_ai_copy_label, ui_i18n_pick("正在发送给小智，请稍候...", "Sending to Xiaozhi, please wait..."));
@@ -533,7 +559,7 @@ static void ai_talk_button_event_cb(lv_event_t *e)
 
     if (state == XZ_SERVICE_LISTENING)
     {
-        s_stop_pending = true;
+        ai_ui_set_stop_pending(true);
         xiaozhi_service_stop_listening();
         update_talk_button_text(XZ_SERVICE_READY);
         lv_label_set_text(s_ai_mouth_label, ui_i18n_pick("正在发送", "Sending"));
@@ -541,7 +567,7 @@ static void ai_talk_button_event_cb(lv_event_t *e)
         return;
     }
 
-    s_stop_pending = false;
+    ai_ui_set_stop_pending(false);
     if (xiaozhi_service_start_listening() != 0)
     {
         ai_set_label_if_changed(s_ai_copy_label, s_ai_copy_cache,
@@ -593,9 +619,9 @@ void ui_AI_Dou_screen_init(void)
     ai_ui_pending_lock();
     memset(&s_ai_pending, 0, sizeof(s_ai_pending));
     ai_ui_pending_unlock();
-    s_stop_pending = false;
+    ai_ui_set_stop_pending(false);
     s_ai_last_tts_tick = 0;
-    s_ai_last_network_state = (net_manager_service_state_t)-1;
+    s_ai_last_network_state = (app_network_state_t)-1;
     s_ai_last_service_state = (xz_service_state_t)-1;
     s_ai_prev_service_state = (xz_service_state_t)-1;
     memset(s_ai_mouth_cache, 0, sizeof(s_ai_mouth_cache));
@@ -729,9 +755,9 @@ void ui_AI_Dou_screen_destroy(void)
         rt_mutex_delete(s_ai_pending_mutex);
         s_ai_pending_mutex = RT_NULL;
     }
-    s_stop_pending = false;
+    ai_ui_set_stop_pending(false);
     s_ai_last_tts_tick = 0;
-    s_ai_last_network_state = (net_manager_service_state_t)-1;
+    s_ai_last_network_state = (app_network_state_t)-1;
     s_ai_last_service_state = (xz_service_state_t)-1;
     s_ai_prev_service_state = (xz_service_state_t)-1;
     memset(s_ai_mouth_cache, 0, sizeof(s_ai_mouth_cache));

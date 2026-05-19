@@ -237,6 +237,7 @@ int dfs_mount(const char   *device_name,
     struct dfs_filesystem *fs = NULL;
     char *fullpath = NULL;
     rt_device_t dev_id;
+    int result;
 
     /* open specific device */
     if (device_name == NULL)
@@ -345,7 +346,8 @@ int dfs_mount(const char   *device_name,
     }
 
     /* call mount of this filesystem */
-    if ((*ops)->mount(fs, rwflag, data) < 0)
+    result = (*ops)->mount(fs, rwflag, data);
+    if (result < 0)
     {
         /* close device */
         if (dev_id != NULL)
@@ -356,6 +358,7 @@ int dfs_mount(const char   *device_name,
         /* clear filesystem table entry */
         memset(fs, 0, sizeof(struct dfs_filesystem));
 
+        rt_set_errno(result);
         goto err1;
     }
 
@@ -589,8 +592,8 @@ int df(const char *path)
         cap = cap / 1024;
     }
 
-    rt_kprintf("disk free: %d.%d %s [ %d block, %d bytes per block ]\n",
-               (unsigned long)cap, minor, unit_str[unit_index], buffer.f_bfree, buffer.f_bsize);
+    rt_kprintf("disk free: %d.%d %s [ %d block, %d bytes per block ] [total block %d total size %d]\n",
+               (unsigned long)cap, minor, unit_str[unit_index], buffer.f_bfree, buffer.f_bsize, buffer.f_blocks, buffer.f_blocks * buffer.f_bsize);
     return 0;
 }
 FINSH_FUNCTION_EXPORT(df, get disk free);

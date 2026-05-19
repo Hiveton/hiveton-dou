@@ -37,8 +37,12 @@ enum DeviceState
 };
     #ifdef XIAOZHI_USING_MQTT
 extern enum DeviceState mqtt_g_state;
+enum DeviceState xz_mqtt_get_device_state(void);
+void xz_mqtt_set_device_state(enum DeviceState state);
     #else
 extern enum DeviceState web_g_state;
+enum DeviceState xz_websocket_get_device_state(void);
+void xz_websocket_set_device_state(enum DeviceState state);
     #endif
 typedef struct
 {

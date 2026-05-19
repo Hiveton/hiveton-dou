@@ -9,6 +9,7 @@
  */
 
 #include <rtthread.h>
+#include <rthw.h>
 #include <stdint.h>
 #include <string.h>
 #include "mem_section.h"
@@ -43,15 +44,22 @@ ALIGN(4) static uint8_t s_bt_psram_heap_pool[BT_PSRAM_HEAP_SIZE]
 
 static void bt_mem_ensure_ready(void)
 {
+    rt_base_t level;
+
     if (s_bt_psram_heap_ready)
     {
         return;
     }
 
-    rt_memheap_init(&s_bt_psram_heap, "bt_psram",
-                    s_bt_psram_heap_pool,
-                    sizeof(s_bt_psram_heap_pool));
-    s_bt_psram_heap_ready = RT_TRUE;
+    level = rt_hw_interrupt_disable();
+    if (!s_bt_psram_heap_ready)
+    {
+        rt_memheap_init(&s_bt_psram_heap, "bt_psram",
+                        s_bt_psram_heap_pool,
+                        sizeof(s_bt_psram_heap_pool));
+        s_bt_psram_heap_ready = RT_TRUE;
+    }
+    rt_hw_interrupt_enable(level);
 }
 
 static rt_bool_t bt_mem_total_size(rt_size_t size, rt_size_t *total_size)
@@ -80,18 +88,21 @@ static void bt_mem_record_alloc(rt_size_t total_size)
 {
     uint32_t bytes = (uint32_t)total_size;
 
+    rt_enter_critical();
     s_bt_pool_alloc_count++;
     s_bt_pool_active_bytes += bytes;
     if (s_bt_pool_active_bytes > s_bt_pool_high_water_bytes)
     {
         s_bt_pool_high_water_bytes = s_bt_pool_active_bytes;
     }
+    rt_exit_critical();
 }
 
 static void bt_mem_record_free(rt_size_t total_size)
 {
     uint32_t bytes = (uint32_t)total_size;
 
+    rt_enter_critical();
     s_bt_pool_free_count++;
     if (s_bt_pool_active_bytes >= bytes)
     {
@@ -100,6 +111,37 @@ static void bt_mem_record_free(rt_size_t total_size)
     else
     {
         s_bt_pool_active_bytes = 0U;
+    }
+    rt_exit_critical();
+}
+
+static void bt_mem_record_fail(rt_size_t size)
+{
+    uint32_t fail_count;
+    uint32_t max_fail_size;
+    uint32_t active_bytes;
+    uint32_t high_water_bytes;
+
+    rt_enter_critical();
+    s_bt_pool_fail_count++;
+    if (size > s_bt_pool_max_fail_size)
+    {
+        s_bt_pool_max_fail_size = (uint32_t)size;
+    }
+    fail_count = s_bt_pool_fail_count;
+    max_fail_size = s_bt_pool_max_fail_size;
+    active_bytes = s_bt_pool_active_bytes;
+    high_water_bytes = s_bt_pool_high_water_bytes;
+    rt_exit_critical();
+
+    if (bt_mem_should_log_fail(fail_count))
+    {
+        rt_kprintf("bt_mem: alloc failed size=%u active=%u high=%u fail=%u max_fail=%u\n",
+                   (uint32_t)size,
+                   active_bytes,
+                   high_water_bytes,
+                   fail_count,
+                   max_fail_size);
     }
 }
 
@@ -117,20 +159,7 @@ void *bt_mem_alloc(rt_size_t size)
     hdr = (bt_mem_hdr_t *)rt_memheap_alloc(&s_bt_psram_heap, total_size);
     if (hdr == RT_NULL)
     {
-        s_bt_pool_fail_count++;
-        if (size > s_bt_pool_max_fail_size)
-        {
-            s_bt_pool_max_fail_size = (uint32_t)size;
-        }
-        if (bt_mem_should_log_fail(s_bt_pool_fail_count))
-        {
-            rt_kprintf("bt_mem: alloc failed size=%u active=%u high=%u fail=%u max_fail=%u\n",
-                       (uint32_t)size,
-                       s_bt_pool_active_bytes,
-                       s_bt_pool_high_water_bytes,
-                       s_bt_pool_fail_count,
-                       s_bt_pool_max_fail_size);
-        }
+        bt_mem_record_fail(size);
         return RT_NULL;
     }
 

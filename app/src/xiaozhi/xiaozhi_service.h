@@ -100,10 +100,9 @@ void xiaozhi_service_set_kws_enable(bool enable);
 bool xiaozhi_service_get_kws_enable(void);
 
 /**
- * @brief 获取当前会话ID
- * @return 会话ID字符串，无会话返回NULL
+ * @brief 当前服务是否已有有效会话
  */
-const char* xiaozhi_service_get_session_id(void);
+bool xiaozhi_service_has_session_id(void);
 
 /**
  * @brief WebSocket/MQTT 层向服务层回灌实时状态

@@ -272,7 +272,6 @@ void ui_Weather_screen_init(void)
 
     ui_Weather = ui_create_screen_base();
     ui_top_nav_create(ui_Weather, UI_TOP_TAB_WEATHER);
-    ui_bottom_nav_create(ui_Weather, UI_BOTTOM_TAB_NONE);
 
     ui_create_label(ui_Weather,
                     ui_i18n_pick("实时天气", "Weather"),

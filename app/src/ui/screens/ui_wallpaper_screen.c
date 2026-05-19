@@ -12,6 +12,8 @@
 
 #include "dfs_fs.h"
 #include "dfs_posix.h"
+#include "app_watchdog.h"
+#include "../../app_tf_storage.h"
 #include "rtdevice.h"
 #include "rtthread.h"
 #include "../../config/app_config.h"
@@ -95,6 +97,32 @@ static lv_draw_buf_t s_wallpaper_draw_buf;
 static uint8_t *s_wallpaper_image_data;
 static bool s_wallpaper_force_full_refresh_pending = false;
 
+static bool ui_wallpaper_full_refresh_pending(void)
+{
+    bool pending;
+    rt_enter_critical();
+    pending = s_wallpaper_force_full_refresh_pending;
+    rt_exit_critical();
+    return pending;
+}
+
+static void ui_wallpaper_set_full_refresh_pending(bool pending)
+{
+    rt_enter_critical();
+    s_wallpaper_force_full_refresh_pending = pending;
+    rt_exit_critical();
+}
+
+static bool ui_wallpaper_take_full_refresh_pending(void)
+{
+    bool pending;
+    rt_enter_critical();
+    pending = s_wallpaper_force_full_refresh_pending;
+    s_wallpaper_force_full_refresh_pending = false;
+    rt_exit_critical();
+    return pending;
+}
+
 static void ui_wallpaper_queue_full_refresh_on_input(const char *source)
 {
     if (s_wallpaper_image_dsc.data == NULL)
@@ -102,9 +130,9 @@ static void ui_wallpaper_queue_full_refresh_on_input(const char *source)
         return;
     }
 
-    if (!s_wallpaper_force_full_refresh_pending)
+    if (!ui_wallpaper_full_refresh_pending())
     {
-        s_wallpaper_force_full_refresh_pending = true;
+        ui_wallpaper_set_full_refresh_pending(true);
         UI_EPD_REFRESH_LOG("wallpaper: full refresh queued by input source=%s\n",
                            source != NULL ? source : "?");
     }
@@ -112,7 +140,7 @@ static void ui_wallpaper_queue_full_refresh_on_input(const char *source)
 
 static bool ui_wallpaper_consume_pending_full_refresh(const char *reason)
 {
-    if (!s_wallpaper_force_full_refresh_pending)
+    if (!ui_wallpaper_take_full_refresh_pending())
     {
         return false;
     }
@@ -120,7 +148,6 @@ static bool ui_wallpaper_consume_pending_full_refresh(const char *reason)
     UI_EPD_REFRESH_LOG("wallpaper: full refresh consume reason=%s\n",
                        reason != NULL ? reason : "?");
     ui_epd_refresh_policy_request_clean_refresh("wallpaper_pending");
-    s_wallpaper_force_full_refresh_pending = false;
     return true;
 }
 
@@ -161,13 +188,6 @@ static bool ui_wallpaper_find_next_image_path(const char *current_path,
                                               char *buffer,
                                               size_t buffer_size);
 
-static const char *s_wallpaper_tf_devices[] = {
-    "sd0",
-    "sd1",
-    "sd2",
-    "sdio0",
-};
-
 static bool ui_wallpaper_is_image_file(const char *name)
 {
     const char *ext;
@@ -191,8 +211,7 @@ static bool ui_wallpaper_is_image_file(const char *name)
 
 static bool ui_wallpaper_build_pic_dir(char *buffer, size_t buffer_size)
 {
-    size_t i;
-    int written;
+    DIR *dir = NULL;
 
     if (buffer == NULL || buffer_size == 0U)
     {
@@ -200,45 +219,16 @@ static bool ui_wallpaper_build_pic_dir(char *buffer, size_t buffer_size)
     }
 
     buffer[0] = '\0';
-
-    for (i = 0; i < sizeof(s_wallpaper_tf_devices) / sizeof(s_wallpaper_tf_devices[0]); ++i)
+    if (!app_tf_build_path("pic", buffer, buffer_size))
     {
-        rt_device_t device = rt_device_find(s_wallpaper_tf_devices[i]);
-        const char *mount_path;
-        DIR *dir = NULL;
+        return false;
+    }
 
-        if (device == RT_NULL)
-        {
-            continue;
-        }
-
-        mount_path = dfs_filesystem_get_mounted_path(device);
-        if (mount_path == NULL || mount_path[0] == '\0')
-        {
-            continue;
-        }
-
-        if (strcmp(mount_path, "/") == 0)
-        {
-            written = rt_snprintf(buffer, buffer_size, "/pic");
-        }
-        else
-        {
-            written = rt_snprintf(buffer, buffer_size, "%s/pic", mount_path);
-        }
-
-        if (written < 0 || (size_t)written >= buffer_size)
-        {
-            buffer[0] = '\0';
-            continue;
-        }
-
-        dir = opendir(buffer);
-        if (dir != NULL)
-        {
-            closedir(dir);
-            return true;
-        }
+    dir = opendir(buffer);
+    if (dir != NULL)
+    {
+        closedir(dir);
+        return true;
     }
 
     buffer[0] = '\0';
@@ -254,6 +244,7 @@ static bool ui_wallpaper_find_next_image_path(const char *current_path,
     DIR *dir = NULL;
     struct dirent *entry;
     bool return_next;
+    uint32_t scan_tick = 0U;
 
     if (buffer == NULL || buffer_size == 0U)
     {
@@ -275,10 +266,16 @@ static bool ui_wallpaper_find_next_image_path(const char *current_path,
         return false;
     }
 
+    app_watchdog_progress(APP_WDT_MODULE_UI);
     while ((entry = readdir(dir)) != NULL)
     {
         char candidate[256];
         int written;
+
+        if ((scan_tick++ & 0x0FU) == 0U)
+        {
+            app_watchdog_progress(APP_WDT_MODULE_UI);
+        }
 
         if (entry->d_name[0] == '.' || !ui_wallpaper_is_image_file(entry->d_name))
         {
@@ -309,6 +306,7 @@ static bool ui_wallpaper_find_next_image_path(const char *current_path,
                 return false;
             }
             closedir(dir);
+            app_watchdog_progress(APP_WDT_MODULE_UI);
             return true;
         }
 
@@ -319,6 +317,7 @@ static bool ui_wallpaper_find_next_image_path(const char *current_path,
     }
 
     closedir(dir);
+    app_watchdog_progress(APP_WDT_MODULE_UI);
 
     if (first_path[0] == '\0')
     {
@@ -680,9 +679,11 @@ static bool ui_wallpaper_read_file(const char *path, uint8_t **data_out, size_t 
             return false;
         }
         total_read += (size_t)read_size;
+        app_watchdog_progress(APP_WDT_MODULE_UI);
     }
 
     close(fd);
+    app_watchdog_progress(APP_WDT_MODULE_UI);
 
     *data_out = buffer;
     *size_out = (size_t)file_size;
@@ -982,6 +983,7 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
     context.source.fd = open(path, O_RDONLY, 0);
     context.source.size = 0;
     context.source.offset = 0;
+    app_watchdog_progress(APP_WDT_MODULE_UI);
 
     if (context.source.fd < 0)
     {
@@ -1089,6 +1091,7 @@ static bool ui_wallpaper_decode_jpeg_file(const char *path,
     }
 
     result = jd_decomp(&jd, ui_wallpaper_jpeg_output, (uint8_t)decode_scale);
+    app_watchdog_progress(APP_WDT_MODULE_UI);
     audio_mem_free(workbuf);
     close(context.source.fd);
     if (result != JDR_OK)
@@ -1337,8 +1340,17 @@ static void ui_wallpaper_render(void)
         return;
     }
 
+    app_watchdog_progress(APP_WDT_MODULE_UI);
+    {
+        uint32_t scan_tick = 0U;
+
     while ((entry = readdir(dir)) != NULL)
     {
+        if ((scan_tick++ & 0x0FU) == 0U)
+        {
+            app_watchdog_progress(APP_WDT_MODULE_UI);
+        }
+
         if (entry->d_name[0] == '.' || !ui_wallpaper_is_image_file(entry->d_name))
         {
             continue;
@@ -1357,15 +1369,19 @@ static void ui_wallpaper_render(void)
         if (ui_wallpaper_decode_file_to_image(s_wallpaper_image_path, &s_wallpaper_image_dsc))
         {
             rt_kprintf("wallpaper: decode ok path=%s\n", s_wallpaper_image_path);
+            app_watchdog_progress(APP_WDT_MODULE_UI);
             break;
         }
 
         rt_kprintf("wallpaper: decode failed path=%s reason=%s\n",
                    s_wallpaper_image_path,
                    s_wallpaper_last_error[0] != '\0' ? s_wallpaper_last_error : "unknown");
+        app_watchdog_progress(APP_WDT_MODULE_UI);
+    }
     }
 
     closedir(dir);
+    app_watchdog_progress(APP_WDT_MODULE_UI);
 
     if (s_wallpaper_image_dsc.data == NULL)
     {
@@ -1407,7 +1423,7 @@ void ui_Wallpaper_screen_init(void)
     memset(s_wallpaper_last_error, 0, sizeof(s_wallpaper_last_error));
     memset(s_wallpaper_status_text, 0, sizeof(s_wallpaper_status_text));
     memset(&s_wallpaper_image_dsc, 0, sizeof(s_wallpaper_image_dsc));
-    s_wallpaper_force_full_refresh_pending = true;
+    ui_wallpaper_set_full_refresh_pending(true);
     UI_EPD_REFRESH_LOG("wallpaper: full refresh queued on enter\n");
 
     ui_Wallpaper = ui_create_screen_base();
@@ -1460,7 +1476,7 @@ void ui_Wallpaper_screen_destroy(void)
         s_wallpaper_refs.render_timer = NULL;
     }
 
-    s_wallpaper_force_full_refresh_pending = false;
+    ui_wallpaper_set_full_refresh_pending(false);
     UI_EPD_REFRESH_LOG("wallpaper: full refresh request on exit\n");
     ui_epd_refresh_policy_request_clean_refresh("wallpaper_exit");
 

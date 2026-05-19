@@ -163,6 +163,8 @@ L1_NON_RET_BSS_SECT(drv_lcd_stack, static uint8_t drv_lcd_stack[2048]);
 L1_NON_RET_BSS_SECT_END
 
 static LCD_DrvTypeDef drv_lcd;
+static struct rt_messagequeue drv_lcd_static_mq;
+static rt_uint8_t drv_lcd_static_mq_pool[(RT_ALIGN(sizeof(LCD_MsgTypeDef), RT_ALIGN_SIZE) + sizeof(void *)) * 4];
 
 #ifdef BSP_USING_RAMLESS_LCD
     #ifdef BSP_PM_FREQ_SCALING
@@ -571,8 +573,17 @@ static rt_err_t api_lcd_init(rt_device_t dev)
     drv_lcd.brightness = MAX_BRIGHTNESS_LEVEL / 2;
     rt_sem_init(&drv_lcd.sem, "drv_lcd", 1, RT_IPC_FLAG_FIFO);
 
-    drv_lcd.mq = rt_mq_create("drv_lcd", sizeof(LCD_MsgTypeDef), 4, RT_IPC_FLAG_FIFO);
-    RT_ASSERT(drv_lcd.mq);
+    if (drv_lcd.mq == RT_NULL)
+    {
+        rt_err_t mq_ret = rt_mq_init(&drv_lcd_static_mq,
+                                     "drv_lcd",
+                                     drv_lcd_static_mq_pool,
+                                     sizeof(LCD_MsgTypeDef),
+                                     sizeof(drv_lcd_static_mq_pool),
+                                     RT_IPC_FLAG_FIFO);
+        RT_ASSERT(RT_EOK == mq_ret);
+        drv_lcd.mq = &drv_lcd_static_mq;
+    }
 
     uint16_t priority = RT_THREAD_PRIORITY_HIGH;
 #ifdef SOLUTION

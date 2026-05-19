@@ -19,6 +19,8 @@ typedef struct
     xiaozhi_home_screen_refs_t status_refs;
 } ui_screen_scaffold_t;
 
+typedef void (*ui_standard_screen_action_cb_t)(lv_event_t *e);
+
 void ui_helpers_init(void);
 void ui_helpers_deinit(void);
 void ui_helpers_reset_font_cache(void);
@@ -92,6 +94,15 @@ void ui_build_standard_screen_ex(ui_screen_scaffold_t *scaffold,
                                  const char *title,
                                  ui_screen_id_t back_target,
                                  bool enable_detail_touch);
+void ui_build_standard_screen_action(ui_screen_scaffold_t *scaffold,
+                                     lv_obj_t *screen,
+                                     const char *title,
+                                     ui_screen_id_t back_target,
+                                     const void *right_icon_src,
+                                     const char *right_text,
+                                     ui_standard_screen_action_cb_t right_cb,
+                                     void *right_user_data,
+                                     bool enable_detail_touch);
 void ui_build_standard_screen(ui_screen_scaffold_t *scaffold,
                               lv_obj_t *screen,
                               const char *title,

@@ -40,7 +40,7 @@ typedef enum
 } petgame_activity_type_t;
 
 void petgame_init(void);
-const petgame_state_t *petgame_get_state(void);
+bool petgame_get_state_copy(petgame_state_t *state);
 const char *petgame_get_level_name(void);
 const char *petgame_get_mood_text(void);
 void petgame_add_reading_seconds(uint32_t seconds);

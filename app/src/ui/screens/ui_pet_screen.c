@@ -310,6 +310,7 @@ static void pet_drain_activity_events(void)
 
 static void ui_pet_render_content(void)
 {
+    petgame_state_t state_snapshot;
     const petgame_state_t *state;
     const lv_image_dsc_t *face;
     const char *speech;
@@ -323,11 +324,11 @@ static void ui_pet_render_content(void)
         return;
     }
 
-    state = petgame_get_state();
-    if (state == NULL)
+    if (!petgame_get_state_copy(&state_snapshot))
     {
         return;
     }
+    state = &state_snapshot;
 
     pet_drain_activity_events();
     now = rt_tick_get();
@@ -567,7 +568,7 @@ void ui_Pet_screen_init(void)
 
     petgame_init();
 
-    ui_top_nav_create(ui_Pet, UI_TOP_TAB_NONE);
+    ui_top_nav_create(ui_Pet, UI_TOP_TAB_AI);
     pet_create_header(ui_Pet);
     pet_create_main_card(ui_Pet);
     pet_create_action_card(ui_Pet);

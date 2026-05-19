@@ -32,6 +32,14 @@ typedef enum
     NET_MANAGER_MODE_SLEEP,
 } net_manager_mode_t;
 
+typedef enum
+{
+    NET_MANAGER_BT_UI_OFF = 0,
+    NET_MANAGER_BT_UI_ON,
+    NET_MANAGER_BT_UI_CONNECTING,
+    NET_MANAGER_BT_UI_CONNECTED,
+} net_manager_bt_ui_state_t;
+
 typedef struct
 {
     net_manager_mode_t desired_mode;
@@ -48,6 +56,7 @@ typedef struct
 } net_manager_snapshot_t;
 
 rt_err_t net_manager_init(void);
+void net_manager_reload_config_mode(void);
 void net_manager_request_bt_mode(void);
 void net_manager_request_4g_mode(void);
 void net_manager_request_none_mode(void);
@@ -63,6 +72,7 @@ void net_manager_handle_bt_mailbox_event(rt_uint32_t bt_event);
 
 bool net_manager_bt_enabled(void);
 bool net_manager_bt_connected(void);
+net_manager_bt_ui_state_t net_manager_get_bt_ui_state(void);
 bool net_manager_4g_enabled(void);
 net_manager_service_state_t net_manager_get_service_state(void);
 bool net_manager_service_ready(void);

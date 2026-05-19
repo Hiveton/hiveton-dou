@@ -21,13 +21,20 @@ typedef struct
     lv_obj_t **screen;
     ui_runtime_screen_destroy_cb_t destroy;
     ui_runtime_screen_init_cb_t init;
+    bool delete_event_attached;
+    lv_obj_t *delete_event_screen;
 } ui_runtime_screen_entry_t;
 
-static const ui_runtime_screen_entry_t s_ui_runtime_screens[] = {
+static ui_runtime_screen_entry_t *ui_runtime_find_entry_by_ref(lv_obj_t **target);
+
+static ui_runtime_screen_entry_t s_ui_runtime_screens[] = {
     {UI_SCREEN_HOME, &ui_Home, ui_Home_screen_destroy, ui_Home_screen_init},
+    {UI_SCREEN_MORE, &ui_More, ui_More_screen_destroy, ui_More_screen_init},
     {UI_SCREEN_STANDBY, &ui_Standby, ui_Standby_screen_destroy, ui_Standby_screen_init},
     {UI_SCREEN_READING_LIST, &ui_Reading_List, ui_Reading_List_screen_destroy, ui_Reading_List_screen_init},
     {UI_SCREEN_READING_DETAIL, &ui_Reading_Detail, ui_Reading_Detail_screen_destroy, ui_Reading_Detail_screen_init},
+    {UI_SCREEN_READING_TOC, &ui_Reading_Toc, ui_Reading_Toc_screen_destroy, ui_Reading_Toc_screen_init},
+    {UI_SCREEN_READING_FONT, &ui_Reading_Font, ui_Reading_Font_screen_destroy, ui_Reading_Font_screen_init},
     {UI_SCREEN_PET, &ui_Pet, ui_Pet_screen_destroy, ui_Pet_screen_init},
     {UI_SCREEN_PET_RULES, &ui_Pet_Rules, ui_Pet_Rules_screen_destroy, ui_Pet_Rules_screen_init},
     {UI_SCREEN_AI_DOU, &ui_AI_Dou, ui_AI_Dou_screen_destroy, ui_AI_Dou_screen_init},
@@ -44,8 +51,12 @@ static const ui_runtime_screen_entry_t s_ui_runtime_screens[] = {
     {UI_SCREEN_SETTINGS, &ui_Settings, ui_Settings_screen_destroy, ui_Settings_screen_init},
     {UI_SCREEN_BRIGHTNESS, &ui_Brightness, ui_Brightness_screen_destroy, ui_Brightness_screen_init},
     {UI_SCREEN_LANGUAGE, &ui_Language, ui_Language_screen_destroy, ui_Language_screen_init},
+    {UI_SCREEN_SLEEP_TIME, &ui_Sleep_Time, ui_Sleep_Time_screen_destroy, ui_Sleep_Time_screen_init},
+    {UI_SCREEN_FILE_MANAGER, &ui_File_Manager, ui_File_Manager_screen_destroy, ui_File_Manager_screen_init},
+    {UI_SCREEN_FILE_MANAGER_DETAIL, &ui_File_Manager_Detail, ui_File_Manager_Detail_screen_destroy, ui_File_Manager_Detail_screen_init},
     {UI_SCREEN_WALLPAPER, &ui_Wallpaper, ui_Wallpaper_screen_destroy, ui_Wallpaper_screen_init},
     {UI_SCREEN_AI_WEATHER_SETTINGS, &ui_AI_Weather_Settings, ui_AI_Weather_Settings_screen_destroy, ui_AI_Weather_Settings_screen_init},
+    {UI_SCREEN_CALCULATOR, &ui_Calculator, ui_Calculator_screen_destroy, ui_Calculator_screen_init},
 };
 
 static bool ui_runtime_request_full_refresh_for_loaded_page_after_gray(ui_screen_id_t from,
@@ -68,6 +79,9 @@ static ui_screen_id_t s_ui_runtime_resume_screen = UI_SCREEN_HOME;
 static ui_screen_id_t s_ui_runtime_back_stack[16];
 static rt_uint8_t s_ui_runtime_back_count = 0;
 static bool s_ui_runtime_back_suppress = false;
+static rt_tick_t s_ui_runtime_last_status_bar_refresh_tick = 0U;
+static bool s_ui_runtime_status_bar_refresh_inited = false;
+static const rt_uint32_t UI_RUNTIME_STATUS_BAR_REFRESH_MIN_GAP_MS = 150U;
 
 #define UI_RUNTIME_IDLE_POLL_MS    1000U
 #define UI_RUNTIME_VOLUME_MIN      0
@@ -106,6 +120,8 @@ extern void ui_music_list_hardware_prev_page(void);
 extern void ui_music_list_hardware_next_page(void);
 extern void ui_settings_hardware_prev_page(void);
 extern void ui_settings_hardware_next_page(void);
+extern void ui_file_manager_detail_hardware_prev_page(void);
+extern void ui_file_manager_detail_hardware_next_page(void);
 extern void ui_calendar_hardware_prev_month(void);
 extern void ui_calendar_hardware_next_month(void);
 extern void ui_datetime_hardware_adjust(int direction);
@@ -153,32 +169,86 @@ static const ui_runtime_screen_entry_t *ui_runtime_find_entry_by_screen(lv_obj_t
 
 static void ui_runtime_screen_delete_event_cb(lv_event_t *e)
 {
-    lv_obj_t **screen_ref = (lv_obj_t **)lv_event_get_user_data(e);
+    ui_runtime_screen_entry_t *entry = (ui_runtime_screen_entry_t *)lv_event_get_user_data(e);
+    lv_obj_t *deleted_screen = lv_event_get_current_target(e);
 
-    if (screen_ref != NULL)
+    if (entry != NULL)
     {
-        ui_screen_refs_unregister(*screen_ref);
+        if (entry->delete_event_screen == deleted_screen)
+        {
+            entry->delete_event_screen = NULL;
+            entry->delete_event_attached = false;
+        }
+        ui_screen_refs_unregister(deleted_screen);
     }
 
-    if (screen_ref != NULL)
+    if (entry != NULL &&
+        entry->screen != NULL &&
+        *entry->screen == deleted_screen)
     {
-        *screen_ref = NULL;
+        *entry->screen = NULL;
     }
 }
 
 static void ui_runtime_attach_delete_hook(lv_obj_t **screen_ref)
 {
+    ui_runtime_screen_entry_t *entry;
+    lv_obj_t *screen;
+
     if (screen_ref == NULL || *screen_ref == NULL)
     {
         return;
     }
 
-    lv_obj_remove_event_cb(*screen_ref, ui_runtime_screen_delete_event_cb);
+    entry = ui_runtime_find_entry_by_ref(screen_ref);
+    screen = *screen_ref;
+    if (entry == NULL)
+    {
+        return;
+    }
 
-    lv_obj_add_event_cb(*screen_ref,
+    if (entry->delete_event_attached)
+    {
+        if (entry->delete_event_screen == screen)
+        {
+            return;
+        }
+
+        if (entry->delete_event_screen != NULL)
+        {
+            (void)lv_obj_remove_event_cb_with_user_data(entry->delete_event_screen,
+                                                       ui_runtime_screen_delete_event_cb,
+                                                       entry);
+        }
+    }
+
+    lv_obj_add_event_cb(screen,
                         ui_runtime_screen_delete_event_cb,
                         LV_EVENT_DELETE,
-                        screen_ref);
+                        entry);
+
+    entry->delete_event_attached = true;
+    entry->delete_event_screen = screen;
+}
+
+static void ui_runtime_clear_delete_hooks(void)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(s_ui_runtime_screens) / sizeof(s_ui_runtime_screens[0]); ++i)
+    {
+        ui_runtime_screen_entry_t *entry = &s_ui_runtime_screens[i];
+
+        if (entry->delete_event_attached && entry->delete_event_screen != NULL)
+        {
+            (void)lv_obj_remove_event_cb_with_user_data(entry->delete_event_screen,
+                                                       ui_runtime_screen_delete_event_cb,
+                                                       entry);
+        }
+
+        entry->delete_event_attached = false;
+        entry->delete_event_screen = NULL;
+    }
 }
 
 static void ui_runtime_notify_screen_leave(ui_screen_id_t active_id, ui_screen_id_t target_id)
@@ -202,7 +272,7 @@ static const ui_runtime_screen_entry_t *ui_runtime_find_entry_by_id(ui_screen_id
     return NULL;
 }
 
-static const ui_runtime_screen_entry_t *ui_runtime_find_entry_by_ref(lv_obj_t **target)
+static ui_runtime_screen_entry_t *ui_runtime_find_entry_by_ref(lv_obj_t **target)
 {
     size_t i;
 
@@ -219,7 +289,9 @@ static const ui_runtime_screen_entry_t *ui_runtime_find_entry_by_ref(lv_obj_t **
 
 static bool ui_runtime_screen_is_transient(ui_screen_id_t id)
 {
-    return id == UI_SCREEN_WALLPAPER;
+    return id == UI_SCREEN_WALLPAPER ||
+           id == UI_SCREEN_READING_TOC ||
+           id == UI_SCREEN_READING_FONT;
 }
 
 static void ui_runtime_back_push(ui_screen_id_t screen_id)
@@ -395,6 +467,8 @@ void ui_runtime_deinit(void)
         s_ui_runtime_idle_timer = NULL;
     }
 
+    ui_runtime_clear_delete_hooks();
+
     s_ui_runtime_first_present_done = false;
     s_ui_runtime_resume_screen = UI_SCREEN_HOME;
     s_ui_runtime_back_count = 0U;
@@ -496,6 +570,7 @@ void ui_runtime_switch_to(ui_screen_id_t target)
             lv_refr_now(NULL);
             s_ui_runtime_first_present_done = true;
         }
+        s_ui_runtime_back_suppress = false;
         return;
     }
 
@@ -526,13 +601,26 @@ void ui_runtime_switch_to(ui_screen_id_t target)
                             0,
                             false);
         ui_dispatch_set_active_screen(entry->id);
-        ui_force_refresh_global_status_bar();
+        {
+            rt_tick_t now_tick = rt_tick_get();
+            rt_tick_t min_gap_ticks = rt_tick_from_millisecond(UI_RUNTIME_STATUS_BAR_REFRESH_MIN_GAP_MS);
+            if (!s_ui_runtime_status_bar_refresh_inited ||
+                (now_tick - s_ui_runtime_last_status_bar_refresh_tick) >= min_gap_ticks)
+            {
+                ui_refresh_global_status_bar();
+                s_ui_runtime_last_status_bar_refresh_tick = now_tick;
+                s_ui_runtime_status_bar_refresh_inited = true;
+            }
+        }
         if (target == UI_SCREEN_READING_LIST)
         {
             ui_reading_list_request_enter_refresh();
         }
-        lv_obj_update_layout(target_screen);
-        lv_obj_invalidate(target_screen);
+        if (!s_ui_runtime_first_present_done)
+        {
+            lv_obj_update_layout(target_screen);
+            lv_obj_invalidate(target_screen);
+        }
 
         if (active_entry != NULL &&
             active_entry->screen != NULL &&
@@ -710,6 +798,32 @@ void ui_runtime_handle_hardkey_nav(int direction)
         return;
     }
 
+    if (active == UI_SCREEN_READING_TOC)
+    {
+        if (direction < 0)
+        {
+            ui_reading_toc_hardware_prev_page();
+        }
+        else
+        {
+            ui_reading_toc_hardware_next_page();
+        }
+        return;
+    }
+
+    if (active == UI_SCREEN_READING_FONT)
+    {
+        if (direction < 0)
+        {
+            ui_reading_font_hardware_prev_page();
+        }
+        else
+        {
+            ui_reading_font_hardware_next_page();
+        }
+        return;
+    }
+
     if (active == UI_SCREEN_READING_LIST)
     {
         if (direction < 0)
@@ -758,6 +872,19 @@ void ui_runtime_handle_hardkey_nav(int direction)
         else
         {
             ui_settings_hardware_next_page();
+        }
+        return;
+    }
+
+    if (active == UI_SCREEN_FILE_MANAGER_DETAIL)
+    {
+        if (direction < 0)
+        {
+            ui_file_manager_detail_hardware_prev_page();
+        }
+        else
+        {
+            ui_file_manager_detail_hardware_next_page();
         }
         return;
     }

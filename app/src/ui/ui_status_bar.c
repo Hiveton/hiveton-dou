@@ -11,6 +11,7 @@
 #include "ui_helpers.h"
 #include "ui_i18n.h"
 #include "../bq27220_monitor.h"
+#include "../network/app_network.h"
 #include "../network/net_manager.h"
 #include "../sleep_manager.h"
 #include "cat1_modem.h"
@@ -45,10 +46,11 @@ typedef struct
     uint8_t aw_fault_status;
     int bt_visual_state;
     int network_visual_state;
-    net_manager_mode_t desired_mode;
-    net_manager_link_t active_link;
+    app_network_mode_t desired_mode;
+    app_network_link_t active_link;
     bool bt_enabled;
     bool net_4g_enabled;
+    bool radios_suspended;
     char network_detail[16];
 } ui_status_bar_snapshot_t;
 
@@ -70,11 +72,93 @@ static volatile int s_status_pending_charge = -1;
 static volatile int s_status_pending_battery_percent = -1;
 static int s_status_applied_charge = -1;
 static int s_status_applied_battery_percent = -1;
+static bool s_status_charge_async_pending = false;
+static bool s_status_battery_async_pending = false;
 static int s_status_last_bt_icon_state = -1;
 static int s_status_last_network_icon_state = -1;
 static bool s_status_last_net_4g_enabled = false;
 static char s_status_last_network_text[16];
 static ui_status_bar_snapshot_t s_status_bar_snapshot = {0};
+
+static void ui_status_bar_snapshot_load(ui_status_bar_snapshot_t *snapshot)
+{
+    if (snapshot == NULL)
+    {
+        return;
+    }
+
+    rt_enter_critical();
+    *snapshot = s_status_bar_snapshot;
+    rt_exit_critical();
+}
+
+static void ui_status_bar_snapshot_store(const ui_status_bar_snapshot_t *snapshot)
+{
+    if (snapshot == NULL)
+    {
+        return;
+    }
+
+    rt_enter_critical();
+    s_status_bar_snapshot = *snapshot;
+    rt_exit_critical();
+}
+
+static void ui_status_bar_snapshot_invalidate(void)
+{
+    rt_enter_critical();
+    memset(&s_status_bar_snapshot, 0, sizeof(s_status_bar_snapshot));
+    s_status_bar_snapshot.valid = false;
+    rt_exit_critical();
+}
+
+static bool ui_status_bar_try_mark_refresh_thread_started(void)
+{
+    bool already_started;
+
+    rt_enter_critical();
+    already_started = s_status_bar_refresh_thread_started;
+    if (!already_started)
+    {
+        s_status_bar_refresh_thread_started = true;
+    }
+    rt_exit_critical();
+
+    return !already_started;
+}
+
+static void ui_status_bar_clear_refresh_thread_started(void)
+{
+    rt_enter_critical();
+    s_status_bar_refresh_thread_started = false;
+    rt_exit_critical();
+}
+
+static int ui_status_bar_effective_charge_locked(void)
+{
+    return (s_status_pending_charge >= 0) ? s_status_pending_charge : s_status_applied_charge;
+}
+
+static int ui_status_bar_effective_battery_locked(void)
+{
+    return (s_status_pending_battery_percent >= 0) ?
+           s_status_pending_battery_percent :
+           s_status_applied_battery_percent;
+}
+
+static void ui_status_bar_get_pending_snapshot(int *battery_percent, int *charge_state)
+{
+    rt_enter_critical();
+    if (battery_percent != NULL)
+    {
+        *battery_percent = ui_status_bar_effective_battery_locked();
+    }
+    if (charge_state != NULL)
+    {
+        *charge_state = ui_status_bar_effective_charge_locked();
+    }
+    rt_exit_critical();
+}
 
 static lv_coord_t ui_status_bar_screen_width(void)
 {
@@ -277,6 +361,7 @@ static void ui_status_bar_capture_snapshot(ui_status_bar_snapshot_t *snapshot)
     date_time_t current_time;
     bq27220_power_snapshot_t power_snapshot;
     weather_info_t current_weather = {0};
+    app_network_snapshot_t app_snapshot;
     bool use_fallback_time = false;
     char cat1_detail[16];
 
@@ -342,42 +427,40 @@ static void ui_status_bar_capture_snapshot(ui_status_bar_snapshot_t *snapshot)
     }
     else
     {
-        snapshot->battery_percent = (s_status_pending_battery_percent >= 0) ?
-                                    s_status_pending_battery_percent :
-                                    s_status_applied_battery_percent;
-        snapshot->charge_state = (s_status_pending_charge >= 0) ?
-                                 s_status_pending_charge :
-                                 s_status_applied_charge;
+        ui_status_bar_get_pending_snapshot(&snapshot->battery_percent,
+                                           &snapshot->charge_state);
     }
 
     snapshot->bt_visual_state = (int)ui_status_bar_get_bluetooth_state();
-    snapshot->desired_mode = net_manager_get_desired_mode();
-    snapshot->active_link = net_manager_get_active_link();
+    app_network_get_snapshot(&app_snapshot);
+    snapshot->desired_mode = app_snapshot.desired_mode;
+    snapshot->active_link = app_snapshot.active_link;
     snapshot->bt_enabled = net_manager_bt_enabled();
     snapshot->net_4g_enabled = net_manager_4g_enabled();
+    snapshot->radios_suspended = app_snapshot.radios_suspended;
     snapshot->network_visual_state = ui_status_bar_get_cat1_visual_state(cat1_detail, sizeof(cat1_detail));
 
-    if (snapshot->active_link == NET_MANAGER_LINK_BT_PAN)
+    if (snapshot->radios_suspended)
+    {
+        rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "睡眠");
+    }
+    else if (snapshot->active_link == APP_NETWORK_LINK_BT_PAN)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "在线");
     }
-    else if (snapshot->active_link == NET_MANAGER_LINK_4G_CAT1)
+    else if (snapshot->active_link == APP_NETWORK_LINK_4G_CAT1)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s", cat1_detail);
     }
-    else if (snapshot->desired_mode == NET_MANAGER_MODE_BT)
+    else if (snapshot->desired_mode == APP_NETWORK_MODE_BT)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s",
                     snapshot->bt_enabled ? "蓝牙" : "蓝牙关闭");
     }
-    else if (snapshot->desired_mode == NET_MANAGER_MODE_4G)
+    else if (snapshot->desired_mode == APP_NETWORK_MODE_4G)
     {
         rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "%s",
                     snapshot->net_4g_enabled ? cat1_detail : "4G关闭");
-    }
-    else if (snapshot->desired_mode == NET_MANAGER_MODE_SLEEP)
-    {
-        rt_snprintf(snapshot->network_detail, sizeof(snapshot->network_detail), "睡眠");
     }
     else
     {
@@ -412,6 +495,7 @@ static bool ui_status_bar_snapshot_equal(const ui_status_bar_snapshot_t *lhs,
            lhs->active_link == rhs->active_link &&
            lhs->bt_enabled == rhs->bt_enabled &&
            lhs->net_4g_enabled == rhs->net_4g_enabled &&
+           lhs->radios_suspended == rhs->radios_suspended &&
            strcmp(lhs->network_detail, rhs->network_detail) == 0;
 }
 
@@ -488,16 +572,17 @@ static void ui_status_bar_refresh_datetime(void)
 static void ui_status_bar_refresh_connection_icons(bool force)
 {
     const ui_status_bar_snapshot_t *snapshot = &s_status_bar_snapshot;
-    net_manager_link_t active_link = snapshot->active_link;
+    app_network_link_t active_link = snapshot->active_link;
     bool bt_enabled = snapshot->bt_enabled;
     bool net_4g_enabled = snapshot->net_4g_enabled;
+    bool radios_suspended = snapshot->radios_suspended;
     const char *network_text = snapshot->network_detail;
     size_t i;
 
     if (!force &&
         s_status_last_bt_icon_state == (bt_enabled ? 1 : 0) &&
         s_status_last_network_icon_state == (int)active_link &&
-        s_status_last_net_4g_enabled == net_4g_enabled &&
+        s_status_last_net_4g_enabled == (net_4g_enabled && !radios_suspended) &&
         strcmp(s_status_last_network_text, network_text) == 0)
     {
         return;
@@ -505,7 +590,7 @@ static void ui_status_bar_refresh_connection_icons(bool force)
 
     s_status_last_bt_icon_state = bt_enabled ? 1 : 0;
     s_status_last_network_icon_state = (int)active_link;
-    s_status_last_net_4g_enabled = net_4g_enabled;
+    s_status_last_net_4g_enabled = net_4g_enabled && !radios_suspended;
     rt_snprintf(s_status_last_network_text, sizeof(s_status_last_network_text), "%s", network_text);
 
     for (i = 0; i < sizeof(s_status_bar_refs) / sizeof(s_status_bar_refs[0]); ++i)
@@ -529,8 +614,9 @@ static void ui_status_bar_refresh_connection_icons(bool force)
             ui_img_set_src(refs->network_icon, &network_icon_img);
             ui_status_bar_set_object_hidden(refs->network_icon, false);
             lv_obj_set_style_opa(refs->network_icon,
-                                 (active_link == NET_MANAGER_LINK_BT_PAN ||
-                                  active_link == NET_MANAGER_LINK_4G_CAT1) ? LV_OPA_COVER : LV_OPA_50,
+                                 (!radios_suspended &&
+                                  (active_link == APP_NETWORK_LINK_BT_PAN ||
+                                   active_link == APP_NETWORK_LINK_4G_CAT1)) ? LV_OPA_COVER : LV_OPA_50,
                                  0);
         }
 
@@ -545,13 +631,18 @@ static void ui_status_bar_refresh_connection_icons(bool force)
 static void ui_status_bar_refresh_charging_icons(void)
 {
     size_t i;
+    int charge;
 
+    rt_enter_critical();
     if (s_status_pending_charge < 0)
     {
+        rt_exit_critical();
         return;
     }
 
     s_status_applied_charge = s_status_pending_charge;
+    charge = s_status_applied_charge;
+    rt_exit_critical();
 
     for (i = 0; i < sizeof(s_status_bar_refs) / sizeof(s_status_bar_refs[0]); ++i)
     {
@@ -570,7 +661,7 @@ static void ui_status_bar_refresh_charging_icons(void)
         }
 
         hidden_now = lv_obj_has_flag(icon, LV_OBJ_FLAG_HIDDEN);
-        if (s_status_applied_charge != 0)
+        if (charge != 0)
         {
             if (hidden_now)
             {
@@ -588,10 +679,13 @@ static void ui_status_bar_refresh_battery_percent(void)
 {
     size_t i;
     char battery_text[8];
-    int percent = s_status_pending_battery_percent;
+    int percent;
 
+    rt_enter_critical();
+    percent = s_status_pending_battery_percent;
     if (percent < 0)
     {
+        rt_exit_critical();
         return;
     }
     if (percent > 100)
@@ -600,6 +694,7 @@ static void ui_status_bar_refresh_battery_percent(void)
     }
 
     s_status_applied_battery_percent = percent;
+    rt_exit_critical();
     rt_snprintf(battery_text, sizeof(battery_text), "%d%%", percent);
 
     for (i = 0; i < sizeof(s_status_bar_refs) / sizeof(s_status_bar_refs[0]); ++i)
@@ -634,12 +729,18 @@ static void ui_status_bar_refresh_battery_percent(void)
 static void ui_status_bar_async_refresh_charge_cb(void *user_data)
 {
     LV_UNUSED(user_data);
+    rt_enter_critical();
+    s_status_charge_async_pending = false;
+    rt_exit_critical();
     ui_status_bar_refresh_charging_icons();
 }
 
 static void ui_status_bar_async_refresh_battery_cb(void *user_data)
 {
     LV_UNUSED(user_data);
+    rt_enter_critical();
+    s_status_battery_async_pending = false;
+    rt_exit_critical();
     ui_status_bar_refresh_battery_percent();
 }
 
@@ -708,20 +809,25 @@ static void ui_status_bar_refresh_thread_entry(void *parameter)
 
 static void ui_status_bar_ensure_refresh_thread(void)
 {
-    if (!s_status_bar_refresh_thread_started)
+    if (!ui_status_bar_try_mark_refresh_thread_started())
     {
-        if (rt_thread_init(&s_status_bar_refresh_thread,
-                           "ui_statu",
-                           ui_status_bar_refresh_thread_entry,
-                           NULL,
-                           s_status_bar_refresh_thread_stack,
-                           sizeof(s_status_bar_refresh_thread_stack),
-                           UI_STATUS_BAR_REFRESH_THREAD_PRIORITY,
-                           UI_STATUS_BAR_REFRESH_THREAD_TICK) == RT_EOK)
-        {
-            rt_thread_startup(&s_status_bar_refresh_thread);
-            s_status_bar_refresh_thread_started = true;
-        }
+        return;
+    }
+
+    if (rt_thread_init(&s_status_bar_refresh_thread,
+                       "ui_statu",
+                       ui_status_bar_refresh_thread_entry,
+                       NULL,
+                       s_status_bar_refresh_thread_stack,
+                       sizeof(s_status_bar_refresh_thread_stack),
+                       UI_STATUS_BAR_REFRESH_THREAD_PRIORITY,
+                       UI_STATUS_BAR_REFRESH_THREAD_TICK) == RT_EOK)
+    {
+        rt_thread_startup(&s_status_bar_refresh_thread);
+    }
+    else
+    {
+        ui_status_bar_clear_refresh_thread_started();
     }
 }
 
@@ -907,14 +1013,14 @@ void ui_status_bar_component_refresh(void)
     bool charge_changed;
     bool connection_changed;
 
-    old_snapshot = s_status_bar_snapshot;
+    ui_status_bar_snapshot_load(&old_snapshot);
     ui_status_bar_capture_snapshot(&snapshot);
     if (ui_status_bar_snapshot_equal(&old_snapshot, &snapshot))
     {
         return;
     }
 
-    s_status_bar_snapshot = snapshot;
+    ui_status_bar_snapshot_store(&snapshot);
 
     time_changed = (old_snapshot.time_valid != snapshot.time_valid) ||
                    (old_snapshot.year != snapshot.year) ||
@@ -941,13 +1047,17 @@ void ui_status_bar_component_refresh(void)
     }
     if (battery_changed)
     {
+        rt_enter_critical();
         s_status_pending_battery_percent = snapshot.battery_percent;
+        rt_exit_critical();
         ui_top_nav_update_battery(snapshot.battery_percent, snapshot.charge_state);
         ui_status_bar_refresh_battery_percent();
     }
     if (charge_changed)
     {
+        rt_enter_critical();
         s_status_pending_charge = snapshot.charge_state;
+        rt_exit_critical();
         ui_top_nav_update_battery(snapshot.battery_percent, snapshot.charge_state);
         ui_status_bar_refresh_charging_icons();
     }
@@ -959,8 +1069,7 @@ void ui_status_bar_component_refresh(void)
 
 void ui_status_bar_component_force_refresh(void)
 {
-    memset(&s_status_bar_snapshot, 0, sizeof(s_status_bar_snapshot));
-    s_status_bar_snapshot.valid = false;
+    ui_status_bar_snapshot_invalidate();
     s_status_last_bt_icon_state = -1;
     s_status_last_network_icon_state = -1;
     s_status_last_net_4g_enabled = false;
@@ -971,47 +1080,74 @@ void ui_status_bar_component_force_refresh(void)
 void ui_status_bar_component_update_charge(uint8_t is_charging)
 {
     int pending = is_charging ? 1 : 0;
-    int percent = (s_status_pending_battery_percent >= 0) ?
-                  s_status_pending_battery_percent : s_status_applied_battery_percent;
+    int percent;
+    bool should_schedule = false;
 
+    ui_status_bar_get_pending_snapshot(&percent, NULL);
     if (percent < 0)
     {
         percent = 100;
     }
     ui_top_nav_update_battery((uint8_t)percent, (uint8_t)pending);
 
+    rt_enter_critical();
     if (s_status_pending_charge == pending ||
         (s_status_pending_charge < 0 && s_status_applied_charge == pending))
     {
+        rt_exit_critical();
         return;
     }
 
     s_status_pending_charge = pending;
-    lv_async_call(ui_status_bar_async_refresh_charge_cb, NULL);
+    if (!s_status_charge_async_pending)
+    {
+        s_status_charge_async_pending = true;
+        should_schedule = true;
+    }
+    rt_exit_critical();
+
+    if (should_schedule)
+    {
+        lv_async_call(ui_status_bar_async_refresh_charge_cb, NULL);
+    }
 }
 
 void ui_status_bar_component_update_battery_percent(uint8_t percent)
 {
+    int charging;
+    bool should_schedule = false;
+
     if (percent > 100U)
     {
         percent = 100U;
     }
 
-    int charging = (s_status_pending_charge >= 0) ?
-                   s_status_pending_charge : s_status_applied_charge;
+    ui_status_bar_get_pending_snapshot(NULL, &charging);
     if (charging < 0)
     {
         charging = 0;
     }
     ui_top_nav_update_battery(percent, (uint8_t)charging);
 
+    rt_enter_critical();
     if (s_status_pending_battery_percent == (int)percent ||
         (s_status_pending_battery_percent < 0 &&
          s_status_applied_battery_percent == (int)percent))
     {
+        rt_exit_critical();
         return;
     }
 
     s_status_pending_battery_percent = (int)percent;
-    lv_async_call(ui_status_bar_async_refresh_battery_cb, NULL);
+    if (!s_status_battery_async_pending)
+    {
+        s_status_battery_async_pending = true;
+        should_schedule = true;
+    }
+    rt_exit_critical();
+
+    if (should_schedule)
+    {
+        lv_async_call(ui_status_bar_async_refresh_battery_cb, NULL);
+    }
 }

@@ -1,7 +1,10 @@
 SET(SOURCES screens/ui_home_screen.c
+    screens/ui_more_screen.c
     screens/ui_standby_screen.c
     screens/ui_reading_list_screen.c
     screens/ui_reading_detail_screen.c
+    screens/ui_reading_toc_screen.c
+    screens/ui_reading_font_screen.c
     screens/ui_pet_screen.c
     screens/ui_pet_rules_screen.c
     screens/ui_ai_dou_screen.c
@@ -9,6 +12,7 @@ SET(SOURCES screens/ui_home_screen.c
     screens/ui_datetime_screen.c
     screens/ui_weather_screen.c
     screens/ui_calendar_screen.c
+    screens/ui_calculator_screen.c
     screens/ui_status_detail_screen.c
     screens/ui_about_screen.c
     screens/ui_recorder_screen.c
@@ -18,6 +22,9 @@ SET(SOURCES screens/ui_home_screen.c
     screens/ui_settings_screen.c
     screens/ui_brightness_screen.c
     screens/ui_language_screen.c
+    screens/ui_sleep_time_screen.c
+    screens/ui_file_manager_screen.c
+    screens/ui_file_manager_detail_screen.c
     screens/ui_wallpaper_screen.c
     screens/ui_ai_weather_settings_screen.c
     home_screen.c

@@ -53,7 +53,7 @@ __RAM_SIZE = HCPU_RAM_DATA_SIZE;
   </h>
   -----------------------------------------------------------------------------*/
 __STACK_SIZE = 0x00002000;
-__HEAP_SIZE  = 0x00000C00;
+__HEAP_SIZE  = 0x00004000;
 
 __ROM_EX_BASE = HCPU_RO_DATA_START_ADDR;
 __ROM_EX_SIZE = HCPU_RO_DATA_SIZE;

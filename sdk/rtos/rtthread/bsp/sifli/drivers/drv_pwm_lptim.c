@@ -376,7 +376,7 @@ static int bf0_pwm_init_lp(void)
             LOG_D("%s init success", bf0_pwm_obj[i].name);
 
             /* register pwm device */
-            if (rt_device_pwm_register(rt_calloc(1, sizeof(struct rt_device_pwm)), bf0_pwm_obj[i].name, &drv_ops, &bf0_pwm_obj[i]) == RT_EOK)
+            if (rt_device_pwm_register(&bf0_pwm_obj[i].pwm_device, bf0_pwm_obj[i].name, &drv_ops, &bf0_pwm_obj[i]) == RT_EOK)
             {
 
                 LOG_D("%s register success", bf0_pwm_obj[i].name);
@@ -404,4 +404,3 @@ INIT_DEVICE_EXPORT(bf0_pwm_init_lp);
 /// @} bsp_sample
 
 /// @} file
-

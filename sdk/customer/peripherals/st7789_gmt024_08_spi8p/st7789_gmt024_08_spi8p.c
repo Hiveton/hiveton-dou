@@ -371,6 +371,7 @@ static uint16_t s_dirty_y1 = 0;
 static uint8_t s_partial_refresh_count = 0;
 static uint8_t s_epd_stats_dump_count = 0;
 static rt_mutex_t s_epd_flush_mutex = RT_NULL;
+static struct rt_mutex s_epd_flush_mutex_static;
 
 static LCDC_InitTypeDef lcdc_int_cfg = {
     .lcd_itf = LCDC_INTF_SPI_DCX_1DATA,
@@ -456,6 +457,7 @@ static uint16_t s_epd_gray4_experiment_x1 = 0;
 static uint16_t s_epd_gray4_experiment_y1 = 0;
 
 static rt_sem_t epd_busy_sem = RT_NULL;
+static struct rt_semaphore epd_busy_sem_static;
 
 static void epd_flush_mutex_init(void)
 {
@@ -464,10 +466,13 @@ static void epd_flush_mutex_init(void)
         return;
     }
 
-    s_epd_flush_mutex = rt_mutex_create("epd_flush", RT_IPC_FLAG_PRIO);
-    if (s_epd_flush_mutex == RT_NULL)
+    if (rt_mutex_init(&s_epd_flush_mutex_static, "epd_flush", RT_IPC_FLAG_PRIO) == RT_EOK)
     {
-        rt_kprintf("EPD flush mutex create failed\n");
+        s_epd_flush_mutex = &s_epd_flush_mutex_static;
+    }
+    else
+    {
+        rt_kprintf("EPD flush mutex init failed\n");
     }
 }
 
@@ -1800,10 +1805,13 @@ static void epd_sem_init(void)
     {
         return;
     }
-    epd_busy_sem = rt_sem_create("epd_busy", 0, RT_IPC_FLAG_FIFO);
+    if (rt_sem_init(&epd_busy_sem_static, "epd_busy", 0, RT_IPC_FLAG_FIFO) == RT_EOK)
+    {
+        epd_busy_sem = &epd_busy_sem_static;
+    }
     if (epd_busy_sem == RT_NULL)
     {
-        rt_kprintf("EPD busy semaphore create failed!\n");
+        rt_kprintf("EPD busy semaphore init failed!\n");
         return;
     }
     rt_pin_mode(2, PIN_MODE_INPUT);

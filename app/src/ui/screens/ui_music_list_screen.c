@@ -73,6 +73,7 @@ static void ui_music_list_card_event_cb(lv_event_t *e)
 static void ui_music_list_show_card(uint16_t slot_index, uint16_t item_index)
 {
     ui_music_list_card_refs_t *refs;
+    char title[96];
     char subtitle[64];
 
     if (slot_index >= UI_MUSIC_LIST_VISIBLE_COUNT)
@@ -94,7 +95,8 @@ static void ui_music_list_show_card(uint16_t slot_index, uint16_t item_index)
     lv_obj_clear_flag(refs->card, LV_OBJ_FLAG_HIDDEN);
     lv_obj_clear_state(refs->card, LV_STATE_DISABLED);
     lv_obj_add_flag(refs->card, LV_OBJ_FLAG_CLICKABLE);
-    lv_label_set_text(refs->title_label, music_service_get_title(item_index));
+    music_service_get_title_copy(item_index, title, sizeof(title));
+    lv_label_set_text(refs->title_label, title);
     lv_label_set_text(refs->subtitle_label, subtitle);
     lv_obj_set_user_data(refs->card, (void *)(uintptr_t)item_index);
 }
@@ -270,8 +272,8 @@ void ui_Music_List_screen_init(void)
     (void)music_service_refresh();
 
     ui_Music_List = ui_create_screen_base();
-    ui_top_nav_create(ui_Music_List, UI_TOP_TAB_MUSIC);
-    ui_bottom_nav_create(ui_Music_List, UI_BOTTOM_TAB_NONE);
+    ui_top_nav_create(ui_Music_List, UI_TOP_TAB_AI);
+    ui_bottom_nav_create(ui_Music_List, UI_BOTTOM_TAB_MUSIC);
 
     ui_create_label(ui_Music_List,
                     ui_i18n_pick("本地音乐", "Music"),

@@ -28,8 +28,15 @@ extern int Image$$RW_IRAM1$$ZI$$Limit;
 extern int Image$$RW_IRAM1$$ZI$$Limit;
 #define HEAP_BEGIN      ((void *)&Image$$RW_IRAM1$$ZI$$Limit)
 #elif defined ( __GNUC__ )
+#ifdef SOC_BF0_HCPU
+extern int __StackTop;
+extern int __HeapLimit;
+#define HEAP_BEGIN      ((void *)&__StackTop)
+#define HEAP_END        ((uint32_t)&__HeapLimit)
+#else
 extern int __bss_end;
 #define HEAP_BEGIN      ((void *)&__bss_end)
+#endif
 #endif
 
 #ifdef SOC_BF0_HCPU

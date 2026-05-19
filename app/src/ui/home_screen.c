@@ -9,6 +9,24 @@
 static const uint8_t s_transparent_img_data[] = {0x00};
 static rt_bool_t s_ui_initialized = RT_FALSE;
 
+static rt_bool_t home_screen_ui_initialized(void)
+{
+    rt_bool_t initialized;
+
+    rt_enter_critical();
+    initialized = s_ui_initialized;
+    rt_exit_critical();
+
+    return initialized;
+}
+
+static void home_screen_set_ui_initialized(rt_bool_t initialized)
+{
+    rt_enter_critical();
+    s_ui_initialized = initialized;
+    rt_exit_critical();
+}
+
 RT_WEAK const lv_image_dsc_t ble = {
     .header = {.magic = LV_IMAGE_HEADER_MAGIC, .cf = LV_COLOR_FORMAT_A8, .flags = 0, .w = 1, .h = 1, .stride = 1, .reserved_2 = 0},
     .data_size = sizeof(s_transparent_img_data),
@@ -67,13 +85,13 @@ RT_WEAK const lv_image_dsc_t no_power2 = {
 
 static void ensure_ui_initialized(void)
 {
-    if (s_ui_initialized)
+    if (home_screen_ui_initialized())
     {
         return;
     }
 
     ui_init();
-    s_ui_initialized = RT_TRUE;
+    home_screen_set_ui_initialized(RT_TRUE);
 }
 
 rt_err_t home_screen_build(lv_event_cb_t home_event_cb,

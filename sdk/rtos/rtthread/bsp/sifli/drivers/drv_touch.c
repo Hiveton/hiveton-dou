@@ -43,6 +43,7 @@ static touch_drv_t current_driver = NULL;
 static struct rt_thread touch_thread;
 static rt_thread_t p_touch_thread;
 static rt_sem_t api_lock;
+static struct rt_semaphore api_lock_static;
 ALIGN(RT_ALIGN_SIZE)
 L1_NON_RET_BSS_SECT_BEGIN(touch_thread_stack)
 L1_NON_RET_BSS_SECT(touch_thread_stack, static char touch_thread_stack[1024]);
@@ -53,6 +54,7 @@ L1_NON_RET_BSS_SECT_END
 
 
 static rt_mutex_t more_data_lock;
+static struct rt_mutex more_data_lock_static;
 
 /*
     if pos_rec_beg == pos_rec_end, EMPTY
@@ -141,9 +143,24 @@ static void touch_write_more(rt_uint8_t  event, rt_uint16_t x, rt_uint16_t  y)
 
 
 static rt_list_t driver_list;
+#define TOUCH_STATIC_ISR_SEM_MAX 8
+static struct rt_semaphore touch_static_isr_sem[TOUCH_STATIC_ISR_SEM_MAX];
+static rt_uint8_t touch_static_isr_sem_used;
 
 void rt_touch_drivers_register(touch_drv_t drv)
 {
+    if ((drv != RT_NULL) && (drv->isr_sem == RT_NULL) &&
+            (touch_static_isr_sem_used < TOUCH_STATIC_ISR_SEM_MAX))
+    {
+        char name[] = "tpis0";
+        name[4] = (char)('0' + touch_static_isr_sem_used);
+        if (rt_sem_init(&touch_static_isr_sem[touch_static_isr_sem_used],
+                        name, 0, RT_IPC_FLAG_FIFO) == RT_EOK)
+        {
+            drv->isr_sem = &touch_static_isr_sem[touch_static_isr_sem_used++];
+        }
+    }
+
     LOG_I("Regist touch screen driver, probe=%p ", drv->probe);
 
     rt_list_insert_before(&driver_list, &drv->list);
@@ -496,9 +513,14 @@ static void tp_init_thread_entry(void *parameter)
 
 static rt_err_t tp_init(void)
 {
-    rt_sem_t tp_init_lock = rt_sem_create("tp_init", 0, RT_IPC_FLAG_FIFO);
+    static struct rt_semaphore tp_init_lock_static;
+    rt_sem_t tp_init_lock = &tp_init_lock_static;
 
-    RT_ASSERT(tp_init_lock != NULL);
+    if (rt_sem_init(tp_init_lock, "tp_init", 0, RT_IPC_FLAG_FIFO) != RT_EOK)
+    {
+        LOG_E("tp_init: init semaphore failed");
+        return -RT_ENOMEM;
+    }
 
     /*Temporary thread with large stack for tp init only*/
     rt_thread_t init_task = rt_thread_create("tp_init",
@@ -507,11 +529,19 @@ static rt_err_t tp_init(void)
                             4096,
                             RT_THREAD_PRIORITY_HIGH,
                             RT_THREAD_TICK_DEFAULT);
-    RT_ASSERT(init_task != NULL);
-    rt_thread_startup(init_task);
-    rt_sem_take(tp_init_lock, RT_WAITING_FOREVER);
+    if (init_task != RT_NULL)
+    {
+        rt_thread_startup(init_task);
+        rt_sem_take(tp_init_lock, RT_WAITING_FOREVER);
+    }
+    else
+    {
+        LOG_W("tp_init: create init thread failed, init inline");
+        tp_init_thread_entry((void *)tp_init_lock);
+        (void)rt_sem_take(tp_init_lock, RT_WAITING_NO);
+    }
 
-    rt_sem_delete(tp_init_lock);
+    rt_sem_detach(tp_init_lock);
 
     return (NULL == current_driver) ? RT_ERROR : RT_EOK;
 }
@@ -648,10 +678,18 @@ static void tp_poweroff_thread_entry(void *parameter)
 
 static rt_err_t init(struct rt_device *dev)
 {
-    more_data_lock = rt_mutex_create("tplck", RT_IPC_FLAG_FIFO);
-    RT_ASSERT(more_data_lock != NULL);
-    api_lock = rt_sem_create("tp_ctrl", 1, RT_IPC_FLAG_FIFO);
-    RT_ASSERT(api_lock != NULL);
+    if (more_data_lock == RT_NULL)
+    {
+        rt_err_t lock_ret = rt_mutex_init(&more_data_lock_static, "tplck", RT_IPC_FLAG_FIFO);
+        RT_ASSERT(lock_ret == RT_EOK);
+        more_data_lock = &more_data_lock_static;
+    }
+    if (api_lock == RT_NULL)
+    {
+        rt_err_t sem_ret = rt_sem_init(&api_lock_static, "tp_ctrl", 1, RT_IPC_FLAG_FIFO);
+        RT_ASSERT(sem_ret == RT_EOK);
+        api_lock = &api_lock_static;
+    }
 
     current_driver = RT_NULL;
 
@@ -815,8 +853,15 @@ static rt_err_t control(struct rt_device *dev, int cmd, void *args)
                                 4096,
                                 RT_THREAD_PRIORITY_HIGH,
                                 RT_THREAD_TICK_DEFAULT);
-        RT_ASSERT(init_task != NULL);
-        rt_thread_startup(init_task);
+        if (init_task != RT_NULL)
+        {
+            rt_thread_startup(init_task);
+        }
+        else
+        {
+            LOG_W("tp_on: create thread failed, power on inline");
+            tp_poweron_thread_entry(NULL);
+        }
     }
     break;
 
@@ -829,8 +874,15 @@ static rt_err_t control(struct rt_device *dev, int cmd, void *args)
                                 4096,
                                 RT_THREAD_PRIORITY_HIGH,
                                 RT_THREAD_TICK_DEFAULT);
-        RT_ASSERT(init_task != NULL);
-        rt_thread_startup(init_task);
+        if (init_task != RT_NULL)
+        {
+            rt_thread_startup(init_task);
+        }
+        else
+        {
+            LOG_W("tp_off: create thread failed, power off inline");
+            tp_poweroff_thread_entry(NULL);
+        }
 
     }
     break;

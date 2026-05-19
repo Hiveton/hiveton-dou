@@ -50,6 +50,7 @@ typedef struct
     bool enabled;
     bool error_reported;
     bool level_valid;
+    bool suppress_next_edge;
     int last_level;
     rt_tick_t last_short_tick;
 } app_key_state_t;
@@ -67,14 +68,102 @@ static struct rt_timer s_pwr_long_timer;
 static volatile rt_uint32_t s_button_pending_mask = 0U;
 static volatile bool s_app_buttons_module_enabled = false;
 static volatile bool s_button_sem_ready = false;
+static bool s_app_buttons_initialized = false;
 static bool s_pwr_long_timer_initialized = false;
 static bool s_app_buttons_module_error_reported = false;
+static bool s_app_buttons_wakeup_consumed = false;
+
+static bool app_buttons_try_mark_initialized(void)
+{
+    bool already_initialized;
+
+    rt_enter_critical();
+    already_initialized = s_app_buttons_initialized;
+    if (!already_initialized)
+    {
+        s_app_buttons_initialized = true;
+    }
+    rt_exit_critical();
+
+    return !already_initialized;
+}
+
+static void app_buttons_set_pwr_long_timer_initialized(bool initialized)
+{
+    rt_enter_critical();
+    s_pwr_long_timer_initialized = initialized;
+    rt_exit_critical();
+}
+
+static bool app_buttons_pwr_long_timer_initialized(void)
+{
+    bool initialized;
+
+    rt_enter_critical();
+    initialized = s_pwr_long_timer_initialized;
+    rt_exit_critical();
+
+    return initialized;
+}
+
+static void app_buttons_set_module_enabled(bool enabled)
+{
+    rt_enter_critical();
+    s_app_buttons_module_enabled = enabled;
+    rt_exit_critical();
+}
+
+static bool app_buttons_module_enabled(void)
+{
+    bool enabled;
+    rt_enter_critical();
+    enabled = s_app_buttons_module_enabled;
+    rt_exit_critical();
+    return enabled;
+}
+
+static void app_buttons_set_sem_ready(bool ready)
+{
+    rt_enter_critical();
+    s_button_sem_ready = ready;
+    rt_exit_critical();
+}
+
+static bool app_buttons_sem_ready(void)
+{
+    bool ready;
+    rt_enter_critical();
+    ready = s_button_sem_ready;
+    rt_exit_critical();
+    return ready;
+}
+
+static void app_buttons_clear_pending(void)
+{
+    rt_enter_critical();
+    s_button_pending_mask = 0U;
+    rt_exit_critical();
+}
+
+static rt_uint32_t app_buttons_take_pending(void)
+{
+    rt_uint32_t pending;
+    rt_enter_critical();
+    pending = s_button_pending_mask;
+    s_button_pending_mask = 0U;
+    rt_exit_critical();
+    return pending;
+}
 
 #define APP_BUTTON_EVT_PWR_PRESS   (1UL << 0)
 #define APP_BUTTON_EVT_PWR_SHORT   (1UL << 1)
 #define APP_BUTTON_EVT_PWR_LONG    (1UL << 2)
 #define APP_BUTTON_EVT_B_SHORT     (1UL << 3)
 #define APP_BUTTON_EVT_T_SHORT     (1UL << 4)
+#define APP_BUTTON_EVT_B_TALK_PRESS   (1UL << 5)
+#define APP_BUTTON_EVT_B_TALK_RELEASE (1UL << 6)
+#define APP_BUTTON_EVT_T_TALK_PRESS   (1UL << 7)
+#define APP_BUTTON_EVT_T_TALK_RELEASE (1UL << 8)
 
 static const char *app_buttons_key_name(app_key_id_t key_id)
 {
@@ -120,6 +209,22 @@ static void app_buttons_log_key_disabled(app_key_state_t *key, const char *reaso
                          (int)result);
 }
 
+static void app_buttons_reset_key_state(app_key_state_t *key)
+{
+    if (key == RT_NULL)
+    {
+        return;
+    }
+
+    key->pressed = false;
+    key->long_reported = false;
+    key->last_short_tick = 0U;
+    key->level_valid = false;
+    key->suppress_next_edge = false;
+    key->last_level = rt_pin_read(key->pin);
+    key->error_reported = false;
+}
+
 static void app_buttons_disable_key_irq(app_key_state_t *key)
 {
     if (key == RT_NULL)
@@ -129,8 +234,7 @@ static void app_buttons_disable_key_irq(app_key_state_t *key)
 
     rt_pin_irq_enable(key->pin, PIN_IRQ_DISABLE);
     key->enabled = false;
-    key->pressed = false;
-    key->long_reported = false;
+    app_buttons_reset_key_state(key);
 }
 
 static void app_buttons_disable_key_for_error(app_key_state_t *key, const char *reason, rt_err_t result)
@@ -158,10 +262,10 @@ static void app_buttons_disable_module_for_error(const char *reason, rt_err_t re
 {
     app_key_id_t i;
 
-    s_app_buttons_module_enabled = false;
-    s_button_pending_mask = 0U;
+    app_buttons_set_module_enabled(false);
+    app_buttons_clear_pending();
 
-    if (s_pwr_long_timer_initialized)
+    if (app_buttons_pwr_long_timer_initialized())
     {
         rt_timer_stop(&s_pwr_long_timer);
     }
@@ -190,7 +294,7 @@ static void app_buttons_refresh_runtime_pinmux(void)
     app_key_id_t i;
     rt_err_t result;
 
-    if (!s_app_buttons_module_enabled)
+    if (!app_buttons_module_enabled())
     {
         return;
     }
@@ -227,13 +331,19 @@ static bool app_buttons_wakeup_only(void)
 {
     bool sleeping = sleep_manager_is_sleeping();
     ui_screen_id_t active = ui_dispatch_get_active_screen();
+    ui_screen_id_t runtime_active = ui_runtime_get_active_screen_id();
 
-    if (sleeping || active == UI_SCREEN_STANDBY)
+    if (sleeping || active == UI_SCREEN_STANDBY || runtime_active == UI_SCREEN_STANDBY)
     {
-        sleep_manager_request_wakeup();
+        if (!s_app_buttons_wakeup_consumed)
+        {
+            sleep_manager_request_wakeup();
+            s_app_buttons_wakeup_consumed = true;
+        }
         return true;
     }
 
+    s_app_buttons_wakeup_consumed = false;
     return false;
 }
 
@@ -245,40 +355,37 @@ static void app_buttons_dispatch_short(app_key_id_t key_id)
     {
     case APP_KEY_PWR:
         {
-            bool sleeping = sleep_manager_is_sleeping();
-            ui_screen_id_t active = ui_dispatch_get_active_screen();
-
-            if (sleeping || active == UI_SCREEN_STANDBY)
-            {
-                sleep_manager_request_wakeup();
-                s_app_keys[APP_KEY_PWR].long_reported = true;
-                return;
-            }
-            else
-            {
-                APP_BUTTON_LOG("app_buttons: pwr short active=%d\n", (int)active);
-                ui_dispatch_request_back();
-            }
+            APP_BUTTON_LOG("app_buttons: pwr short active=%d\n",
+                           (int)ui_dispatch_get_active_screen());
+            ui_dispatch_request_back();
         }
         break;
     case APP_KEY_B:
-        if (app_buttons_wakeup_only())
-        {
-            return;
-        }
         APP_BUTTON_LOG("app_buttons: b short dispatch\n");
         ui_dispatch_request_hardkey_down();
         break;
     case APP_KEY_T:
-        if (app_buttons_wakeup_only())
-        {
-            return;
-        }
         APP_BUTTON_LOG("app_buttons: t short dispatch\n");
         ui_dispatch_request_hardkey_up();
         break;
     default:
         break;
+    }
+}
+
+static void app_buttons_dispatch_talk(bool pressed)
+{
+    app_watchdog_heartbeat(APP_WDT_MODULE_BUTTON);
+
+    if (pressed)
+    {
+        APP_BUTTON_LOG("app_buttons: home talk press dispatch\n");
+        ui_dispatch_request_home_ai_talk_press();
+    }
+    else
+    {
+        APP_BUTTON_LOG("app_buttons: home talk release dispatch\n");
+        ui_dispatch_request_home_ai_talk_release();
     }
 }
 
@@ -288,12 +395,6 @@ static void app_buttons_dispatch_long(app_key_id_t key_id)
 
     if (key_id == APP_KEY_PWR)
     {
-        if (app_buttons_wakeup_only())
-        {
-            s_app_keys[APP_KEY_PWR].long_reported = true;
-            return;
-        }
-
         {
             APP_BUTTON_LOG("app_buttons: pwr long\n");
             ui_dispatch_request_poweroff_confirm();
@@ -322,7 +423,7 @@ static app_key_state_t *app_buttons_find_key_by_pin(int32_t pin, app_key_id_t *k
 
 static void app_buttons_set_pending(rt_uint32_t mask)
 {
-    if (!s_app_buttons_module_enabled || !s_button_sem_ready)
+    if (!app_buttons_module_enabled() || !app_buttons_sem_ready())
     {
         return;
     }
@@ -331,6 +432,69 @@ static void app_buttons_set_pending(rt_uint32_t mask)
     s_button_pending_mask |= mask;
     rt_exit_critical();
     (void)rt_sem_release(&s_button_irq_sem);
+}
+
+static bool app_buttons_short_debounce_allow(app_key_state_t *key);
+
+static bool app_buttons_home_talk_enabled(void)
+{
+    ui_screen_id_t active = ui_dispatch_get_active_screen();
+
+    if (active == UI_SCREEN_NONE)
+    {
+        active = ui_runtime_get_active_screen_id();
+    }
+
+    return active == UI_SCREEN_HOME;
+}
+
+static rt_uint32_t app_buttons_talk_press_mask(app_key_id_t key_id)
+{
+    return key_id == APP_KEY_T ? APP_BUTTON_EVT_T_TALK_PRESS : APP_BUTTON_EVT_B_TALK_PRESS;
+}
+
+static rt_uint32_t app_buttons_talk_release_mask(app_key_id_t key_id)
+{
+    return key_id == APP_KEY_T ? APP_BUTTON_EVT_T_TALK_RELEASE : APP_BUTTON_EVT_B_TALK_RELEASE;
+}
+
+static bool app_buttons_handle_home_talk_level(app_key_id_t key_id,
+                                               app_key_state_t *key,
+                                               bool active,
+                                               const char *source)
+{
+    bool was_pressed;
+
+    if (key == RT_NULL || (key_id != APP_KEY_T && key_id != APP_KEY_B) ||
+        !app_buttons_home_talk_enabled())
+    {
+        return false;
+    }
+
+    was_pressed = key->pressed;
+    if (active)
+    {
+        if (!was_pressed && app_buttons_short_debounce_allow(key))
+        {
+            key->pressed = true;
+            APP_BUTTON_LOG("app_buttons: %s %s talk press\n",
+                           app_buttons_key_name(key_id),
+                           source != RT_NULL ? source : "unknown");
+            app_buttons_set_pending(app_buttons_talk_press_mask(key_id));
+        }
+        return true;
+    }
+
+    if (was_pressed)
+    {
+        key->pressed = false;
+        APP_BUTTON_LOG("app_buttons: %s %s talk release\n",
+                       app_buttons_key_name(key_id),
+                       source != RT_NULL ? source : "unknown");
+        app_buttons_set_pending(app_buttons_talk_release_mask(key_id));
+    }
+
+    return true;
 }
 
 static bool app_buttons_short_debounce_allow(app_key_state_t *key)
@@ -376,6 +540,18 @@ static void app_buttons_handle_b_level(app_key_state_t *key, int level, const ch
         return;
     }
 
+    if (key->suppress_next_edge)
+    {
+        key->suppress_next_edge = false;
+        key->last_level = level;
+        key->pressed = false;
+        APP_BUTTON_LOG("app_buttons: b %s wake edge consumed pin=%ld level=%d\n",
+                       source != RT_NULL ? source : "unknown",
+                       (long)key->pin,
+                       level);
+        return;
+    }
+
     if (!key->pressed && app_buttons_short_debounce_allow(key))
     {
         key->pressed = true;
@@ -392,7 +568,7 @@ static void app_buttons_pwr_long_timeout(void *parameter)
 {
     app_key_state_t *key = (app_key_state_t *)parameter;
 
-    if (s_app_buttons_module_enabled && key != RT_NULL && key->enabled && key->pressed && !key->long_reported)
+    if (app_buttons_module_enabled() && key != RT_NULL && key->enabled && key->pressed && !key->long_reported)
     {
         key->long_reported = true;
         app_buttons_set_pending(APP_BUTTON_EVT_PWR_LONG);
@@ -407,7 +583,7 @@ static void app_buttons_irq_handler(void *args)
     int level;
     bool active;
 
-    if (!s_app_buttons_module_enabled || key == RT_NULL || !key->enabled)
+    if (!app_buttons_module_enabled() || key == RT_NULL || !key->enabled)
     {
         return;
     }
@@ -420,6 +596,11 @@ static void app_buttons_irq_handler(void *args)
     {
         bool was_pressed = key->pressed;
 
+        if (app_buttons_handle_home_talk_level(key_id, key, active, "irq"))
+        {
+            return;
+        }
+
         key->pressed = active;
         if (active && !was_pressed)
         {
@@ -431,6 +612,11 @@ static void app_buttons_irq_handler(void *args)
 
     if (key_id == APP_KEY_B)
     {
+        if (app_buttons_handle_home_talk_level(key_id, key, active, "irq"))
+        {
+            return;
+        }
+
         app_buttons_handle_b_level(key, level, "irq");
         return;
     }
@@ -468,19 +654,24 @@ static void app_buttons_poll_short_key(app_key_id_t key_id, rt_uint32_t event_ma
     }
 
     key = &s_app_keys[key_id];
-    if (!s_app_buttons_module_enabled || !key->enabled)
+    if (!app_buttons_module_enabled() || !key->enabled)
     {
         return;
     }
 
     level = rt_pin_read(key->pin);
+    active = (level == key->active_level);
+    if (app_buttons_handle_home_talk_level(key_id, key, active, "poll"))
+    {
+        return;
+    }
+
     if (key_id == APP_KEY_B)
     {
         app_buttons_handle_b_level(key, level, "poll");
         return;
     }
 
-    active = (level == key->active_level);
     was_pressed = key->pressed;
     key->pressed = active;
 
@@ -513,30 +704,42 @@ static void app_buttons_thread_entry(void *parameter)
             app_buttons_refresh_runtime_pinmux();
             app_buttons_poll_short_keys();
             app_watchdog_heartbeat(APP_WDT_MODULE_BUTTON);
-            if (!s_app_buttons_module_enabled)
+            if (!app_buttons_module_enabled())
             {
                 return;
             }
             continue;
         }
 
-        if (!s_app_buttons_module_enabled)
+        if (!app_buttons_module_enabled())
         {
             return;
         }
 
-        rt_enter_critical();
-        pending = s_button_pending_mask;
-        s_button_pending_mask = 0U;
-        rt_exit_critical();
+        pending = app_buttons_take_pending();
 
-        if (((pending & APP_BUTTON_EVT_PWR_PRESS) != 0U) && s_app_keys[APP_KEY_PWR].enabled)
+        if (pending == 0U)
         {
             app_watchdog_heartbeat(APP_WDT_MODULE_BUTTON);
-            if (app_buttons_wakeup_only())
+            continue;
+        }
+
+        if (app_buttons_wakeup_only())
+        {
+            app_buttons_reset_key_state(&s_app_keys[APP_KEY_T]);
+            app_buttons_reset_key_state(&s_app_keys[APP_KEY_B]);
+            s_app_keys[APP_KEY_B].suppress_next_edge = true;
+            s_app_keys[APP_KEY_PWR].long_reported = false;
+            app_buttons_reset_key_state(&s_app_keys[APP_KEY_PWR]);
+            if (app_buttons_pwr_long_timer_initialized())
+            {
+                rt_timer_stop(&s_pwr_long_timer);
+            }
+            if (((pending & APP_BUTTON_EVT_PWR_PRESS) != 0U) && s_app_keys[APP_KEY_PWR].enabled)
             {
                 s_app_keys[APP_KEY_PWR].long_reported = true;
             }
+            continue;
         }
 
         if (((pending & APP_BUTTON_EVT_T_SHORT) != 0U) && s_app_keys[APP_KEY_T].enabled)
@@ -544,9 +747,29 @@ static void app_buttons_thread_entry(void *parameter)
             app_buttons_dispatch_short(APP_KEY_T);
         }
 
+        if (((pending & APP_BUTTON_EVT_T_TALK_PRESS) != 0U) && s_app_keys[APP_KEY_T].enabled)
+        {
+            app_buttons_dispatch_talk(true);
+        }
+
+        if (((pending & APP_BUTTON_EVT_T_TALK_RELEASE) != 0U) && s_app_keys[APP_KEY_T].enabled)
+        {
+            app_buttons_dispatch_talk(false);
+        }
+
         if (((pending & APP_BUTTON_EVT_B_SHORT) != 0U) && s_app_keys[APP_KEY_B].enabled)
         {
             app_buttons_dispatch_short(APP_KEY_B);
+        }
+
+        if (((pending & APP_BUTTON_EVT_B_TALK_PRESS) != 0U) && s_app_keys[APP_KEY_B].enabled)
+        {
+            app_buttons_dispatch_talk(true);
+        }
+
+        if (((pending & APP_BUTTON_EVT_B_TALK_RELEASE) != 0U) && s_app_keys[APP_KEY_B].enabled)
+        {
+            app_buttons_dispatch_talk(false);
         }
 
         if (((pending & APP_BUTTON_EVT_PWR_SHORT) != 0U) && s_app_keys[APP_KEY_PWR].enabled)
@@ -563,17 +786,14 @@ static void app_buttons_thread_entry(void *parameter)
 
 void app_buttons_init(void)
 {
-    static bool initialized = false;
     app_key_id_t i;
     rt_err_t result;
     bool any_key_enabled = false;
 
-    if (initialized)
+    if (!app_buttons_try_mark_initialized())
     {
         return;
     }
-
-    initialized = true;
 
     APP_BUTTON_LOG("app_buttons: init start pwr=%d b=%d t=%d\n",
                (int)APP_BUTTON_PWR_PIN,
@@ -585,11 +805,11 @@ void app_buttons_init(void)
     result = rt_sem_init(&s_button_irq_sem, "app_key", 0, RT_IPC_FLAG_FIFO);
     if (result != RT_EOK)
     {
-        s_button_sem_ready = false;
+        app_buttons_set_sem_ready(false);
         app_buttons_log_module_disabled("semaphore init", result);
         return;
     }
-    s_button_sem_ready = true;
+    app_buttons_set_sem_ready(true);
 
     rt_timer_init(&s_pwr_long_timer,
                   "btn_pwr",
@@ -597,17 +817,13 @@ void app_buttons_init(void)
                   &s_app_keys[APP_KEY_PWR],
                   rt_tick_from_millisecond(APP_BUTTON_LONG_PRESS_MS),
                   RT_TIMER_FLAG_ONE_SHOT);
-    s_pwr_long_timer_initialized = true;
+    app_buttons_set_pwr_long_timer_initialized(true);
 
     for (i = 0; i < APP_KEY_COUNT; ++i)
     {
         rt_pin_mode(s_app_keys[i].pin, PIN_MODE_INPUT_PULLDOWN);
-        s_app_keys[i].pressed = false;
-        s_app_keys[i].long_reported = false;
+        app_buttons_reset_key_state(&s_app_keys[i]);
         s_app_keys[i].enabled = false;
-        s_app_keys[i].last_level = rt_pin_read(s_app_keys[i].pin);
-        s_app_keys[i].level_valid = true;
-        s_app_keys[i].last_short_tick = 0;
 
         result = rt_pin_attach_irq(s_app_keys[i].pin,
                                    PIN_IRQ_MODE_RISING_FALLING,
@@ -655,6 +871,8 @@ void app_buttons_init(void)
         return;
     }
 
+    app_buttons_set_module_enabled(true);
+
     result = rt_thread_startup(&s_button_thread);
     if (result != RT_EOK)
     {
@@ -662,6 +880,5 @@ void app_buttons_init(void)
         return;
     }
 
-    s_app_buttons_module_enabled = true;
     APP_BUTTON_LOG("app_buttons: worker started priority=%d\n", APP_BUTTON_THREAD_PRIORITY);
 }

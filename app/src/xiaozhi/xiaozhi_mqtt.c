@@ -5,8 +5,8 @@
  */
 
 #include <rtthread.h>
+#include "network/app_network_dns.h"
 #include "lwip/api.h"
-#include "lwip/dns.h"
 #include "lwip/apps/websocket_client.h"
 #include "lwip/apps/mqtt_priv.h"
 #include "lwip/apps/mqtt.h"
@@ -39,6 +39,22 @@ xiaozhi_context_t g_xz_context;
 #ifdef XIAOZHI_USING_MQTT
 enum DeviceState mqtt_g_state;
 
+enum DeviceState xz_mqtt_get_device_state(void)
+{
+    enum DeviceState state;
+    rt_base_t level = rt_hw_interrupt_disable();
+    state = mqtt_g_state;
+    rt_hw_interrupt_enable(level);
+    return state;
+}
+
+void xz_mqtt_set_device_state(enum DeviceState state)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    mqtt_g_state = state;
+    rt_hw_interrupt_enable(level);
+}
+
 #ifndef XIAOZHI_MQTT_DEBUG_LOG
 #define XIAOZHI_MQTT_DEBUG_LOG 0
 #endif
@@ -70,6 +86,51 @@ static const char *mode_str[] = {"auto", "manual", "realtime"};
 static rt_tick_t g_speaking_start_tick = 0;  // 讲话开始时间
 static rt_tick_t g_total_speaking_time = 0;  // 累计讲话时间
 static bool g_is_speaking = false;           // 是否正在讲话
+
+static void xz_mqtt_speaking_start(void)
+{
+    rt_tick_t now_tick = rt_tick_get();
+    rt_base_t level = rt_hw_interrupt_disable();
+    g_is_speaking = true;
+    g_speaking_start_tick = now_tick;
+    rt_hw_interrupt_enable(level);
+}
+
+static rt_bool_t xz_mqtt_speaking_stop(rt_tick_t *total_ticks)
+{
+    rt_bool_t should_reinit = RT_FALSE;
+    rt_tick_t now_tick = rt_tick_get();
+    rt_tick_t threshold = rt_tick_from_millisecond(SPEAKING_THRESHOLD_MS);
+    rt_tick_t total = 0;
+    rt_base_t level = rt_hw_interrupt_disable();
+
+    if (g_is_speaking)
+    {
+        rt_tick_t speaking_duration = now_tick - g_speaking_start_tick;
+        g_total_speaking_time += speaking_duration;
+        g_is_speaking = false;
+
+        total = g_total_speaking_time;
+        if (g_total_speaking_time >= threshold)
+        {
+            g_total_speaking_time = 0;
+            should_reinit = RT_TRUE;
+        }
+    }
+    else
+    {
+        total = g_total_speaking_time;
+    }
+
+    rt_hw_interrupt_enable(level);
+
+    if (total_ticks != RT_NULL)
+    {
+        *total_ticks = total;
+    }
+
+    return should_reinit;
+}
 
 static bool xz_mqtt_copy_session_id(xiaozhi_context_t *ctx, const char *session_id)
 {
@@ -120,7 +181,7 @@ static void xz_mqtt_disconnect_for_bad_payload(xiaozhi_context_t *ctx,
                                                 const char *reason)
 {
     rt_kprintf("MQTT disconnect malformed incoming payload: %s\n", reason);
-    mqtt_g_state = kDeviceStateUnknown;
+    xz_mqtt_set_device_state(kDeviceStateUnknown);
     if (ctx && mqtt_client_is_connected(&(ctx->clnt)))
     {
         mqtt_disconnect(&(ctx->clnt));
@@ -202,15 +263,24 @@ void my_mqtt_connection_cb(mqtt_client_t *client, void *arg,
     rt_kprintf("my_mqtt_connection_cb:%d\n", status);
     if (status == MQTT_CONNECT_ACCEPTED)
     {
-        mqtt_set_inpub_callback(&(ctx->clnt), my_mqtt_incoming_publish_cb,
-                                my_mqtt_incoming_data_cb, ctx);
-        rt_sem_release(ctx->sem);
+        if (ctx != RT_NULL)
+        {
+            mqtt_set_inpub_callback(&(ctx->clnt), my_mqtt_incoming_publish_cb,
+                                    my_mqtt_incoming_data_cb, ctx);
+            if (ctx->sem != RT_NULL)
+            {
+                rt_sem_release(ctx->sem);
+            }
+        }
     }
     else
     {
-        mqtt_g_state = kDeviceStateFatalError;
+        xz_mqtt_set_device_state(kDeviceStateFatalError);
         rt_kprintf("MQTT connection failed, status: %d\n", status);
-        // TODO: Reset MQTT parameters.
+        if (ctx != RT_NULL && ctx->sem != RT_NULL)
+        {
+            rt_sem_release(ctx->sem);
+        }
     }
 }
 
@@ -236,7 +306,10 @@ void my_mqtt_request_cb2(void *arg, err_t err)
 {
     xiaozhi_context_t *ctx = (xiaozhi_context_t *)arg;
     rt_kprintf("MQTT Request2 : %d\n", err);
-    rt_sem_release(ctx->sem);
+    if (ctx != RT_NULL && ctx->sem != RT_NULL)
+    {
+        rt_sem_release(ctx->sem);
+    }
 }
 
 void my_mqtt_incoming_publish_cb(void *arg, const char *topic, u32_t tot_len)
@@ -383,7 +456,7 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
             return;
         }
 
-        mqtt_g_state = kDeviceStateIdle;
+        xz_mqtt_set_device_state(kDeviceStateIdle);
         xz_audio_init();
         mqtt_listen_start(&g_xz_context, kListeningModeAlwaysOn);
         xiaozhi_ui_chat_output("小智 已连接!");
@@ -393,7 +466,7 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
     }
     else if (strcmp(type, "goodbye") == 0)
     {
-        mqtt_g_state = kDeviceStateUnknown;
+        xz_mqtt_set_device_state(kDeviceStateUnknown);
 
         xiaozhi_ui_chat_output("等待唤醒...");
         xiaozhi_ui_chat_status("睡眠中...");
@@ -411,39 +484,27 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
 
         if (strcmp(state, "start") == 0)
         {
-            if (mqtt_g_state == kDeviceStateIdle ||
-                mqtt_g_state == kDeviceStateListening)
+            if (xz_mqtt_get_device_state() == kDeviceStateIdle ||
+                xz_mqtt_get_device_state() == kDeviceStateListening)
             {
-                mqtt_g_state = kDeviceStateSpeaking;
+                xz_mqtt_set_device_state(kDeviceStateSpeaking);
                 xz_speaker(1);
                 xiaozhi_ui_chat_status("讲话中...");
 
-                // 开始累计讲话时间
-                g_is_speaking = true;
-                g_speaking_start_tick = rt_tick_get();
+                xz_mqtt_speaking_start();
             }
         }
         else if (strcmp(state, "stop") == 0)
         {
+            rt_tick_t total_speaking_time = 0;
 
-             // 计算本次讲话时间并累加
-            if (g_is_speaking) 
+            if (xz_mqtt_speaking_stop(&total_speaking_time))
             {
-                rt_tick_t current_tick = rt_tick_get();
-                rt_tick_t speaking_duration = current_tick - g_speaking_start_tick;
-                g_total_speaking_time += speaking_duration;
-                g_is_speaking = false;
-                
-                rt_kprintf("xiaozhi total_speaking_time: %d ticks\n", g_total_speaking_time);
-                // 检查是否达到5分钟阈值
-                if (g_total_speaking_time >= rt_tick_from_millisecond(SPEAKING_THRESHOLD_MS)) 
-                {
-                    rt_kprintf("Speaking time reached 5 minutes, reinitializing audio\n");
-                    g_total_speaking_time = 0; // 重置累计时间
-                    xiaozhi_ui_reinit_audio();     // 重新初始化音频
-                }
+                rt_kprintf("xiaozhi total_speaking_time: %d ticks\n", total_speaking_time);
+                rt_kprintf("Speaking time reached 5 minutes, reinitializing audio\n");
+                xiaozhi_ui_reinit_audio();
             }
-            mqtt_g_state = kDeviceStateIdle;
+            xz_mqtt_set_device_state(kDeviceStateIdle);
             xz_speaker(0);
             xiaozhi_ui_chat_status("待命中...");
         }
@@ -471,7 +532,7 @@ void my_mqtt_incoming_data_cb(void *arg, const u8_t *data, u16_t len,
         }
         xiaozhi_ui_chat_output(txt);
         last_listen_tick = rt_tick_get();
-        mqtt_g_state = kDeviceStateSpeaking;
+        xz_mqtt_set_device_state(kDeviceStateSpeaking);
         xz_speaker(1);
     }
     else if (strcmp(type, "llm") ==0) // {"type":"llm", "text": "😊", "emotion": "smile"}
@@ -640,8 +701,8 @@ mqtt_client_t *mqtt_xiaozhi(xiaozhi_context_t *ctx)
     info->client_pass = ctx->password;
     info->keep_alive = 90;
     LOCK_TCPIP_CORE();
-    err = dns_gethostbyname(ctx->endpoint, &ctx->mqtt_addr, mqtt_found_callback,
-                            ctx);
+    err = app_network_dns_gethostbyname(ctx->endpoint, &ctx->mqtt_addr,
+                                        mqtt_found_callback, ctx);
     UNLOCK_TCPIP_CORE();
     if (err == ERR_OK)
     {
@@ -658,8 +719,7 @@ mqtt_client_t *mqtt_xiaozhi(xiaozhi_context_t *ctx)
     }
     else if (RT_EOK == rt_sem_take(ctx->sem, 5000))
     {
-        mqtt_g_state = kDeviceStateConnecting;
-        // TODO free config when finish
+        xz_mqtt_set_device_state(kDeviceStateConnecting);
         info->tls_config = altcp_tls_create_config_client(NULL, 0);
         LOCK_TCPIP_CORE();
         mqtt_client_connect(&(ctx->clnt), &(ctx->mqtt_addr),
@@ -668,11 +728,18 @@ mqtt_client_t *mqtt_xiaozhi(xiaozhi_context_t *ctx)
         UNLOCK_TCPIP_CORE();
         if (RT_EOK == rt_sem_take(ctx->sem, 10000))
         {
-            mqtt_g_state = kDeviceStateIdle;
-            LOCK_TCPIP_CORE();
-            // ctx->info.tls_config = altcp_tls_create_config_client(NULL, 0);
-            UNLOCK_TCPIP_CORE();
-            mqtt_hello(ctx);
+            if (xz_mqtt_get_device_state() == kDeviceStateFatalError)
+            {
+                clnt = NULL;
+            }
+            else
+            {
+                xz_mqtt_set_device_state(kDeviceStateIdle);
+                LOCK_TCPIP_CORE();
+                // ctx->info.tls_config = altcp_tls_create_config_client(NULL, 0);
+                UNLOCK_TCPIP_CORE();
+                mqtt_hello(ctx);
+            }
         }
         else
         {
@@ -683,6 +750,14 @@ mqtt_client_t *mqtt_xiaozhi(xiaozhi_context_t *ctx)
     }
     else
         clnt = NULL;
+
+    if ((clnt == RT_NULL) && (info->tls_config != RT_NULL))
+    {
+        LOCK_TCPIP_CORE();
+        altcp_tls_free_config(info->tls_config);
+        UNLOCK_TCPIP_CORE();
+        info->tls_config = RT_NULL;
+    }
 
     return clnt;
 }

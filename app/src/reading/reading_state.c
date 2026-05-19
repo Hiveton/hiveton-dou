@@ -2,10 +2,12 @@
 
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #include "dfs_posix.h"
+#include "../app_tf_storage.h"
 
 #define READING_STATE_FILE_NAME "reading_state.cfg"
 #define READING_STATE_TEMP_SUFFIX ".tmp"
@@ -25,31 +27,63 @@ typedef struct
 
 static const char *const s_reading_state_config_dirs[] = {
     "/config",
-    "/tf/config",
-    "/sd/config",
-    "/sd0/config",
-    "config",
 };
 
 static reading_state_db_t s_reading_state_db;
+
+static bool reading_state_dir_available(const char *dir)
+{
+    if (dir == NULL)
+    {
+        return false;
+    }
+
+    return app_tf_storage_ready();
+}
+
+static bool reading_state_path_available(const char *path)
+{
+    if (path == NULL || path[0] == '\0')
+    {
+        return false;
+    }
+
+    return app_tf_storage_ready();
+}
 static struct rt_mutex s_reading_state_mutex;
 static bool s_reading_state_mutex_ready = false;
 static char s_reading_state_line[READING_STATE_LINE_MAX];
 
+static bool reading_state_mutex_ready_snapshot(void)
+{
+    bool ready;
+
+    rt_enter_critical();
+    ready = s_reading_state_mutex_ready;
+    rt_exit_critical();
+
+    return ready;
+}
+
 static rt_err_t reading_state_ensure_mutex(void)
 {
-    rt_err_t result;
+    rt_err_t result = RT_EOK;
 
-    if (s_reading_state_mutex_ready)
+    if (reading_state_mutex_ready_snapshot())
     {
         return RT_EOK;
     }
 
-    result = rt_mutex_init(&s_reading_state_mutex, "rdstate", RT_IPC_FLAG_PRIO);
-    if (result == RT_EOK)
+    rt_enter_critical();
+    if (!s_reading_state_mutex_ready)
     {
-        s_reading_state_mutex_ready = true;
+        result = rt_mutex_init(&s_reading_state_mutex, "rdstate", RT_IPC_FLAG_PRIO);
+        if (result == RT_EOK)
+        {
+            s_reading_state_mutex_ready = true;
+        }
     }
+    rt_exit_critical();
 
     return result;
 }
@@ -66,7 +100,7 @@ static bool reading_state_lock(void)
 
 static void reading_state_unlock(void)
 {
-    if (s_reading_state_mutex_ready)
+    if (reading_state_mutex_ready_snapshot())
     {
         (void)rt_mutex_release(&s_reading_state_mutex);
     }
@@ -331,6 +365,50 @@ static bool reading_state_join_path(char *out, size_t out_size, const char *dir,
     return true;
 }
 
+static void reading_state_ensure_parent_dir(const char *path)
+{
+    char buffer[READING_STATE_STORAGE_PATH_MAX];
+    char *cursor;
+    char *walker;
+    int written;
+
+    if (path == NULL || path[0] != '/')
+    {
+        return;
+    }
+
+    written = snprintf(buffer, sizeof(buffer), "%s", path);
+    if (written < 0 || (size_t)written >= sizeof(buffer))
+    {
+        return;
+    }
+
+    cursor = strrchr(buffer, '/');
+    if (cursor == NULL || cursor == buffer)
+    {
+        return;
+    }
+
+    *cursor = '\0';
+    if (buffer[0] == '\0')
+    {
+        return;
+    }
+
+    walker = buffer + 1;
+    while (*walker != '\0')
+    {
+        if (*walker == '/')
+        {
+            *walker = '\0';
+            (void)mkdir(buffer, 0);
+            *walker = '/';
+        }
+        ++walker;
+    }
+    (void)mkdir(buffer, 0);
+}
+
 static bool reading_state_can_read_path(const char *path)
 {
     int fd;
@@ -361,6 +439,7 @@ static bool reading_state_find_existing_path_locked(char *out, size_t out_size)
     }
 
     if (s_reading_state_db.storage_path[0] != '\0' &&
+        reading_state_path_available(s_reading_state_db.storage_path) &&
         reading_state_can_read_path(s_reading_state_db.storage_path) &&
         reading_state_copy_path(out, out_size, s_reading_state_db.storage_path))
     {
@@ -369,6 +448,11 @@ static bool reading_state_find_existing_path_locked(char *out, size_t out_size)
 
     for (i = 0U; i < (sizeof(s_reading_state_config_dirs) / sizeof(s_reading_state_config_dirs[0])); ++i)
     {
+        if (!reading_state_dir_available(s_reading_state_config_dirs[i]))
+        {
+            continue;
+        }
+
         if (!reading_state_join_path(path, sizeof(path), s_reading_state_config_dirs[i], READING_STATE_FILE_NAME))
         {
             continue;
@@ -381,6 +465,48 @@ static bool reading_state_find_existing_path_locked(char *out, size_t out_size)
     }
 
     return false;
+}
+
+static rt_err_t reading_state_sync_parent_dir(const char *path)
+{
+    char dir_path[READING_STATE_STORAGE_PATH_MAX];
+    char *cursor;
+    int fd;
+    rt_err_t result = RT_EOK;
+
+    if (path == NULL || path[0] != '/')
+    {
+        return -RT_EINVAL;
+    }
+
+    if (snprintf(dir_path, sizeof(dir_path), "%s", path) < 0)
+    {
+        return -RT_EFULL;
+    }
+
+    cursor = strrchr(dir_path, '/');
+    if (cursor == NULL || cursor == dir_path)
+    {
+        return RT_EOK;
+    }
+
+    *cursor = '\0';
+    fd = open(dir_path, O_RDONLY, 0);
+    if (fd < 0)
+    {
+        return -RT_EIO;
+    }
+
+    if (fsync(fd) != 0)
+    {
+        result = -RT_EIO;
+    }
+    if (close(fd) != 0)
+    {
+        result = -RT_EIO;
+    }
+
+    return result;
 }
 
 static rt_err_t reading_state_write_all(int fd, const char *data, size_t len)
@@ -452,10 +578,32 @@ static rt_err_t reading_state_write_escaped(int fd, const char *data)
     return RT_EOK;
 }
 
+static rt_err_t reading_state_write_book_with_line(int fd,
+                                                   const reading_book_state_t *book,
+                                                   char *line,
+                                                   size_t line_size);
+static rt_err_t reading_state_write_file_snapshot(int fd,
+                                                  const reading_state_db_t *snapshot,
+                                                  char *line,
+                                                  size_t line_size);
+
 static rt_err_t reading_state_write_book(int fd, const reading_book_state_t *book)
+{
+    return reading_state_write_book_with_line(fd, book, s_reading_state_line, sizeof(s_reading_state_line));
+}
+
+static rt_err_t reading_state_write_book_with_line(int fd,
+                                                   const reading_book_state_t *book,
+                                                   char *line,
+                                                   size_t line_size)
 {
     int written;
     rt_err_t result;
+
+    if (book == NULL || line == NULL || line_size == 0U)
+    {
+        return -RT_EINVAL;
+    }
 
     result = reading_state_write_cstr(fd, "book\t");
     if (result != RT_EOK)
@@ -481,8 +629,8 @@ static rt_err_t reading_state_write_book(int fd, const reading_book_state_t *boo
         return result;
     }
 
-    written = snprintf(s_reading_state_line,
-                       sizeof(s_reading_state_line),
+    written = snprintf(line,
+                       line_size,
                        "\t%u\t%u\t%lu\t%lu\t%u\t%u\t%u\t%u\t%lu\t%lu\n",
                        (unsigned int)book->type,
                        (unsigned int)book->favorite,
@@ -494,38 +642,54 @@ static rt_err_t reading_state_write_book(int fd, const reading_book_state_t *boo
                        (unsigned int)book->chapter_pages_hint,
                        (unsigned long)book->file_size,
                        (unsigned long)book->file_mtime);
-    if (written < 0 || (size_t)written >= sizeof(s_reading_state_line))
+    if (written < 0 || (size_t)written >= line_size)
     {
         return -RT_EFULL;
     }
 
-    return reading_state_write_all(fd, s_reading_state_line, (size_t)written);
+    return reading_state_write_all(fd, line, (size_t)written);
 }
 
 static rt_err_t reading_state_write_file_locked(int fd)
+{
+    return reading_state_write_file_snapshot(fd,
+                                             &s_reading_state_db,
+                                             s_reading_state_line,
+                                             sizeof(s_reading_state_line));
+}
+
+static rt_err_t reading_state_write_file_snapshot(int fd,
+                                                  const reading_state_db_t *snapshot,
+                                                  char *line,
+                                                  size_t line_size)
 {
     int written;
     rt_err_t result;
     uint16_t i;
 
-    written = snprintf(s_reading_state_line,
-                       sizeof(s_reading_state_line),
+    if (snapshot == NULL || line == NULL || line_size == 0U)
+    {
+        return -RT_EINVAL;
+    }
+
+    written = snprintf(line,
+                       line_size,
                        "reading_state_v1\nsequence=%lu\n",
-                       (unsigned long)s_reading_state_db.sequence_counter);
-    if (written < 0 || (size_t)written >= sizeof(s_reading_state_line))
+                       (unsigned long)snapshot->sequence_counter);
+    if (written < 0 || (size_t)written >= line_size)
     {
         return -RT_EFULL;
     }
 
-    result = reading_state_write_all(fd, s_reading_state_line, (size_t)written);
+    result = reading_state_write_all(fd, line, (size_t)written);
     if (result != RT_EOK)
     {
         return result;
     }
 
-    for (i = 0U; i < s_reading_state_db.count; ++i)
+    for (i = 0U; i < snapshot->count; ++i)
     {
-        result = reading_state_write_book(fd, &s_reading_state_db.books[i]);
+        result = reading_state_write_book_with_line(fd, &snapshot->books[i], line, line_size);
         if (result != RT_EOK)
         {
             return result;
@@ -547,6 +711,7 @@ static rt_err_t reading_state_save_to_path_locked(const char *path)
     {
         return -RT_EINVAL;
     }
+    reading_state_ensure_parent_dir(path);
 
     written = snprintf(temp_path, sizeof(temp_path), "%s%s", path, READING_STATE_TEMP_SUFFIX);
     if (written < 0 || (size_t)written >= sizeof(temp_path))
@@ -559,6 +724,10 @@ static rt_err_t reading_state_save_to_path_locked(const char *path)
         return -RT_EFULL;
     }
 
+    if (unlink(temp_path) == 0)
+    {
+        (void)reading_state_sync_parent_dir(temp_path);
+    }
     fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0)
     {
@@ -569,30 +738,46 @@ static rt_err_t reading_state_save_to_path_locked(const char *path)
     if (result != RT_EOK)
     {
         close(fd);
-        (void)unlink(temp_path);
+        if (unlink(temp_path) == 0)
+        {
+            (void)reading_state_sync_parent_dir(temp_path);
+        }
         return result;
     }
 
     if (fsync(fd) != 0)
     {
         close(fd);
-        (void)unlink(temp_path);
+        if (unlink(temp_path) == 0)
+        {
+            (void)reading_state_sync_parent_dir(temp_path);
+        }
+        rt_kprintf("reading_state: fsync failed path=%s\n", path);
         return -RT_EIO;
     }
 
     if (close(fd) != 0 && result == RT_EOK)
     {
         result = -RT_EIO;
+        rt_kprintf("reading_state: close temp file failed path=%s\n", temp_path);
     }
 
     if (result != RT_EOK)
     {
-        (void)unlink(temp_path);
+        if (unlink(temp_path) == 0)
+        {
+            (void)reading_state_sync_parent_dir(temp_path);
+        }
         return result;
     }
 
     if (rename(temp_path, path) == 0)
     {
+        rt_kprintf("reading_state: save ok path=%s\n", path);
+        if (reading_state_sync_parent_dir(path) != RT_EOK)
+        {
+            rt_kprintf("reading_state: sync parent dir failed path=%s\n", path);
+        }
         return RT_EOK;
     }
 
@@ -603,8 +788,16 @@ static rt_err_t reading_state_save_to_path_locked(const char *path)
         (void)unlink(backup_path);
         if (rename(path, backup_path) != 0)
         {
-            (void)unlink(temp_path);
+            if (unlink(temp_path) == 0)
+            {
+                (void)reading_state_sync_parent_dir(temp_path);
+            }
+            rt_kprintf("reading_state: backup existing path failed path=%s\n", path);
             return -RT_EIO;
+        }
+        if (reading_state_sync_parent_dir(path) != RT_EOK)
+        {
+            rt_kprintf("reading_state: sync parent dir after backup failed path=%s\n", path);
         }
     }
 
@@ -614,15 +807,214 @@ static rt_err_t reading_state_save_to_path_locked(const char *path)
         {
             (void)unlink(backup_path);
         }
+        rt_kprintf("reading_state: save with backup fallback ok path=%s\n", path);
+        if (reading_state_sync_parent_dir(path) != RT_EOK)
+        {
+            rt_kprintf("reading_state: sync parent dir failed path=%s\n", path);
+        }
         return RT_EOK;
     }
 
     if (backup_created)
     {
-        (void)rename(backup_path, path);
+        if (rename(backup_path, path) != 0)
+        {
+            rt_kprintf("reading_state: rollback failed path=%s backup=%s\n", path, backup_path);
+        }
+        else if (reading_state_sync_parent_dir(path) != RT_EOK)
+        {
+            rt_kprintf("reading_state: sync parent dir after rollback failed path=%s\n", path);
+        }
     }
-    (void)unlink(temp_path);
+    if (unlink(temp_path) == 0)
+    {
+        (void)reading_state_sync_parent_dir(temp_path);
+    }
+    rt_kprintf("reading_state: save failed path=%s\n", path);
     return -RT_EIO;
+}
+
+static rt_err_t reading_state_save_snapshot_to_path(const char *path, const reading_state_db_t *snapshot)
+{
+    char temp_path[READING_STATE_STORAGE_PATH_MAX];
+    char backup_path[READING_STATE_STORAGE_PATH_MAX];
+    char line[READING_STATE_LINE_MAX];
+    int written;
+    int fd;
+    rt_err_t result;
+
+    if (path == NULL || path[0] == '\0' || snapshot == NULL)
+    {
+        return -RT_EINVAL;
+    }
+    reading_state_ensure_parent_dir(path);
+
+    written = snprintf(temp_path, sizeof(temp_path), "%s%s", path, READING_STATE_TEMP_SUFFIX);
+    if (written < 0 || (size_t)written >= sizeof(temp_path))
+    {
+        return -RT_EFULL;
+    }
+    written = snprintf(backup_path, sizeof(backup_path), "%s%s", path, READING_STATE_BACKUP_SUFFIX);
+    if (written < 0 || (size_t)written >= sizeof(backup_path))
+    {
+        return -RT_EFULL;
+    }
+
+    if (unlink(temp_path) == 0)
+    {
+        (void)reading_state_sync_parent_dir(temp_path);
+    }
+    fd = open(temp_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0)
+    {
+        return -RT_EIO;
+    }
+
+    result = reading_state_write_file_snapshot(fd, snapshot, line, sizeof(line));
+    if (result != RT_EOK)
+    {
+        close(fd);
+        if (unlink(temp_path) == 0)
+        {
+            (void)reading_state_sync_parent_dir(temp_path);
+        }
+        return result;
+    }
+
+    if (fsync(fd) != 0)
+    {
+        close(fd);
+        if (unlink(temp_path) == 0)
+        {
+            (void)reading_state_sync_parent_dir(temp_path);
+        }
+        return -RT_EIO;
+    }
+
+    if (close(fd) != 0)
+    {
+        if (unlink(temp_path) == 0)
+        {
+            (void)reading_state_sync_parent_dir(temp_path);
+        }
+        return -RT_EIO;
+    }
+
+    if (rename(temp_path, path) == 0)
+    {
+        (void)reading_state_sync_parent_dir(path);
+        return RT_EOK;
+    }
+
+    bool backup_created = reading_state_can_read_path(path);
+
+    if (backup_created)
+    {
+        (void)unlink(backup_path);
+        if (rename(path, backup_path) != 0)
+        {
+            if (unlink(temp_path) == 0)
+            {
+                (void)reading_state_sync_parent_dir(temp_path);
+            }
+            return -RT_EIO;
+        }
+        (void)reading_state_sync_parent_dir(path);
+    }
+
+    if (rename(temp_path, path) == 0)
+    {
+        if (backup_created)
+        {
+            (void)unlink(backup_path);
+        }
+        (void)reading_state_sync_parent_dir(path);
+        return RT_EOK;
+    }
+
+    if (backup_created)
+    {
+        if (rename(backup_path, path) != 0)
+        {
+            rt_kprintf("reading_state: snapshot rollback failed path=%s backup=%s\n", path, backup_path);
+        }
+        else
+        {
+            (void)reading_state_sync_parent_dir(path);
+        }
+    }
+
+    if (unlink(temp_path) == 0)
+    {
+        (void)reading_state_sync_parent_dir(temp_path);
+    }
+    return -RT_EIO;
+}
+
+static rt_err_t reading_state_save_snapshot_to_storage(const reading_state_db_t *snapshot,
+                                                       char *saved_path,
+                                                       size_t saved_path_size)
+{
+    size_t i;
+    rt_err_t result;
+    char path[READING_STATE_STORAGE_PATH_MAX];
+
+    if (snapshot == NULL)
+    {
+        return -RT_EINVAL;
+    }
+
+    if (saved_path != NULL && saved_path_size > 0U)
+    {
+        saved_path[0] = '\0';
+    }
+
+    if (!snapshot->dirty)
+    {
+        return RT_EOK;
+    }
+
+    if (reading_state_path_available(snapshot->storage_path))
+    {
+        result = reading_state_save_snapshot_to_path(snapshot->storage_path, snapshot);
+        if (result == RT_EOK)
+        {
+            if (saved_path != NULL &&
+                saved_path_size > 0U &&
+                !reading_state_copy_path(saved_path, saved_path_size, snapshot->storage_path))
+            {
+                return -RT_EFULL;
+            }
+            return RT_EOK;
+        }
+    }
+
+    for (i = 0U; i < (sizeof(s_reading_state_config_dirs) / sizeof(s_reading_state_config_dirs[0])); ++i)
+    {
+        if (!reading_state_dir_available(s_reading_state_config_dirs[i]))
+        {
+            continue;
+        }
+
+        if (!reading_state_join_path(path, sizeof(path), s_reading_state_config_dirs[i], READING_STATE_FILE_NAME))
+        {
+            continue;
+        }
+
+        result = reading_state_save_snapshot_to_path(path, snapshot);
+        if (result == RT_EOK)
+        {
+            if (saved_path != NULL &&
+                saved_path_size > 0U &&
+                !reading_state_copy_path(saved_path, saved_path_size, path))
+            {
+                return -RT_EFULL;
+            }
+            return RT_EOK;
+        }
+    }
+
+    return -RT_ERROR;
 }
 
 static rt_err_t reading_state_save_locked(void)
@@ -631,7 +1023,12 @@ static rt_err_t reading_state_save_locked(void)
     rt_err_t result;
     char path[READING_STATE_STORAGE_PATH_MAX];
 
-    if (s_reading_state_db.storage_path[0] != '\0')
+    if (!s_reading_state_db.dirty)
+    {
+        return RT_EOK;
+    }
+
+    if (reading_state_path_available(s_reading_state_db.storage_path))
     {
         result = reading_state_save_to_path_locked(s_reading_state_db.storage_path);
         if (result == RT_EOK)
@@ -643,6 +1040,11 @@ static rt_err_t reading_state_save_locked(void)
 
     for (i = 0U; i < (sizeof(s_reading_state_config_dirs) / sizeof(s_reading_state_config_dirs[0])); ++i)
     {
+        if (!reading_state_dir_available(s_reading_state_config_dirs[i]))
+        {
+            continue;
+        }
+
         if (!reading_state_join_path(path, sizeof(path), s_reading_state_config_dirs[i], READING_STATE_FILE_NAME))
         {
             continue;
@@ -663,6 +1065,65 @@ static rt_err_t reading_state_save_locked(void)
     }
 
     return -RT_ERROR;
+}
+
+static rt_err_t reading_state_save_without_io_lock(void)
+{
+    reading_state_db_t *snapshot;
+    char saved_path[READING_STATE_STORAGE_PATH_MAX];
+    rt_err_t result;
+
+    snapshot = (reading_state_db_t *)malloc(sizeof(*snapshot));
+    if (snapshot == NULL)
+    {
+        return -RT_ENOMEM;
+    }
+    saved_path[0] = '\0';
+
+    if (!reading_state_lock())
+    {
+        free(snapshot);
+        return -RT_ERROR;
+    }
+
+    if (!s_reading_state_db.dirty)
+    {
+        reading_state_unlock();
+        free(snapshot);
+        return RT_EOK;
+    }
+
+    *snapshot = s_reading_state_db;
+    s_reading_state_db.dirty = false;
+    reading_state_unlock();
+
+    result = reading_state_save_snapshot_to_storage(snapshot, saved_path, sizeof(saved_path));
+    free(snapshot);
+
+    if (!reading_state_lock())
+    {
+        return result;
+    }
+
+    if (result == RT_EOK)
+    {
+        if (saved_path[0] != '\0' &&
+            !reading_state_copy_path(s_reading_state_db.storage_path,
+                                     sizeof(s_reading_state_db.storage_path),
+                                     saved_path))
+        {
+            s_reading_state_db.dirty = true;
+            reading_state_unlock();
+            return -RT_EFULL;
+        }
+    }
+    else
+    {
+        s_reading_state_db.dirty = true;
+    }
+
+    reading_state_unlock();
+    return result;
 }
 
 static int reading_state_read_line(int fd, char *line, size_t line_size)
@@ -1015,10 +1476,15 @@ static rt_err_t reading_state_parse_file_locked(int fd)
     return result;
 }
 
-static rt_err_t reading_state_load_from_path_locked(const char *path)
+static rt_err_t reading_state_parse_path_locked(const char *path)
 {
     int fd;
     rt_err_t result;
+
+    if (path == NULL || path[0] == '\0')
+    {
+        return -RT_EINVAL;
+    }
 
     fd = open(path, O_RDONLY, 0);
     if (fd < 0)
@@ -1035,6 +1501,51 @@ static rt_err_t reading_state_load_from_path_locked(const char *path)
     if (result != RT_EOK)
     {
         reading_state_reset_content_locked();
+    }
+
+    return result;
+}
+
+static rt_err_t reading_state_load_from_path_locked(const char *path)
+{
+    rt_err_t result;
+    char backup_path[READING_STATE_STORAGE_PATH_MAX];
+    int written;
+
+    result = reading_state_parse_path_locked(path);
+    if (result == RT_EOK)
+    {
+        return RT_EOK;
+    }
+
+    rt_kprintf("reading_state: parse failed, trying backup path for %s\n", path);
+    written = snprintf(backup_path, sizeof(backup_path), "%s%s", path, READING_STATE_BACKUP_SUFFIX);
+    if (written < 0 || (size_t)written >= sizeof(backup_path))
+    {
+        return result;
+    }
+
+    if (reading_state_can_read_path(backup_path))
+    {
+        rt_err_t backup_result;
+
+        backup_result = reading_state_parse_path_locked(backup_path);
+        if (backup_result == RT_EOK)
+        {
+            if (rename(backup_path, path) != 0)
+            {
+                rt_kprintf("reading_state: restore backup failed path=%s backup=%s\n", path, backup_path);
+                return -RT_EIO;
+            }
+            if (reading_state_sync_parent_dir(path) != RT_EOK)
+            {
+                rt_kprintf("reading_state: sync parent dir after restore failed path=%s\n", path);
+            }
+            return RT_EOK;
+        }
+        rt_kprintf("reading_state: backup parse failed path=%s err=%d\n",
+                   backup_path,
+                   (int)backup_result);
     }
 
     return result;
@@ -1091,16 +1602,7 @@ rt_err_t reading_state_reload(void)
 
 rt_err_t reading_state_save(void)
 {
-    rt_err_t result;
-
-    if (!reading_state_lock())
-    {
-        return -RT_ERROR;
-    }
-
-    result = reading_state_save_locked();
-    reading_state_unlock();
-    return result;
+    return reading_state_save_without_io_lock();
 }
 
 void reading_state_save_deferred(void)
@@ -1116,17 +1618,7 @@ void reading_state_save_deferred(void)
 
 void reading_state_flush_deferred(void)
 {
-    if (!reading_state_lock())
-    {
-        return;
-    }
-
-    if (s_reading_state_db.dirty)
-    {
-        (void)reading_state_save_locked();
-    }
-
-    reading_state_unlock();
+    (void)reading_state_save_without_io_lock();
 }
 
 bool reading_state_get(const char *path, reading_book_state_t *out)

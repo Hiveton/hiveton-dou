@@ -9,7 +9,7 @@
 #include <string.h>
 #include "mem_section.h"
 
-#define NETWORK_PSRAM_HEAP_SIZE (1024U * 1024U)
+#define NETWORK_PSRAM_HEAP_SIZE (512U * 1024U)
 #define NETWORK_MEM_MAGIC       0x4E45544DU
 #define NETWORK_MEM_LOG_LIMIT   3U
 
@@ -78,18 +78,21 @@ static void network_mem_record_alloc(rt_size_t total_size)
 {
     uint32_t bytes = (uint32_t)total_size;
 
+    rt_enter_critical();
     s_network_pool_alloc_count++;
     s_network_pool_active_bytes += bytes;
     if (s_network_pool_active_bytes > s_network_pool_high_water_bytes)
     {
         s_network_pool_high_water_bytes = s_network_pool_active_bytes;
     }
+    rt_exit_critical();
 }
 
 static void network_mem_record_free(rt_size_t total_size)
 {
     uint32_t bytes = (uint32_t)total_size;
 
+    rt_enter_critical();
     s_network_pool_free_count++;
     if (s_network_pool_active_bytes >= bytes)
     {
@@ -98,6 +101,37 @@ static void network_mem_record_free(rt_size_t total_size)
     else
     {
         s_network_pool_active_bytes = 0;
+    }
+    rt_exit_critical();
+}
+
+static void network_mem_record_fail(uint32_t size)
+{
+    uint32_t fail_count;
+    uint32_t max_fail_size;
+    uint32_t active_bytes;
+    uint32_t high_water_bytes;
+
+    rt_enter_critical();
+    s_network_pool_fail_count++;
+    if (size > s_network_pool_max_fail_size)
+    {
+        s_network_pool_max_fail_size = size;
+    }
+    fail_count = s_network_pool_fail_count;
+    max_fail_size = s_network_pool_max_fail_size;
+    active_bytes = s_network_pool_active_bytes;
+    high_water_bytes = s_network_pool_high_water_bytes;
+    rt_exit_critical();
+
+    if (network_mem_should_log_fail(fail_count))
+    {
+        rt_kprintf("network_mem: alloc failed size=%u active=%u high=%u fail=%u max_fail=%u\n",
+                   size,
+                   active_bytes,
+                   high_water_bytes,
+                   fail_count,
+                   max_fail_size);
     }
 }
 
@@ -116,19 +150,7 @@ void *network_mem_malloc(uint32_t size)
                                                 total_size);
     if (hdr == RT_NULL)
     {
-        s_network_pool_fail_count++;
-        if (size > s_network_pool_max_fail_size)
-        {
-            s_network_pool_max_fail_size = size;
-        }
-        if (network_mem_should_log_fail(s_network_pool_fail_count))
-        {
-            rt_kprintf("network_mem: alloc failed size=%u active=%u high=%u fail=%u max_fail=%u\n",
-                       size, s_network_pool_active_bytes,
-                       s_network_pool_high_water_bytes,
-                       s_network_pool_fail_count,
-                       s_network_pool_max_fail_size);
-        }
+        network_mem_record_fail(size);
         return RT_NULL;
     }
 

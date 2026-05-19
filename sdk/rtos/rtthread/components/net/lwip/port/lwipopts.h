@@ -285,10 +285,10 @@
 #define MEMP_OVERFLOW_CHECK         1
 #define LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT 1
 
-//#define MEM_LIBC_MALLOC             1
+#define MEM_LIBC_MALLOC             1
 //#define MEM_USE_POOLS               1
 //#define MEMP_USE_CUSTOM_POOLS       1
-#define MEM_SIZE                    (1024*512)
+//#define MEM_SIZE                    (1024*64)
 
 #define MEMP_MEM_MALLOC             1
 
@@ -552,13 +552,13 @@
         #define PPPOS_SUPPORT               0
     #endif
 
-    #define PAP_SUPPORT                 0      /* Cellular PPP path uses dial-up only, no PAP auth. */
-    #define CHAP_SUPPORT                0      /* Disable CHAP to avoid lwIP PPP MD5 dependency clash. */
+    #define PAP_SUPPORT                 0      /* Set > 0 for PAP. */
+    #define CHAP_SUPPORT                0      /* Set > 0 for CHAP. */
     #define MSCHAP_SUPPORT              0      /* Set > 0 for MSCHAP (NOT FUNCTIONAL!) */
     #define CBCP_SUPPORT                0      /* Set > 0 for CBCP (NOT FUNCTIONAL!) */
     #define CCP_SUPPORT                 0      /* Set > 0 for CCP (NOT FUNCTIONAL!) */
     #define VJ_SUPPORT                  1      /* Set > 0 for VJ header compression. */
-    #define MD5_SUPPORT                 0      /* No PPP auth path, keep MD5 disabled. */
+    #define MD5_SUPPORT                 0      /* Set > 0 for MD5 (see also CHAP) */
 
 #endif /* PPP_SUPPORT */
 
@@ -568,7 +568,7 @@
  * names (read, write & close). (only used if you use sockets.c)
  */
 #ifndef LWIP_POSIX_SOCKETS_IO_NAMES
-    #define LWIP_POSIX_SOCKETS_IO_NAMES     0
+    #define LWIP_POSIX_SOCKETS_IO_NAMES     1
 #endif
 
 /**
@@ -691,5 +691,17 @@
 #if !defined LWIP_NUM_NETIF_CLIENT_DATA || defined __DOXYGEN__
     #define LWIP_NUM_NETIF_CLIENT_DATA      2
 #endif
+
+/**
+ * LWIP_SOCKET_OFFSET==n: Increases the file descriptor number created by LwIP with n.
+ * This can be useful when there are multiple APIs which create file descriptors.
+ * When they all start with a different offset and you won't make them overlap you can
+ * re implement read/write/close/ioctl/fnctl to send the requested action to the right
+ * library (sharing select will need more work though).
+ */
+#if !defined LWIP_SOCKET_OFFSET || defined __DOXYGEN__
+    #define LWIP_SOCKET_OFFSET              3
+#endif
+
 
 #endif /* __LWIPOPTS_H__ */

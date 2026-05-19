@@ -10,10 +10,34 @@
 #define TOUCH_WAKEUP_THREAD_STACK_SIZE 1024
 #define TOUCH_WAKEUP_THREAD_PRIORITY 8
 #define TOUCH_WAKEUP_THREAD_TICK 10
+#define TOUCH_WAKEUP_REQUEST_DEBOUNCE_MS 500U
 
 static rt_sem_t s_touch_wakeup_sem = RT_NULL;
 static rt_thread_t s_touch_wakeup_thread = RT_NULL;
 static rt_bool_t s_touch_wakeup_started = RT_FALSE;
+static rt_tick_t s_touch_wakeup_last_request_tick = 0U;
+
+static rt_bool_t touch_wakeup_try_mark_started(void)
+{
+    rt_bool_t already_started;
+
+    rt_enter_critical();
+    already_started = s_touch_wakeup_started;
+    if (!already_started)
+    {
+        s_touch_wakeup_started = RT_TRUE;
+    }
+    rt_exit_critical();
+
+    return !already_started;
+}
+
+static void touch_wakeup_clear_started(void)
+{
+    rt_enter_critical();
+    s_touch_wakeup_started = RT_FALSE;
+    rt_exit_critical();
+}
 
 static void touch_wakeup_thread_entry(void *parameter)
 {
@@ -29,6 +53,16 @@ static void touch_wakeup_thread_entry(void *parameter)
         if (sleep_manager_is_sleeping() ||
             ui_dispatch_get_active_screen() == UI_SCREEN_STANDBY)
         {
+            rt_tick_t now = rt_tick_get();
+            rt_tick_t debounce_ticks = rt_tick_from_millisecond(TOUCH_WAKEUP_REQUEST_DEBOUNCE_MS);
+
+            if (s_touch_wakeup_last_request_tick != 0U &&
+                (rt_tick_t)(now - s_touch_wakeup_last_request_tick) < debounce_ticks)
+            {
+                continue;
+            }
+
+            s_touch_wakeup_last_request_tick = now;
             rt_kprintf("touch_wakeup: request wakeup\n");
             sleep_manager_request_wakeup();
         }
@@ -59,7 +93,7 @@ static void touch_wakeup_enable_aon_source(void)
 
 void touch_wakeup_init(void)
 {
-    if (s_touch_wakeup_started)
+    if (!touch_wakeup_try_mark_started())
     {
         return;
     }
@@ -68,6 +102,7 @@ void touch_wakeup_init(void)
     if (s_touch_wakeup_sem == RT_NULL)
     {
         rt_kprintf("touch_wakeup: sem create failed\n");
+        touch_wakeup_clear_started();
         return;
     }
 
@@ -82,11 +117,11 @@ void touch_wakeup_init(void)
         rt_kprintf("touch_wakeup: thread create failed\n");
         rt_sem_delete(s_touch_wakeup_sem);
         s_touch_wakeup_sem = RT_NULL;
+        touch_wakeup_clear_started();
         return;
     }
 
     rt_thread_startup(s_touch_wakeup_thread);
-    s_touch_wakeup_started = RT_TRUE;
 
     touch_wakeup_enable_aon_source();
 }

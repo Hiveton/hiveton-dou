@@ -26,14 +26,77 @@
 #define UI_DISPATCH_EVT_HARDKEY_DOWN    (1UL << 11)
 #define UI_DISPATCH_EVT_POWEROFF_POPUP  (1UL << 12)
 #define UI_DISPATCH_EVT_FONT_REFRESH    (1UL << 13)
+#define UI_DISPATCH_EVT_HOME_TALK_PRESS (1UL << 14)
+#define UI_DISPATCH_EVT_HOME_TALK_RELEASE (1UL << 15)
+#define UI_DISPATCH_EVT_SWITCH_REQUEST  (1UL << 16)
 
 static rt_event_t s_ui_dispatch_event = RT_NULL;
+static struct rt_event s_ui_dispatch_event_static;
 static volatile ui_screen_id_t s_ui_active_screen = UI_SCREEN_NONE;
 static lv_obj_t *s_ui_poweroff_popup = NULL;
 static lv_obj_t *s_ui_poweroff_status_label = NULL;
 static volatile bool s_ui_status_refresh_pending = false;
+static volatile ui_screen_id_t s_ui_requested_screen = UI_SCREEN_NONE;
+static const rt_uint32_t UI_DISPATCH_EVT_SCREEN_SWITCH_MASK =
+    (UI_DISPATCH_EVT_SWITCH_HOME |
+     UI_DISPATCH_EVT_SWITCH_AI_DOU |
+     UI_DISPATCH_EVT_SWITCH_STANDBY |
+     UI_DISPATCH_EVT_SWITCH_REQUEST);
+static const rt_uint32_t UI_DISPATCH_EVT_PAGE_TRANSITION_MASK =
+    (UI_DISPATCH_EVT_SCREEN_SWITCH_MASK |
+     UI_DISPATCH_EVT_EXIT_STANDBY |
+     UI_DISPATCH_EVT_STATUS_REFRESH |
+     UI_DISPATCH_EVT_TIME_REFRESH |
+     UI_DISPATCH_EVT_WEATHER_REFRESH |
+     UI_DISPATCH_EVT_STANDBY_REFRESH);
+static const rt_uint32_t UI_DISPATCH_EVT_STATUS_MASK =
+    (UI_DISPATCH_EVT_STATUS_REFRESH |
+     UI_DISPATCH_EVT_TIME_REFRESH |
+     UI_DISPATCH_EVT_WEATHER_REFRESH |
+     UI_DISPATCH_EVT_STANDBY_REFRESH);
 
 extern void app_set_panel_brightness(rt_uint8_t brightness);
+
+static bool ui_dispatch_try_mark_status_refresh_pending(void)
+{
+    bool already_pending;
+
+    rt_enter_critical();
+    already_pending = s_ui_status_refresh_pending;
+    if (!already_pending)
+    {
+        s_ui_status_refresh_pending = true;
+    }
+    rt_exit_critical();
+
+    return !already_pending;
+}
+
+static void ui_dispatch_clear_status_refresh_pending(void)
+{
+    rt_enter_critical();
+    s_ui_status_refresh_pending = false;
+    rt_exit_critical();
+}
+
+static void ui_dispatch_set_requested_screen(ui_screen_id_t screen_id)
+{
+    rt_enter_critical();
+    s_ui_requested_screen = screen_id;
+    rt_exit_critical();
+}
+
+static ui_screen_id_t ui_dispatch_take_requested_screen(void)
+{
+    ui_screen_id_t screen_id;
+
+    rt_enter_critical();
+    screen_id = s_ui_requested_screen;
+    s_ui_requested_screen = UI_SCREEN_NONE;
+    rt_exit_critical();
+
+    return screen_id;
+}
 
 static void ui_dispatch_poweroff_popup_close(void)
 {
@@ -158,11 +221,11 @@ rt_err_t ui_dispatch_init(void)
         return RT_EOK;
     }
 
-    s_ui_dispatch_event = rt_event_create("ui_disp", RT_IPC_FLAG_FIFO);
-    if (s_ui_dispatch_event == RT_NULL)
+    if (rt_event_init(&s_ui_dispatch_event_static, "ui_disp", RT_IPC_FLAG_FIFO) != RT_EOK)
     {
         return -RT_ENOMEM;
     }
+    s_ui_dispatch_event = &s_ui_dispatch_event_static;
 
     return RT_EOK;
 }
@@ -171,6 +234,32 @@ static void ui_dispatch_send(rt_uint32_t evt)
 {
     if (s_ui_dispatch_event != RT_NULL)
     {
+        rt_uint32_t dedup_mask = 0U;
+
+        if ((evt & UI_DISPATCH_EVT_PAGE_TRANSITION_MASK) != 0U)
+        {
+            dedup_mask = UI_DISPATCH_EVT_PAGE_TRANSITION_MASK;
+        }
+        else if ((evt & UI_DISPATCH_EVT_STATUS_MASK) != 0U)
+        {
+            dedup_mask = (evt & UI_DISPATCH_EVT_STATUS_MASK);
+        }
+        else if ((evt & UI_DISPATCH_EVT_ACTIVITY) != 0U)
+        {
+            dedup_mask = UI_DISPATCH_EVT_ACTIVITY;
+        }
+
+        if (dedup_mask != 0U)
+        {
+            rt_uint32_t dropped;
+
+            (void)rt_event_recv(s_ui_dispatch_event,
+                                dedup_mask,
+                                RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
+                                0,
+                                &dropped);
+        }
+
         rt_event_send(s_ui_dispatch_event, evt);
     }
 }
@@ -194,10 +283,13 @@ void ui_dispatch_process_pending(void)
                          UI_DISPATCH_EVT_BACK |
                          UI_DISPATCH_EVT_HARDKEY_UP |
                          UI_DISPATCH_EVT_HARDKEY_DOWN |
+                         UI_DISPATCH_EVT_HOME_TALK_PRESS |
+                         UI_DISPATCH_EVT_HOME_TALK_RELEASE |
                          UI_DISPATCH_EVT_POWEROFF_POPUP |
                          UI_DISPATCH_EVT_FONT_REFRESH |
                          UI_DISPATCH_EVT_SWITCH_HOME |
                          UI_DISPATCH_EVT_SWITCH_AI_DOU |
+                         UI_DISPATCH_EVT_SWITCH_REQUEST |
                          UI_DISPATCH_EVT_SWITCH_STANDBY,
                          RT_EVENT_FLAG_OR | RT_EVENT_FLAG_CLEAR,
                          0,
@@ -234,10 +326,24 @@ void ui_dispatch_process_pending(void)
             ui_runtime_switch_to(UI_SCREEN_STANDBY);
         }
 
+        if ((events & UI_DISPATCH_EVT_SWITCH_REQUEST) != 0U)
+        {
+            ui_screen_id_t target = ui_dispatch_take_requested_screen();
+
+            if (target != UI_SCREEN_NONE)
+            {
+                ui_runtime_switch_to(target);
+            }
+        }
+
         if ((events & UI_DISPATCH_EVT_STATUS_REFRESH) != 0U)
         {
-            s_ui_status_refresh_pending = false;
+            ui_dispatch_clear_status_refresh_pending();
             ui_refresh_global_status_bar();
+            if (ui_dispatch_get_active_screen() == UI_SCREEN_SETTINGS)
+            {
+                ui_settings_refresh_summaries();
+            }
         }
 
         if ((events & UI_DISPATCH_EVT_HARDKEY_UP) != 0U)
@@ -248,6 +354,22 @@ void ui_dispatch_process_pending(void)
         if ((events & UI_DISPATCH_EVT_HARDKEY_DOWN) != 0U)
         {
             ui_runtime_handle_hardkey_nav(1);
+        }
+
+        if ((events & UI_DISPATCH_EVT_HOME_TALK_PRESS) != 0U)
+        {
+            if (ui_dispatch_get_active_screen() == UI_SCREEN_HOME)
+            {
+                ui_home_ai_hardware_talk_press();
+            }
+        }
+
+        if ((events & UI_DISPATCH_EVT_HOME_TALK_RELEASE) != 0U)
+        {
+            if (ui_dispatch_get_active_screen() == UI_SCREEN_HOME)
+            {
+                ui_home_ai_hardware_talk_release();
+            }
         }
 
         if ((events & UI_DISPATCH_EVT_TIME_REFRESH) != 0U)
@@ -290,12 +412,11 @@ void ui_dispatch_request_status_refresh(void)
         return;
     }
 
-    if (s_ui_status_refresh_pending)
+    if (!ui_dispatch_try_mark_status_refresh_pending())
     {
         return;
     }
 
-    s_ui_status_refresh_pending = true;
     ui_dispatch_send(UI_DISPATCH_EVT_STATUS_REFRESH);
 }
 
@@ -337,6 +458,18 @@ void ui_dispatch_request_hardkey_down(void)
     ui_dispatch_send(UI_DISPATCH_EVT_HARDKEY_DOWN);
 }
 
+void ui_dispatch_request_home_ai_talk_press(void)
+{
+    ui_dispatch_request_activity();
+    ui_dispatch_send(UI_DISPATCH_EVT_HOME_TALK_PRESS);
+}
+
+void ui_dispatch_request_home_ai_talk_release(void)
+{
+    ui_dispatch_request_activity();
+    ui_dispatch_send(UI_DISPATCH_EVT_HOME_TALK_RELEASE);
+}
+
 void ui_dispatch_request_poweroff_confirm(void)
 {
     ui_dispatch_send(UI_DISPATCH_EVT_POWEROFF_POPUP);
@@ -349,6 +482,14 @@ void ui_dispatch_request_font_refresh(void)
 
 void ui_dispatch_request_screen_switch(ui_screen_id_t screen_id)
 {
+    ui_screen_id_t active = ui_dispatch_get_active_screen();
+
+    if (screen_id == active && active != UI_SCREEN_STANDBY)
+    {
+        ui_dispatch_request_activity();
+        return;
+    }
+
     switch (screen_id)
     {
     case UI_SCREEN_NONE:
@@ -366,16 +507,27 @@ void ui_dispatch_request_screen_switch(ui_screen_id_t screen_id)
         ui_dispatch_send(UI_DISPATCH_EVT_SWITCH_STANDBY);
         break;
     default:
+        ui_dispatch_request_activity();
+        ui_dispatch_set_requested_screen(screen_id);
+        ui_dispatch_send(UI_DISPATCH_EVT_SWITCH_REQUEST);
         break;
     }
 }
 
 void ui_dispatch_set_active_screen(ui_screen_id_t screen_id)
 {
+    rt_enter_critical();
     s_ui_active_screen = screen_id;
+    rt_exit_critical();
 }
 
 ui_screen_id_t ui_dispatch_get_active_screen(void)
 {
-    return s_ui_active_screen;
+    ui_screen_id_t screen_id;
+
+    rt_enter_critical();
+    screen_id = s_ui_active_screen;
+    rt_exit_critical();
+
+    return screen_id;
 }

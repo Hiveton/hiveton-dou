@@ -37,6 +37,14 @@ typedef struct
     char internal_path[READING_EPUB_MAX_INTERNAL_PATH];
 } reading_epub_spine_item_t;
 
+typedef enum
+{
+    READING_EPUB_COVER_FOUND = 0,
+    READING_EPUB_COVER_NOT_FOUND,
+    READING_EPUB_COVER_OPEN_FAILED,
+    READING_EPUB_COVER_PACKAGE_FAILED,
+} reading_epub_cover_result_t;
+
 bool reading_epub_build_index(const char *epub_path,
                               reading_epub_spine_item_t *items,
                               uint16_t max_item_count,
@@ -78,6 +86,10 @@ bool reading_epub_decode_image(const char *epub_path,
 bool reading_epub_find_cover_image(const char *epub_path,
                                    char *internal_path,
                                    size_t internal_path_size);
+
+reading_epub_cover_result_t reading_epub_find_cover_image_result(const char *epub_path,
+                                                                 char *internal_path,
+                                                                 size_t internal_path_size);
 
 bool reading_epub_probe_image_size(const char *epub_path,
                                    const char *internal_path,

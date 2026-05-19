@@ -162,6 +162,8 @@ static rt_uint8_t s_cat1_ppp_rx_stack[CAT1_MODEM_PPP_RX_STACK_SIZE]
     L2_RET_BSS_SECT(cat1_modem_ppp_rx_stack);
 #endif
 static rt_event_t s_cat1_event = RT_NULL;
+static struct rt_event s_cat1_event_obj;
+static rt_uint8_t s_cat1_event_ready = 0U;
 static volatile rt_uint8_t s_cat1_ready = 0U;
 static volatile rt_uint8_t s_online_requested = 0U;
 static volatile rt_uint8_t s_client_ready = 0U;
@@ -1857,8 +1859,8 @@ static int cat1_modem_raw_probe_at(void)
 static void cat1_modem_pin_init(void)
 {
     rt_pin_mode(CAT1_MODEM_POWER_EN_PIN, PIN_MODE_OUTPUT);
-    rt_pin_write(CAT1_MODEM_POWER_EN_PIN, PIN_HIGH);
-    s_power_enabled = 1U;
+    rt_pin_write(CAT1_MODEM_POWER_EN_PIN, PIN_LOW);
+    s_power_enabled = 0U;
     rt_pin_mode(CAT1_MODEM_POWERKEY_PIN, PIN_MODE_OUTPUT);
     rt_pin_write(CAT1_MODEM_POWERKEY_PIN, PIN_HIGH);
 }
@@ -2652,11 +2654,16 @@ rt_err_t cat1_modem_init(void)
     cat1_modem_load_high_baud_config();
     if (s_cat1_event == RT_NULL)
     {
-        s_cat1_event = rt_event_create("cat1evt", RT_IPC_FLAG_FIFO);
-        if (s_cat1_event == RT_NULL)
+        if (s_cat1_event_ready == 0U)
         {
-            return -RT_ENOMEM;
+            result = rt_event_init(&s_cat1_event_obj, "cat1evt", RT_IPC_FLAG_FIFO);
+            if (result != RT_EOK)
+            {
+                return result;
+            }
+            s_cat1_event_ready = 1U;
         }
+        s_cat1_event = &s_cat1_event_obj;
     }
 #if CAT1_MODEM_AT_PAUSED
     s_online_requested = 0U;

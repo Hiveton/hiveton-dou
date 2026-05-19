@@ -33,6 +33,10 @@ ui_epd_refresh_profile_t ui_epd_refresh_policy_screen_profile(ui_screen_id_t scr
     case UI_SCREEN_BRIGHTNESS:
     case UI_SCREEN_LANGUAGE:
     case UI_SCREEN_AI_WEATHER_SETTINGS:
+    case UI_SCREEN_MORE:
+    case UI_SCREEN_CALCULATOR:
+    case UI_SCREEN_READING_TOC:
+    case UI_SCREEN_READING_FONT:
     case UI_SCREEN_NONE:
     case UI_SCREEN_COUNT:
     default:

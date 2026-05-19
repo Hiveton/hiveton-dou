@@ -398,6 +398,8 @@ typedef struct _src_table_
 } audprc_src_table_t;
 
 static struct bf0_audio_prc h_aud_prc;
+static struct rt_ringbuffer h_aud_prc_rbf_tx;
+static struct rt_ringbuffer h_aud_prc_rbf_rx;
 const audprc_src_table_t src_table[] =
 {
     {8000,  11025, 0, 0, 0, 0, 0, 0, 1, 0x2e709c60},
@@ -1252,8 +1254,8 @@ static rt_err_t bf0_audio_init(struct rt_audio_device *audio)
     {
         audprc->queue_buf[i] = NULL;
     }
-    audprc->rbf_tx_instanc = malloc(sizeof(struct rt_ringbuffer));
-    audprc->rbf_rx_instanc = malloc(sizeof(struct rt_ringbuffer));
+    audprc->rbf_tx_instanc = &h_aud_prc_rbf_tx;
+    audprc->rbf_rx_instanc = &h_aud_prc_rbf_rx;
     rt_ringbuffer_init(audprc->rbf_tx_instanc, audprc->rbf_tx_pool, AUDPRC_DMA_RBF_NUM);
     rt_ringbuffer_init(audprc->rbf_rx_instanc, audprc->rbf_rx_pool, AUDPRC_DMA_RBF_NUM);
 

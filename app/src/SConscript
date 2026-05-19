@@ -5,6 +5,7 @@ cwd = GetCurrentDir()
 src = [
     os.path.join(cwd, 'app_buttons.c'),
     os.path.join(cwd, 'app_watchdog.c'),
+    os.path.join(cwd, 'app_cxx_mem.c'),
     os.path.join(cwd, 'app_audio_mem.c'),
     os.path.join(cwd, 'bt_mem.c'),
     os.path.join(cwd, 'main.c'),
@@ -20,6 +21,7 @@ src = [
     os.path.join(cwd, 'config', 'app_config_storage.c'),
     os.path.join(cwd, 'network', 'net_manager.c'),
     os.path.join(cwd, 'network', 'net_http_lock.c'),
+    os.path.join(cwd, 'network', 'app_network.c'),
     os.path.join(cwd, 'network', 'network_mem.c'),
     os.path.join(cwd, 'ui', 'home_screen.c'),
     os.path.join(cwd, 'ui', 'ui.c'),

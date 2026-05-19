@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "ui_components.h"
 #include "ui_i18n.h"
 #include "ui_helpers.h"
 #include "ui_runtime_adapter.h"
@@ -6,13 +7,17 @@
 
 lv_obj_t *ui_Language = NULL;
 
-#define UI_LANGUAGE_CONTENT_HEIGHT 650
-
 typedef struct
 {
     ui_settings_language_t language;
     const char *label;
+    bool supported;
 } ui_language_option_t;
+
+static const ui_language_option_t s_language_options[] = {
+    {UI_SETTINGS_LANGUAGE_ZH_CN, "简体中文", true},
+    {UI_SETTINGS_LANGUAGE_EN_US, "English（United Kingdom）", true},
+};
 
 static const char *ui_language_screen_title(void)
 {
@@ -20,15 +25,12 @@ static const char *ui_language_screen_title(void)
     {
     case UI_SETTINGS_LANGUAGE_EN_US:
         return "Language";
+    case UI_SETTINGS_LANGUAGE_ZH_TW:
+        return "語言";
     case UI_SETTINGS_LANGUAGE_ZH_CN:
     default:
         return "语言";
     }
-}
-
-static const char *ui_language_screen_hint(void)
-{
-    return ui_i18n_pick("切换后会立即应用到所有页面。", "Changes apply to all screens immediately.");
 }
 
 static void ui_language_invalidate_all_screens(void)
@@ -59,31 +61,104 @@ static void ui_language_invalidate_all_screens(void)
 static void ui_language_select_event_cb(lv_event_t *e)
 {
     ui_settings_language_t language;
+    const ui_language_option_t *option;
 
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
     {
         return;
     }
 
-    language = (ui_settings_language_t)(uintptr_t)lv_event_get_user_data(e);
+    option = (const ui_language_option_t *)lv_event_get_user_data(e);
+    if (option == NULL || !option->supported)
+    {
+        return;
+    }
+
+    language = option->language;
     ui_settings_set_language(language);
     ui_language_invalidate_all_screens();
     ui_runtime_reload(UI_SCREEN_LANGUAGE);
 }
 
+static lv_obj_t *ui_language_plain_obj(lv_obj_t *parent,
+                                       int x,
+                                       int y,
+                                       int w,
+                                       int h,
+                                       lv_opa_t opa,
+                                       uint32_t bg,
+                                       int border_w)
+{
+    lv_obj_t *obj = lv_obj_create(parent);
+
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_pos(obj, ui_px_x(x), ui_px_y(y));
+    lv_obj_set_size(obj, ui_px_w(w), ui_px_h(h));
+    lv_obj_set_style_radius(obj, 0, 0);
+    lv_obj_set_style_bg_color(obj, lv_color_hex(bg), 0);
+    lv_obj_set_style_bg_opa(obj, opa, 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(0x343434), 0);
+    lv_obj_set_style_border_width(obj, border_w, 0);
+    lv_obj_set_style_shadow_width(obj, 0, 0);
+    lv_obj_set_style_outline_width(obj, 0, 0);
+    lv_obj_set_style_pad_all(obj, 0, 0);
+    return obj;
+}
+
+static void ui_language_create_radio(lv_obj_t *parent, int x, int y, bool selected)
+{
+    static const lv_point_precise_t check_points[] = {
+        {6, 14},
+        {12, 20},
+        {23, 8},
+    };
+    lv_obj_t *circle;
+
+    circle = ui_language_plain_obj(parent, x, y, 30, 30, LV_OPA_TRANSP, 0xffffff, 3);
+    lv_obj_set_style_radius(circle, ui_px_x(15), 0);
+    lv_obj_clear_flag(circle, LV_OBJ_FLAG_CLICKABLE);
+
+    if (selected)
+    {
+        lv_obj_t *check = lv_line_create(circle);
+        lv_line_set_points(check, check_points, sizeof(check_points) / sizeof(check_points[0]));
+        lv_obj_set_style_line_color(check, lv_color_hex(0x343434), 0);
+        lv_obj_set_style_line_width(check, 3, 0);
+        lv_obj_set_style_line_rounded(check, true, 0);
+        lv_obj_clear_flag(check, LV_OBJ_FLAG_CLICKABLE);
+    }
+}
+
+static void ui_language_create_option_row(lv_obj_t *parent,
+                                          int y,
+                                          const ui_language_option_t *option,
+                                          bool selected)
+{
+    lv_obj_t *row;
+
+    row = ui_language_plain_obj(parent, 0, y, 528, 88, LV_OPA_TRANSP, 0xffffff, 0);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_user_data(row, (void *)option);
+    lv_obj_add_event_cb(row, ui_language_select_event_cb, LV_EVENT_CLICKED, (void *)option);
+
+    ui_create_label(row,
+                    option->label,
+                    32,
+                    28,
+                    380,
+                    31,
+                    26,
+                    LV_TEXT_ALIGN_LEFT,
+                    false,
+                    false);
+
+    ui_language_create_radio(row, 462, 16, selected);
+}
+
 void ui_Language_screen_init(void)
 {
-    ui_screen_scaffold_t page;
-    lv_obj_t *panel;
-    lv_obj_t *button;
-    lv_obj_t *hint;
     size_t i;
-    int y = 144;
     ui_settings_language_t selected_language = ui_settings_get_language();
-    const ui_language_option_t options[] = {
-        {UI_SETTINGS_LANGUAGE_ZH_CN, "简体中文"},
-        {UI_SETTINGS_LANGUAGE_EN_US, "English"},
-    };
 
     if (ui_Language != NULL)
     {
@@ -91,32 +166,17 @@ void ui_Language_screen_init(void)
     }
 
     ui_Language = ui_create_screen_base();
-    ui_build_standard_screen(&page, ui_Language, ui_language_screen_title(), UI_SCREEN_SETTINGS);
+    lv_obj_set_style_bg_color(ui_Language, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_bg_opa(ui_Language, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(ui_Language, LV_OBJ_FLAG_SCROLLABLE);
 
-    panel = ui_create_card(page.content, 0, 0, 528, UI_LANGUAGE_CONTENT_HEIGHT, UI_SCREEN_NONE, false, 0);
-    lv_obj_set_style_border_width(panel, 2, 0);
-    hint = ui_create_label(panel,
-                           ui_language_screen_hint(),
-                           44,
-                           84,
-                           440,
-                           40,
-                           20,
-                           LV_TEXT_ALIGN_LEFT,
-                           false,
-                           true);
-    LV_UNUSED(hint);
+    ui_secondary_top_nav_create(ui_Language, ui_language_screen_title(), UI_SCREEN_SETTINGS);
 
-    for (i = 0; i < sizeof(options) / sizeof(options[0]); ++i)
+    for (i = 0; i < sizeof(s_language_options) / sizeof(s_language_options[0]); ++i)
     {
-        bool is_selected = (options[i].language == selected_language);
+        bool is_selected = s_language_options[i].supported && (s_language_options[i].language == selected_language);
 
-        button = ui_create_button(panel, 44, y, 440, 50, options[i].label, 22, UI_SCREEN_NONE, is_selected);
-        lv_obj_add_event_cb(button,
-                            ui_language_select_event_cb,
-                            LV_EVENT_CLICKED,
-                            (void *)(uintptr_t)options[i].language);
-        y += 60;
+        ui_language_create_option_row(ui_Language, 91 + (int)i * 89, &s_language_options[i], is_selected);
     }
 }
 

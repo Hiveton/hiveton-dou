@@ -12,6 +12,8 @@ extern "C" {
 
 uint32_t sleep_manager_get_idle_timeout_ms(void);
 void sleep_manager_report_activity(void);
+void sleep_manager_block_standby(void);
+void sleep_manager_unblock_standby(void);
 bool sleep_manager_should_enter_standby(ui_screen_id_t active_id, uint32_t inactive_ms);
 void sleep_manager_on_enter_standby(ui_screen_id_t from_screen);
 void sleep_manager_on_exit_standby(ui_screen_id_t target_screen);

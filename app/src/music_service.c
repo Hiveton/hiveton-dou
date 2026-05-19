@@ -10,6 +10,8 @@
 
 #include <rtthread.h>
 
+#include "app_tf_storage.h"
+#include "app_watchdog.h"
 #include "audio_manager.h"
 #include "audio_mp3ctrl.h"
 
@@ -29,6 +31,99 @@ static uint16_t s_track_count = 0;
 static uint16_t s_selected_index = 0;
 static mp3ctrl_handle s_player = RT_NULL;
 static bool s_is_playing = false;
+static rt_mutex_t s_music_control_lock = RT_NULL;
+
+static rt_mutex_t music_service_control_lock_get(void)
+{
+    if (s_music_control_lock == RT_NULL)
+    {
+        s_music_control_lock = rt_mutex_create("musicctl", RT_IPC_FLAG_PRIO);
+    }
+
+    return s_music_control_lock;
+}
+
+static bool music_service_control_lock_take(void)
+{
+    rt_mutex_t lock = music_service_control_lock_get();
+
+    if (lock == RT_NULL)
+    {
+        return false;
+    }
+
+    return rt_mutex_take(lock, rt_tick_from_millisecond(1000U)) == RT_EOK;
+}
+
+static void music_service_control_lock_release(void)
+{
+    if (s_music_control_lock != RT_NULL)
+    {
+        rt_mutex_release(s_music_control_lock);
+    }
+}
+
+static uint16_t music_service_track_count_snapshot(void)
+{
+    uint16_t count;
+
+    rt_enter_critical();
+    count = s_track_count;
+    rt_exit_critical();
+
+    return count;
+}
+
+static uint16_t music_service_selected_index_snapshot(void)
+{
+    uint16_t index;
+
+    rt_enter_critical();
+    index = s_selected_index;
+    rt_exit_critical();
+
+    return index;
+}
+
+static void music_service_set_selected_index(uint16_t index)
+{
+    rt_enter_critical();
+    s_selected_index = index;
+    rt_exit_critical();
+}
+
+static uint16_t music_service_publish_track(void)
+{
+    uint16_t index;
+
+    rt_enter_critical();
+    index = s_track_count;
+    if (s_track_count < MUSIC_SERVICE_MAX_TRACKS)
+    {
+        s_track_count++;
+    }
+    rt_exit_critical();
+
+    return index;
+}
+
+static bool music_service_playing_snapshot(void)
+{
+    bool playing;
+
+    rt_enter_critical();
+    playing = s_is_playing;
+    rt_exit_critical();
+
+    return playing;
+}
+
+static void music_service_set_playing(bool playing)
+{
+    rt_enter_critical();
+    s_is_playing = playing;
+    rt_exit_critical();
+}
 
 static bool music_service_has_mp3_ext(const char *name)
 {
@@ -86,9 +181,11 @@ static void music_service_filename_to_title(const char *filename, char *title, s
 
 static void music_service_reset_tracks(void)
 {
-    memset(s_tracks, 0, sizeof(s_tracks));
+    rt_enter_critical();
     s_track_count = 0;
     s_selected_index = 0;
+    rt_exit_critical();
+    memset(s_tracks, 0, sizeof(s_tracks));
 }
 
 static void music_service_close_player_only(void)
@@ -98,28 +195,38 @@ static void music_service_close_player_only(void)
         mp3ctrl_close(s_player);
         s_player = RT_NULL;
     }
-    s_is_playing = false;
+    music_service_set_playing(false);
 }
 
-static int music_service_ensure_dir(void)
+static bool music_service_build_dir(char *buffer, size_t buffer_size)
+{
+    return app_tf_build_path("mp3", buffer, buffer_size);
+}
+
+static int music_service_ensure_dir(const char *music_dir)
 {
     int ret;
     struct stat st;
 
-    ret = stat(MUSIC_SERVICE_DIR, &st);
+    if (music_dir == RT_NULL || music_dir[0] == '\0' || !app_tf_storage_ready())
+    {
+        return -1;
+    }
+
+    ret = stat(music_dir, &st);
     if (ret == 0)
     {
         return 0;
     }
 
-    ret = mkdir(MUSIC_SERVICE_DIR, 0);
+    ret = mkdir(music_dir, 0);
     if (ret == 0)
     {
-        rt_kprintf("music: created dir %s\n", MUSIC_SERVICE_DIR);
+        rt_kprintf("music: created dir %s\n", music_dir);
         return 0;
     }
 
-    rt_kprintf("music: mkdir failed dir=%s ret=%d\n", MUSIC_SERVICE_DIR, ret);
+    rt_kprintf("music: mkdir failed dir=%s ret=%d\n", music_dir, ret);
     return ret;
 }
 
@@ -127,140 +234,220 @@ int music_service_refresh(void)
 {
     DIR *dirp;
     struct dirent *entry;
+    uint16_t write_index;
+    uint32_t scan_tick = 0U;
     int written;
+    char music_dir[MUSIC_SERVICE_PATH_MAX];
 
-    if (music_service_ensure_dir() != 0)
+    app_watchdog_progress(APP_WDT_MODULE_UI);
+
+    if (!music_service_control_lock_take())
     {
-        music_service_reset_tracks();
         return -1;
     }
 
-    dirp = opendir(MUSIC_SERVICE_DIR);
+    if (!music_service_build_dir(music_dir, sizeof(music_dir)) ||
+        music_service_ensure_dir(music_dir) != 0)
+    {
+        music_service_reset_tracks();
+        music_service_control_lock_release();
+        return -1;
+    }
+
+    dirp = opendir(music_dir);
     if (dirp == RT_NULL)
     {
         music_service_reset_tracks();
-        rt_kprintf("music: opendir failed dir=%s\n", MUSIC_SERVICE_DIR);
+        rt_kprintf("music: opendir failed dir=%s\n", music_dir);
+        music_service_control_lock_release();
         return -1;
     }
 
     music_service_reset_tracks();
+    app_watchdog_progress(APP_WDT_MODULE_UI);
 
-    while (((entry = readdir(dirp)) != RT_NULL) && (s_track_count < MUSIC_SERVICE_MAX_TRACKS))
+    while (((entry = readdir(dirp)) != RT_NULL) &&
+           (music_service_track_count_snapshot() < MUSIC_SERVICE_MAX_TRACKS))
     {
+        if ((scan_tick++ & 0x0FU) == 0U)
+        {
+            app_watchdog_progress(APP_WDT_MODULE_UI);
+        }
+
         if ((entry->d_name[0] == '.') || (!music_service_has_mp3_ext(entry->d_name)))
         {
             continue;
         }
 
-        music_service_filename_to_title(entry->d_name,
-                                        s_tracks[s_track_count].title,
-                                        sizeof(s_tracks[s_track_count].title));
-        written = rt_snprintf(s_tracks[s_track_count].path,
-                              sizeof(s_tracks[s_track_count].path),
-                              "%s/%s",
-                              MUSIC_SERVICE_DIR,
-                              entry->d_name);
-        if (written < 0 || (size_t)written >= sizeof(s_tracks[s_track_count].path))
+        write_index = music_service_track_count_snapshot();
+        if (write_index >= MUSIC_SERVICE_MAX_TRACKS)
         {
-            memset(&s_tracks[s_track_count], 0, sizeof(s_tracks[s_track_count]));
+            break;
+        }
+
+        music_service_filename_to_title(entry->d_name,
+                                        s_tracks[write_index].title,
+                                        sizeof(s_tracks[write_index].title));
+        written = rt_snprintf(s_tracks[write_index].path,
+                              sizeof(s_tracks[write_index].path),
+                              "%s/%s",
+                              music_dir,
+                              entry->d_name);
+        if (written < 0 || (size_t)written >= sizeof(s_tracks[write_index].path))
+        {
+            memset(&s_tracks[write_index], 0, sizeof(s_tracks[write_index]));
             rt_kprintf("music: skip overlong path name=%s\n", entry->d_name);
             continue;
         }
-        s_track_count++;
+        (void)music_service_publish_track();
+        app_watchdog_progress(APP_WDT_MODULE_UI);
     }
 
     closedir(dirp);
+    app_watchdog_progress(APP_WDT_MODULE_UI);
 
-    if ((s_track_count > 0) && (s_selected_index >= s_track_count))
+    if ((music_service_track_count_snapshot() > 0) &&
+        (music_service_selected_index_snapshot() >= music_service_track_count_snapshot()))
     {
-        s_selected_index = 0;
+        music_service_set_selected_index(0);
     }
 
-    rt_kprintf("music: scanned %u track(s) from %s\n", s_track_count, MUSIC_SERVICE_DIR);
-    return (int)s_track_count;
+    rt_kprintf("music: scanned %u track(s) from %s\n",
+               music_service_track_count_snapshot(),
+               music_dir);
+    music_service_control_lock_release();
+    return (int)music_service_track_count_snapshot();
 }
 
 uint16_t music_service_count(void)
 {
-    return s_track_count;
+    return music_service_track_count_snapshot();
 }
 
 uint16_t music_service_selected_index(void)
 {
-    return s_selected_index;
+    return music_service_selected_index_snapshot();
 }
 
 bool music_service_select(uint16_t index)
 {
-    if (index >= s_track_count)
+    if (index >= music_service_track_count_snapshot())
     {
         return false;
     }
 
-    s_selected_index = index;
+    music_service_set_selected_index(index);
     return true;
 }
 
 bool music_service_select_prev(void)
 {
-    if (s_track_count == 0)
+    uint16_t count = music_service_track_count_snapshot();
+    uint16_t selected = music_service_selected_index_snapshot();
+
+    if (count == 0)
     {
         return false;
     }
 
-    if (s_selected_index == 0)
+    if (selected == 0)
     {
-        s_selected_index = s_track_count - 1;
+        selected = count - 1;
     }
     else
     {
-        s_selected_index--;
+        selected--;
     }
 
+    music_service_set_selected_index(selected);
     return true;
 }
 
 bool music_service_select_next(void)
 {
-    if (s_track_count == 0)
+    uint16_t count = music_service_track_count_snapshot();
+    uint16_t selected = music_service_selected_index_snapshot();
+
+    if (count == 0)
     {
         return false;
     }
 
-    s_selected_index = (uint16_t)((s_selected_index + 1) % s_track_count);
+    selected = (uint16_t)((selected + 1) % count);
+    music_service_set_selected_index(selected);
     return true;
 }
 
-const char *music_service_get_title(uint16_t index)
+void music_service_get_title_copy(uint16_t index, char *buffer, size_t buffer_size)
 {
-    if (index >= s_track_count)
+    const char *title = "未找到音乐";
+
+    if (buffer == RT_NULL || buffer_size == 0U)
     {
-        return "未找到音乐";
+        return;
     }
 
-    return s_tracks[index].title;
-}
-
-const char *music_service_get_selected_title(void)
-{
-    return music_service_get_title(s_selected_index);
-}
-
-const char *music_service_get_selected_path(void)
-{
-    if ((s_track_count == 0) || (s_selected_index >= s_track_count))
+    rt_enter_critical();
+    if (index < s_track_count)
     {
-        return "";
+        title = s_tracks[index].title;
+    }
+    rt_strncpy(buffer, title, buffer_size - 1U);
+    buffer[buffer_size - 1U] = '\0';
+    rt_exit_critical();
+}
+
+void music_service_get_selected_title_copy(char *buffer, size_t buffer_size)
+{
+    uint16_t selected;
+
+    if (buffer == RT_NULL || buffer_size == 0U)
+    {
+        return;
     }
 
-    return s_tracks[s_selected_index].path;
+    rt_enter_critical();
+    selected = s_selected_index;
+    if (selected < s_track_count)
+    {
+        rt_strncpy(buffer, s_tracks[selected].title, buffer_size - 1U);
+    }
+    else
+    {
+        rt_strncpy(buffer, "未找到音乐", buffer_size - 1U);
+    }
+    buffer[buffer_size - 1U] = '\0';
+    rt_exit_critical();
+}
+
+void music_service_get_selected_path_copy(char *buffer, size_t buffer_size)
+{
+    uint16_t selected;
+
+    if (buffer == RT_NULL || buffer_size == 0U)
+    {
+        return;
+    }
+
+    rt_enter_critical();
+    selected = s_selected_index;
+    if (selected < s_track_count)
+    {
+        rt_strncpy(buffer, s_tracks[selected].path, buffer_size - 1U);
+    }
+    else
+    {
+        buffer[0] = '\0';
+    }
+    buffer[buffer_size - 1U] = '\0';
+    rt_exit_critical();
 }
 
 bool music_service_play_selected(void)
 {
-    const char *path;
+    char path[MUSIC_SERVICE_PATH_MAX];
 
-    if (s_track_count == 0)
+    if (music_service_track_count_snapshot() == 0)
     {
         return false;
     }
@@ -271,13 +458,27 @@ bool music_service_play_selected(void)
         return false;
     }
 
+    if (!music_service_control_lock_take())
+    {
+        audio_release(AUDIO_OWNER_MUSIC);
+        return false;
+    }
+
     music_service_close_player_only();
 
-    path = music_service_get_selected_path();
+    music_service_get_selected_path_copy(path, sizeof(path));
+    if (path[0] == '\0')
+    {
+        music_service_control_lock_release();
+        audio_release(AUDIO_OWNER_MUSIC);
+        return false;
+    }
+
     s_player = mp3ctrl_open(AUDIO_TYPE_LOCAL_MUSIC, path, RT_NULL, RT_NULL);
     if (s_player == RT_NULL)
     {
         rt_kprintf("music: open failed path=%s\n", path);
+        music_service_control_lock_release();
         audio_release(AUDIO_OWNER_MUSIC);
         return false;
     }
@@ -287,49 +488,67 @@ bool music_service_play_selected(void)
     {
         rt_kprintf("music: play failed path=%s\n", path);
         music_service_close_player_only();
+        music_service_control_lock_release();
         audio_release(AUDIO_OWNER_MUSIC);
         return false;
     }
 
-    s_is_playing = true;
+    music_service_set_playing(true);
     rt_kprintf("music: playing %s\n", path);
+    music_service_control_lock_release();
     return true;
 }
 
 bool music_service_toggle_playback(void)
 {
-    if (s_track_count == 0)
+    if (music_service_track_count_snapshot() == 0)
+    {
+        return false;
+    }
+
+    if (!music_service_control_lock_take())
     {
         return false;
     }
 
     if (s_player == RT_NULL)
     {
+        music_service_control_lock_release();
         return music_service_play_selected();
     }
 
-    if (s_is_playing)
+    if (music_service_playing_snapshot())
     {
         if (mp3ctrl_pause(s_player) != 0)
         {
+            music_service_control_lock_release();
             return false;
         }
-        s_is_playing = false;
+        music_service_set_playing(false);
+        music_service_control_lock_release();
         return true;
     }
 
     if (mp3ctrl_resume(s_player) != 0)
     {
+        music_service_control_lock_release();
         return false;
     }
 
-    s_is_playing = true;
+    music_service_set_playing(true);
+    music_service_control_lock_release();
     return true;
 }
 
 void music_service_stop(void)
 {
+    if (!music_service_control_lock_take())
+    {
+        return;
+    }
+
     music_service_close_player_only();
+    music_service_control_lock_release();
     if (audio_get_current_owner() == AUDIO_OWNER_MUSIC)
     {
         audio_release(AUDIO_OWNER_MUSIC);
@@ -338,5 +557,5 @@ void music_service_stop(void)
 
 bool music_service_is_playing(void)
 {
-    return s_is_playing;
+    return music_service_playing_snapshot();
 }

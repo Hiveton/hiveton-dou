@@ -5,6 +5,8 @@
 #include <time.h>
 
 #include "audio_server.h"
+#include "../app_tf_storage.h"
+#include "app_watchdog.h"
 #include "dfs_fs.h"
 #include "dfs_posix.h"
 #include "rtdevice.h"
@@ -102,8 +104,6 @@ static struct rt_thread s_playback_thread;
 static uint32_t s_record_writer_thread_stack[RECORDER_WRITE_THREAD_STACK_SIZE / sizeof(uint32_t)];
 static uint32_t s_playback_thread_stack[RECORDER_THREAD_STACK_SIZE / sizeof(uint32_t)];
 static uint8_t s_record_buffer[RECORDER_RECORD_BUFFER_BYTES];
-static const char *const s_record_device_candidates[] = {"sd0", "sd1", "sd2", "sdio0"};
-
 static void recorder_service_record_writer_thread_entry(void *parameter);
 static void recorder_service_playback_thread_entry(void *parameter);
 
@@ -137,80 +137,20 @@ static void recorder_service_set_status(const char *text)
     }
 }
 
-static const char *recorder_service_resolve_mount_root(void)
-{
-    size_t i;
-    const char *mounted;
-
-    for (i = 0U; i < sizeof(s_record_device_candidates) / sizeof(s_record_device_candidates[0]); ++i)
-    {
-        rt_device_t device = rt_device_find(s_record_device_candidates[i]);
-
-        if (device == RT_NULL)
-        {
-            continue;
-        }
-
-        mounted = dfs_filesystem_get_mounted_path(device);
-        if (mounted != NULL && mounted[0] != '\0')
-        {
-            return mounted;
-        }
-    }
-
-    return "/";
-}
-
 bool recorder_service_storage_ready(void)
 {
-    size_t i;
-
-    for (i = 0U; i < sizeof(s_record_device_candidates) / sizeof(s_record_device_candidates[0]); ++i)
-    {
-        rt_device_t device = rt_device_find(s_record_device_candidates[i]);
-        const char *mounted;
-
-        if (device == RT_NULL)
-        {
-            continue;
-        }
-
-        mounted = dfs_filesystem_get_mounted_path(device);
-        if (mounted != RT_NULL && mounted[0] != '\0')
-        {
-            return true;
-        }
-    }
-
-    return false;
+    return app_tf_storage_ready();
 }
 
 static bool recorder_service_build_record_dir(char *buffer, size_t buffer_size)
 {
-    const char *mount_root = recorder_service_resolve_mount_root();
-    int written;
-
     if (buffer == NULL || buffer_size == 0U)
     {
         return false;
     }
 
-    if (!recorder_service_storage_ready())
-    {
-        buffer[0] = '\0';
-        return false;
-    }
-
-    if (mount_root == NULL || mount_root[0] == '\0' || strcmp(mount_root, "/") == 0)
-    {
-        written = rt_snprintf(buffer, buffer_size, "/record");
-    }
-    else
-    {
-        written = rt_snprintf(buffer, buffer_size, "%s/record", mount_root);
-    }
-
-    if (written < 0 || (size_t)written >= buffer_size)
+    if (!recorder_service_storage_ready() ||
+        !app_tf_build_path("record", buffer, buffer_size))
     {
         buffer[0] = '\0';
         return false;
@@ -1306,24 +1246,47 @@ void recorder_service_get_record_status_text(char *buffer, size_t buffer_size)
     }
 }
 
-const char *recorder_service_get_record_dir(void)
+void recorder_service_get_record_dir_copy(char *buffer, size_t buffer_size)
 {
+    const char *record_dir = "";
+
+    if (buffer == RT_NULL || buffer_size == 0U)
+    {
+        return;
+    }
+
     if (!recorder_service_ensure_inited())
     {
-        return "/record";
+        buffer[0] = '\0';
+        return;
     }
 
-    if (s_recorder.record_dir[0] == '\0')
+    if (rt_mutex_take(s_recorder.lock, rt_tick_from_millisecond(200)) == RT_EOK)
     {
-        recorder_service_prepare_record_dir();
+        if (s_recorder.record_dir[0] == '\0')
+        {
+            rt_mutex_release(s_recorder.lock);
+            recorder_service_prepare_record_dir();
+            if (rt_mutex_take(s_recorder.lock, rt_tick_from_millisecond(200)) != RT_EOK)
+            {
+                rt_snprintf(buffer, buffer_size, "%s", record_dir);
+                buffer[buffer_size - 1U] = '\0';
+                return;
+            }
+        }
+
+        if (s_recorder.record_dir[0] != '\0')
+        {
+            record_dir = s_recorder.record_dir;
+        }
+        rt_snprintf(buffer, buffer_size, "%s", record_dir);
+        rt_mutex_release(s_recorder.lock);
+        buffer[buffer_size - 1U] = '\0';
+        return;
     }
 
-    return s_recorder.record_dir[0] != '\0' ? s_recorder.record_dir : "/record";
-}
-
-const char *recorder_service_get_recording_file_name(void)
-{
-    return s_recorder.recording_file_name[0] != '\0' ? s_recorder.recording_file_name : "";
+    rt_snprintf(buffer, buffer_size, "%s", record_dir);
+    buffer[buffer_size - 1U] = '\0';
 }
 
 static int recorder_service_file_compare(const void *lhs, const void *rhs)
@@ -1348,6 +1311,7 @@ size_t recorder_service_scan_files(recorder_service_file_t *files, size_t max_fi
     struct dirent *entry = RT_NULL;
     size_t count = 0U;
     char dir_path[RECORDER_MAX_PATH];
+    uint32_t scan_tick = 0U;
     int written;
 
     if (files == NULL || max_files == 0U)
@@ -1360,10 +1324,10 @@ size_t recorder_service_scan_files(recorder_service_file_t *files, size_t max_fi
         return 0U;
     }
 
-    written = rt_snprintf(dir_path, sizeof(dir_path), "%s", recorder_service_get_record_dir());
-    if (written < 0 || (size_t)written >= sizeof(dir_path))
+    recorder_service_get_record_dir_copy(dir_path, sizeof(dir_path));
+    if (dir_path[0] == '\0')
     {
-        recorder_service_set_status("录音目录过长");
+        recorder_service_set_status("录音目录不可用");
         return 0U;
     }
 
@@ -1374,11 +1338,17 @@ size_t recorder_service_scan_files(recorder_service_file_t *files, size_t max_fi
         return 0U;
     }
 
+    app_watchdog_progress(APP_WDT_MODULE_UI);
     while ((entry = readdir(dir)) != RT_NULL)
     {
         char path[RECORDER_MAX_PATH];
         struct stat st;
         const char *dot;
+
+        if ((scan_tick++ & 0x0FU) == 0U)
+        {
+            app_watchdog_progress(APP_WDT_MODULE_UI);
+        }
 
         if (count >= max_files)
         {
@@ -1431,9 +1401,11 @@ size_t recorder_service_scan_files(recorder_service_file_t *files, size_t max_fi
             files[count].duration_ms = 0U;
         }
         ++count;
+        app_watchdog_progress(APP_WDT_MODULE_UI);
     }
 
     closedir(dir);
+    app_watchdog_progress(APP_WDT_MODULE_UI);
     qsort(files, count, sizeof(files[0]), recorder_service_file_compare);
     return count;
 }
@@ -1541,24 +1513,28 @@ bool recorder_service_is_playing(void)
     return active;
 }
 
-const char *recorder_service_get_playing_path(void)
+void recorder_service_get_playing_path_copy(char *buffer, size_t buffer_size)
 {
-    if (!recorder_service_ensure_inited())
+    if (buffer == NULL || buffer_size == 0U)
     {
-        return "";
+        return;
     }
 
-    return s_recorder.playing_path;
-}
-
-const char *recorder_service_get_playing_name(void)
-{
     if (!recorder_service_ensure_inited())
     {
-        return "";
+        buffer[0] = '\0';
+        return;
     }
 
-    return s_recorder.playing_name;
+    if (rt_mutex_take(s_recorder.lock, rt_tick_from_millisecond(100)) == RT_EOK)
+    {
+        rt_snprintf(buffer, buffer_size, "%s", s_recorder.playing_path);
+        rt_mutex_release(s_recorder.lock);
+    }
+    else
+    {
+        buffer[0] = '\0';
+    }
 }
 
 void recorder_service_get_play_status_text(char *buffer, size_t buffer_size)

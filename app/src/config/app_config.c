@@ -19,6 +19,7 @@ static app_config_t s_config;
 static bool s_config_ready = false;
 static bool s_loaded_from_file = false;
 static bool s_dirty = false;
+static uint32_t s_dirty_generation = 0U;
 static char s_storage_path[APP_CONFIG_STORAGE_PATH_MAX];
 static char s_load_buffer[APP_CONFIG_SERIALIZED_MAX];
 static char s_save_buffer[APP_CONFIG_SERIALIZED_MAX];
@@ -38,9 +39,20 @@ rt_err_t app_config_storage_save(const char *preferred_path,
                                  size_t saved_path_size);
 void app_config_storage_cleanup_legacy_files(void);
 
+static rt_uint8_t app_config_mutex_ready_snapshot(void)
+{
+    rt_uint8_t ready;
+
+    rt_enter_critical();
+    ready = s_mutex_ready;
+    rt_exit_critical();
+
+    return ready;
+}
+
 static rt_err_t app_config_ensure_mutex(void)
 {
-    if (s_mutex_ready != 0U)
+    if (app_config_mutex_ready_snapshot() != 0U)
     {
         return RT_EOK;
     }
@@ -76,7 +88,7 @@ static rt_err_t app_config_lock(void)
 
 static void app_config_unlock(void)
 {
-    if (s_mutex_ready != 0U)
+    if (app_config_mutex_ready_snapshot() != 0U)
     {
         (void)rt_mutex_release(&s_mutex);
     }
@@ -250,7 +262,7 @@ static app_config_network_mode_t app_config_parse_network_mode(const char *text,
         {
             *ok = false;
         }
-        return APP_CONFIG_NETWORK_MODE_4G;
+        return APP_CONFIG_NETWORK_MODE_BT;
     }
 
     if (app_config_ascii_casecmp(text, "4g") == 0 || app_config_ascii_casecmp(text, "lte") == 0)
@@ -275,7 +287,7 @@ static app_config_network_mode_t app_config_parse_network_mode(const char *text,
     {
         *ok = false;
     }
-    return APP_CONFIG_NETWORK_MODE_4G;
+    return APP_CONFIG_NETWORK_MODE_BT;
 }
 
 static app_config_language_t app_config_parse_language(const char *text, bool *ok)
@@ -297,6 +309,16 @@ static app_config_language_t app_config_parse_language(const char *text, bool *o
             *ok = true;
         }
         return APP_CONFIG_LANGUAGE_ZH_CN;
+    }
+
+    if (app_config_ascii_casecmp(text, "zh-TW") == 0 || app_config_ascii_casecmp(text, "zh_TW") == 0 ||
+        app_config_ascii_casecmp(text, "zh-HK") == 0 || app_config_ascii_casecmp(text, "zh_HK") == 0)
+    {
+        if (ok != NULL)
+        {
+            *ok = true;
+        }
+        return APP_CONFIG_LANGUAGE_ZH_TW;
     }
 
     if (app_config_ascii_casecmp(text, "en-US") == 0 || app_config_ascii_casecmp(text, "en_US") == 0 ||
@@ -325,7 +347,7 @@ static void app_config_set_defaults(app_config_t *cfg)
 
     memset(cfg, 0, sizeof(*cfg));
     cfg->version = APP_CONFIG_VERSION;
-    cfg->boot.network_mode = APP_CONFIG_NETWORK_MODE_4G;
+    cfg->boot.network_mode = APP_CONFIG_NETWORK_MODE_BT;
     cfg->boot.auto_connect = 1U;
     cfg->display.brightness = 50U;
     cfg->display.standby_timeout_sec = 60U;
@@ -353,7 +375,7 @@ static void app_config_sanitize(app_config_t *cfg)
     if (cfg->boot.network_mode != APP_CONFIG_NETWORK_MODE_4G &&
         cfg->boot.network_mode != APP_CONFIG_NETWORK_MODE_BT)
     {
-        cfg->boot.network_mode = APP_CONFIG_NETWORK_MODE_4G;
+        cfg->boot.network_mode = APP_CONFIG_NETWORK_MODE_BT;
     }
     cfg->boot.auto_connect = cfg->boot.auto_connect ? 1U : 0U;
 
@@ -361,16 +383,14 @@ static void app_config_sanitize(app_config_t *cfg)
     {
         cfg->display.brightness = 100U;
     }
-    if (cfg->display.standby_timeout_sec < 10U)
+    if (cfg->display.standby_timeout_sec > (12U * 60U * 60U))
     {
-        cfg->display.standby_timeout_sec = 10U;
-    }
-    if (cfg->display.standby_timeout_sec > 3600U)
-    {
-        cfg->display.standby_timeout_sec = 3600U;
+        cfg->display.standby_timeout_sec = 12U * 60U * 60U;
     }
 
-    if (cfg->ui.language != APP_CONFIG_LANGUAGE_ZH_CN && cfg->ui.language != APP_CONFIG_LANGUAGE_EN_US)
+    if (cfg->ui.language != APP_CONFIG_LANGUAGE_ZH_CN &&
+        cfg->ui.language != APP_CONFIG_LANGUAGE_EN_US &&
+        cfg->ui.language != APP_CONFIG_LANGUAGE_ZH_TW)
     {
         cfg->ui.language = APP_CONFIG_LANGUAGE_ZH_CN;
     }
@@ -613,6 +633,14 @@ static void app_config_assign_locked(const app_config_t *cfg)
 static void app_config_touch_dirty_locked(void)
 {
     s_dirty = true;
+    if (s_dirty_generation != UINT32_MAX)
+    {
+        ++s_dirty_generation;
+    }
+    else
+    {
+        s_dirty_generation = 1U;
+    }
 }
 
 rt_err_t app_config_init(void)
@@ -637,6 +665,7 @@ rt_err_t app_config_init(void)
         s_config_ready = true;
         s_loaded_from_file = false;
         s_dirty = false;
+        s_dirty_generation = 0U;
         s_storage_path[0] = '\0';
     }
 
@@ -652,6 +681,12 @@ rt_err_t app_config_load(void)
     bool found = false;
     rt_err_t result;
 
+    result = app_config_lock();
+    if (result != RT_EOK)
+    {
+        return result;
+    }
+
     result = app_config_storage_load((s_storage_path[0] != '\0') ? s_storage_path : NULL,
                                      s_storage_temp_path,
                                      sizeof(s_storage_temp_path),
@@ -661,6 +696,7 @@ rt_err_t app_config_load(void)
                                      &found);
     if (result != RT_EOK)
     {
+        app_config_unlock();
         return result;
     }
 
@@ -672,15 +708,10 @@ rt_err_t app_config_load(void)
     }
     app_config_sanitize(&loaded);
 
-    result = app_config_lock();
-    if (result != RT_EOK)
-    {
-        return result;
-    }
-
     app_config_assign_locked(&loaded);
     s_loaded_from_file = found;
     s_dirty = false;
+    s_dirty_generation = 0U;
     if (found)
     {
         if (!app_config_copy_string_checked(s_storage_path,
@@ -750,8 +781,11 @@ static rt_err_t app_config_serialize_locked(char *buffer, size_t buffer_size)
     }
     used += (size_t)written;
 
-    written = snprintf(buffer + used, buffer_size - used, "ui.language=%s\n",
-                       (s_config.ui.language == APP_CONFIG_LANGUAGE_EN_US) ? "en-US" : "zh-CN");
+    written = snprintf(buffer + used,
+                       buffer_size - used,
+                       "ui.language=%s\n",
+                       (s_config.ui.language == APP_CONFIG_LANGUAGE_EN_US) ? "en-US" :
+                       ((s_config.ui.language == APP_CONFIG_LANGUAGE_ZH_TW) ? "zh-TW" : "zh-CN"));
     if (written < 0 || (size_t)written >= buffer_size - used)
     {
         return -RT_EFULL;
@@ -834,27 +868,51 @@ static rt_err_t app_config_serialize_locked(char *buffer, size_t buffer_size)
 rt_err_t app_config_save(void)
 {
     rt_err_t result;
+    char *save_buffer;
+    char preferred_path[APP_CONFIG_STORAGE_PATH_MAX];
+    char saved_path[APP_CONFIG_STORAGE_PATH_MAX];
+    uint32_t save_generation;
+    size_t save_len;
 
+    save_buffer = (char *)malloc(APP_CONFIG_SERIALIZED_MAX);
+    if (save_buffer == NULL)
+    {
+        return -RT_ENOMEM;
+    }
+
+    preferred_path[0] = '\0';
+    saved_path[0] = '\0';
     result = app_config_lock();
     if (result != RT_EOK)
     {
+        free(save_buffer);
         return result;
     }
 
-    result = app_config_serialize_locked(s_save_buffer, sizeof(s_save_buffer));
+    result = app_config_serialize_locked(save_buffer, APP_CONFIG_SERIALIZED_MAX);
     if (result != RT_EOK)
     {
         app_config_unlock();
+        free(save_buffer);
         return result;
     }
-
+    save_len = strlen(save_buffer);
+    save_generation = s_dirty_generation;
+    if (s_storage_path[0] != '\0' &&
+        !app_config_copy_string_checked(preferred_path, sizeof(preferred_path), s_storage_path))
+    {
+        app_config_unlock();
+        free(save_buffer);
+        return -RT_EFULL;
+    }
     app_config_unlock();
 
-    result = app_config_storage_save((s_storage_path[0] != '\0') ? s_storage_path : NULL,
-                                     s_save_buffer,
-                                     strlen(s_save_buffer),
-                                     s_storage_temp_path,
-                                     sizeof(s_storage_temp_path));
+    result = app_config_storage_save((preferred_path[0] != '\0') ? preferred_path : NULL,
+                                     save_buffer,
+                                     save_len,
+                                     saved_path,
+                                     sizeof(saved_path));
+    free(save_buffer);
     if (result != RT_EOK)
     {
         return result;
@@ -868,15 +926,19 @@ rt_err_t app_config_save(void)
 
     if (!app_config_copy_string_checked(s_storage_path,
                                          sizeof(s_storage_path),
-                                         s_storage_temp_path))
+                                         saved_path))
     {
         app_config_unlock();
         return -RT_EFULL;
     }
     s_loaded_from_file = true;
-    s_dirty = false;
-    app_config_storage_cleanup_legacy_files();
+    if (s_dirty_generation == save_generation)
+    {
+        s_dirty = false;
+    }
     app_config_unlock();
+
+    app_config_storage_cleanup_legacy_files();
     return RT_EOK;
 }
 
@@ -967,7 +1029,7 @@ app_config_network_mode_t app_config_get_boot_network_mode(void)
 
     if (app_config_lock() != RT_EOK)
     {
-        return APP_CONFIG_NETWORK_MODE_4G;
+        return APP_CONFIG_NETWORK_MODE_BT;
     }
 
     if (!s_config_ready)

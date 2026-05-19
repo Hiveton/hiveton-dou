@@ -1,5 +1,7 @@
 #include "ui_font_manager.h"
 
+#include "../app_tf_storage.h"
+
 #include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -11,8 +13,10 @@
 
 #include "dfs_fs.h"
 #include "dfs_posix.h"
+#include "rthw.h"
 #include "rtdevice.h"
 #include "rtthread.h"
+#include "app_watchdog.h"
 #include "config/app_config.h"
 #include "ui.h"
 #include "ui_dispatch.h"
@@ -21,27 +25,6 @@
 
 #define UI_FONT_MANAGER_DIR_NAME "font"
 
-static const char *const s_font_manager_device_candidates[] = {"sd0", "sd1", "sd2", "sdio0"};
-static const char *const s_font_manager_mount_candidates[] = {"/", "/tf", "/sd", "/sd0"};
-static const char *const s_font_manager_font_dir_candidates[] = {
-    "/font",
-    "/tf/font",
-    "/sd/font",
-    "/sd0/font",
-    "font",
-};
-static const char *const s_font_manager_root_candidates[] = {
-    "/",
-    "/tf",
-    "/sd",
-    "/sd0",
-};
-static const char *const s_font_manager_known_subdirs[] = {
-    "books",
-    "record",
-    "pic",
-    "font",
-};
 typedef struct
 {
     bool initialized;
@@ -61,6 +44,49 @@ static ui_font_manager_state_t s_font_manager = {
 static bool s_font_manager_async_refresh_pending = false;
 static char s_font_manager_list_signature[UI_FONT_MANAGER_PATH_MAX] = {0};
 static bool s_font_manager_list_signature_valid = false;
+
+static bool ui_font_manager_initialized(void)
+{
+    bool initialized;
+    rt_base_t level = rt_hw_interrupt_disable();
+    initialized = s_font_manager.initialized;
+    rt_hw_interrupt_enable(level);
+    return initialized;
+}
+
+static void ui_font_manager_set_initialized(bool initialized)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    s_font_manager.initialized = initialized;
+    rt_hw_interrupt_enable(level);
+}
+
+static void ui_font_manager_set_tf_ready(bool ready)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    s_font_manager.tf_ready = ready;
+    rt_hw_interrupt_enable(level);
+}
+
+static bool ui_font_manager_try_mark_async_refresh_pending(void)
+{
+    bool accepted = false;
+    rt_base_t level = rt_hw_interrupt_disable();
+    if (!s_font_manager_async_refresh_pending)
+    {
+        s_font_manager_async_refresh_pending = true;
+        accepted = true;
+    }
+    rt_hw_interrupt_enable(level);
+    return accepted;
+}
+
+static void ui_font_manager_clear_async_refresh_pending(void)
+{
+    rt_base_t level = rt_hw_interrupt_disable();
+    s_font_manager_async_refresh_pending = false;
+    rt_hw_interrupt_enable(level);
+}
 
 static bool ui_font_manager_has_hdfont_suffix(const char *name)
 {
@@ -228,76 +254,37 @@ static bool ui_font_manager_try_mount_device(const char *device_name,
                                              char *mounted_path,
                                              size_t mounted_path_size)
 {
-    rt_device_t device;
     const char *mounted;
-    size_t i;
 
     if (device_name == NULL || mounted_path == NULL || mounted_path_size == 0U)
     {
         return false;
     }
 
-    device = rt_device_find(device_name);
-    if (device == RT_NULL)
+    (void)device_name;
+    mounted = app_tf_mount_root();
+    if (mounted == RT_NULL)
     {
         return false;
     }
 
-    mounted = dfs_filesystem_get_mounted_path(device);
-    if (mounted != RT_NULL && mounted[0] != '\0')
-    {
-        return ui_font_manager_copy_path(mounted_path, mounted_path_size, mounted);
-    }
-
-    for (i = 0; i < sizeof(s_font_manager_mount_candidates) / sizeof(s_font_manager_mount_candidates[0]); ++i)
-    {
-        const char *candidate = s_font_manager_mount_candidates[i];
-
-        if (strcmp(candidate, "/") != 0)
-        {
-            mkdir(candidate, 0);
-        }
-
-        if (dfs_mount(device_name, candidate, "elm", 0, 0) == RT_EOK)
-        {
-            return ui_font_manager_copy_path(mounted_path, mounted_path_size, candidate);
-        }
-    }
-
-    return false;
+    return ui_font_manager_copy_path(mounted_path, mounted_path_size, mounted);
 }
 
 static bool ui_font_manager_resolve_storage_root(char *mounted_path, size_t mounted_path_size)
 {
-    size_t i;
-
     if (mounted_path == NULL || mounted_path_size == 0U)
     {
         return false;
     }
 
     mounted_path[0] = '\0';
-    for (i = 0; i < sizeof(s_font_manager_device_candidates) / sizeof(s_font_manager_device_candidates[0]); ++i)
-    {
-        if (ui_font_manager_try_mount_device(s_font_manager_device_candidates[i],
-                                             mounted_path,
-                                             mounted_path_size))
-        {
-            return true;
-        }
-    }
-
-    return false;
+    return ui_font_manager_try_mount_device("tf", mounted_path, mounted_path_size);
 }
 
 static bool ui_font_manager_build_subdir_path(const char *subdir, char *buffer, size_t buffer_size)
 {
     char mounted_path[64];
-    char probe_path[UI_FONT_MANAGER_PATH_MAX];
-    size_t i;
-    size_t j;
-    const char *const *candidates = RT_NULL;
-    size_t candidate_count = 0U;
 
     if (subdir == NULL || buffer == NULL || buffer_size == 0U)
     {
@@ -307,41 +294,6 @@ static bool ui_font_manager_build_subdir_path(const char *subdir, char *buffer, 
     if (ui_font_manager_resolve_storage_root(mounted_path, sizeof(mounted_path)))
     {
         return ui_font_manager_join_path(buffer, buffer_size, mounted_path, subdir);
-    }
-
-    for (i = 0; i < sizeof(s_font_manager_root_candidates) / sizeof(s_font_manager_root_candidates[0]); ++i)
-    {
-        const char *root = s_font_manager_root_candidates[i];
-
-        for (j = 0; j < sizeof(s_font_manager_known_subdirs) / sizeof(s_font_manager_known_subdirs[0]); ++j)
-        {
-            if (!ui_font_manager_join_path(probe_path,
-                                           sizeof(probe_path),
-                                           root,
-                                           s_font_manager_known_subdirs[j]))
-            {
-                continue;
-            }
-
-            if (ui_font_manager_dir_exists(probe_path))
-            {
-                return ui_font_manager_join_path(buffer, buffer_size, root, subdir);
-            }
-        }
-    }
-
-    if (strcmp(subdir, UI_FONT_MANAGER_DIR_NAME) == 0)
-    {
-        candidates = s_font_manager_font_dir_candidates;
-        candidate_count = sizeof(s_font_manager_font_dir_candidates) / sizeof(s_font_manager_font_dir_candidates[0]);
-    }
-
-    for (i = 0; candidates != RT_NULL && i < candidate_count; ++i)
-    {
-        if (ui_font_manager_dir_exists(candidates[i]))
-        {
-            return ui_font_manager_copy_path(buffer, buffer_size, candidates[i]);
-        }
     }
 
     buffer[0] = '\0';
@@ -412,6 +364,7 @@ static bool ui_font_manager_capture_list_signature(char *signature, size_t signa
     uint32_t count = 0U;
     uint32_t hash_sum = 0U;
     uint32_t hash_xor = 0U;
+    uint32_t scan_tick = 0U;
 
     if (signature == NULL || signature_size == 0U)
     {
@@ -430,10 +383,16 @@ static bool ui_font_manager_capture_list_signature(char *signature, size_t signa
         return true;
     }
 
+    app_watchdog_progress(APP_WDT_MODULE_UI);
     while ((entry = readdir(dir)) != NULL)
     {
         char path[UI_FONT_MANAGER_PATH_MAX];
         struct stat st;
+
+        if ((scan_tick++ & 0x0FU) == 0U)
+        {
+            app_watchdog_progress(APP_WDT_MODULE_UI);
+        }
 
         if (ui_font_manager_is_hidden_entry(entry->d_name) ||
             !ui_font_manager_has_hdfont_suffix(entry->d_name))
@@ -454,9 +413,11 @@ static bool ui_font_manager_capture_list_signature(char *signature, size_t signa
         count++;
         hash_sum += ui_font_manager_hash_list_item(entry->d_name, st.st_size);
         hash_xor ^= ui_font_manager_hash_list_item(entry->d_name, st.st_size);
+        app_watchdog_progress(APP_WDT_MODULE_UI);
     }
 
     closedir(dir);
+    app_watchdog_progress(APP_WDT_MODULE_UI);
     rt_snprintf(signature, signature_size, "%lu:%lu:%lu",
                 (unsigned long)count,
                 (unsigned long)hash_sum,
@@ -529,7 +490,7 @@ static void ui_font_manager_request_refresh_if_changed(bool changed)
 static void ui_font_manager_async_rebuild_cb(void *user_data)
 {
     LV_UNUSED(user_data);
-    s_font_manager_async_refresh_pending = false;
+    ui_font_manager_clear_async_refresh_pending();
     ui_font_manager_rebuild_ui();
 }
 
@@ -540,15 +501,14 @@ static void ui_font_manager_request_async_refresh_if_changed(bool changed)
         return;
     }
 
-    if (s_font_manager_async_refresh_pending)
+    if (!ui_font_manager_try_mark_async_refresh_pending())
     {
         return;
     }
 
-    s_font_manager_async_refresh_pending = true;
     if (lv_async_call(ui_font_manager_async_rebuild_cb, NULL) != LV_RESULT_OK)
     {
-        s_font_manager_async_refresh_pending = false;
+        ui_font_manager_clear_async_refresh_pending();
         ui_dispatch_request_font_refresh();
     }
 }
@@ -558,24 +518,24 @@ void ui_font_manager_init(void)
     bool changed = false;
     char font_dir[UI_FONT_MANAGER_PATH_MAX];
 
-    if (s_font_manager.initialized)
+    if (ui_font_manager_initialized())
     {
         return;
     }
 
-    s_font_manager.tf_ready = ui_font_manager_build_subdir_path(UI_FONT_MANAGER_DIR_NAME, font_dir, sizeof(font_dir)) &&
-                              ui_font_manager_dir_exists(font_dir);
+    ui_font_manager_set_tf_ready(ui_font_manager_build_subdir_path(UI_FONT_MANAGER_DIR_NAME, font_dir, sizeof(font_dir)) &&
+                                 ui_font_manager_dir_exists(font_dir));
 
     ui_font_manager_apply_configured_font(&changed);
     ui_font_manager_list_changed();
-    s_font_manager.initialized = true;
+    ui_font_manager_set_initialized(true);
     LV_UNUSED(changed);
 }
 
 void ui_font_manager_deinit(void)
 {
-    s_font_manager.initialized = false;
-    s_font_manager_async_refresh_pending = false;
+    ui_font_manager_set_initialized(false);
+    ui_font_manager_clear_async_refresh_pending();
     s_font_manager_list_signature_valid = false;
 }
 
@@ -589,7 +549,7 @@ void ui_font_manager_notify_storage_ready(void)
     ui_font_manager_init();
     storage_ready = ui_font_manager_build_subdir_path(UI_FONT_MANAGER_DIR_NAME, font_dir, sizeof(font_dir)) &&
                     ui_font_manager_dir_exists(font_dir);
-    s_font_manager.tf_ready = storage_ready;
+    ui_font_manager_set_tf_ready(storage_ready);
     list_changed = ui_font_manager_list_changed();
     if (!storage_ready)
     {
@@ -607,7 +567,7 @@ void ui_font_manager_notify_storage_removed(void)
     bool changed = false;
 
     ui_font_manager_init();
-    s_font_manager.tf_ready = false;
+    ui_font_manager_set_tf_ready(false);
     s_font_manager_list_signature_valid = false;
     ui_font_manager_apply_configured_font(&changed);
     ui_font_manager_request_refresh_if_changed(changed);
@@ -702,6 +662,7 @@ uint16_t ui_font_manager_list_items(ui_font_manager_item_t *items, uint16_t max_
     DIR *dir;
     struct dirent *entry;
     uint16_t count = 0U;
+    uint32_t scan_tick = 0U;
 
     ui_font_manager_init();
 
@@ -725,8 +686,14 @@ uint16_t ui_font_manager_list_items(ui_font_manager_item_t *items, uint16_t max_
         return count;
     }
 
+    app_watchdog_progress(APP_WDT_MODULE_UI);
     while ((entry = readdir(dir)) != NULL)
     {
+        if ((scan_tick++ & 0x0FU) == 0U)
+        {
+            app_watchdog_progress(APP_WDT_MODULE_UI);
+        }
+
         if (ui_font_manager_is_hidden_entry(entry->d_name) ||
             !ui_font_manager_has_hdfont_suffix(entry->d_name))
         {
@@ -762,9 +729,11 @@ uint16_t ui_font_manager_list_items(ui_font_manager_item_t *items, uint16_t max_
         }
 
         count++;
+        app_watchdog_progress(APP_WDT_MODULE_UI);
     }
 
     closedir(dir);
+    app_watchdog_progress(APP_WDT_MODULE_UI);
     return count;
 }
 

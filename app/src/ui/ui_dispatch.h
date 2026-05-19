@@ -20,6 +20,8 @@ void ui_dispatch_request_exit_standby(void);
 void ui_dispatch_request_back(void);
 void ui_dispatch_request_hardkey_up(void);
 void ui_dispatch_request_hardkey_down(void);
+void ui_dispatch_request_home_ai_talk_press(void);
+void ui_dispatch_request_home_ai_talk_release(void);
 void ui_dispatch_request_poweroff_confirm(void);
 void ui_dispatch_request_font_refresh(void);
 void ui_dispatch_request_screen_switch(ui_screen_id_t screen_id);
