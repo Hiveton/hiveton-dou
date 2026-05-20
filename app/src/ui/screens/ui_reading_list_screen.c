@@ -54,11 +54,18 @@
 #define UI_READING_NEXT_PAGE_TITLE_Y 110
 #define UI_READING_NEXT_PAGE_NAV_Y 111
 #define UI_READING_COVER_PROGRESS_INTERVAL_MS 500U
-#define UI_READING_COVER_LOAD_INTERVAL_MS 120U
-#define UI_READING_COVER_LOAD_BATCH_SIZE 3U
-#define UI_READING_COVER_PROMPT_DELAY_MS 3000U
+#define UI_READING_COVER_LOAD_INTERVAL_MS 260U
+#define UI_READING_COVER_LOAD_INITIAL_DELAY_MS 6000U
+#define UI_READING_COVER_LOAD_BATCH_SIZE 1U
+#define UI_READING_COVER_LOAD_MAX_PER_RENDER 3U
+#define UI_READING_COVER_PROMPT_DELAY_MS 30000U
+#define UI_READING_COVER_PROMPT_SCAN_INTERVAL_MS 200U
+#define UI_READING_COVER_PROMPT_SCAN_SLICE_MAX 1U
 #define UI_READING_COVER_BUILD_TIMEOUT_MS 120000U
 #define UI_READING_COVER_BATCH_MAX UI_READING_MAX_FILES
+#define UI_READING_SCAN_SLICE_MAX_ENTRIES 6U
+#define UI_READING_SCAN_SLICE_INTERVAL_MS 35U
+#define UI_READING_PERF_LOG_ENABLE 1
 #define UI_READING_DEBUG_AUTO_GENERATE_COVERS 0
 #define UI_READING_EPUB_COVER_TEXT_BUFFER 256U
 #define UI_READING_EPUB_COVER_BLOCK_COUNT 4U
@@ -204,7 +211,33 @@ typedef struct
     uint16_t failed_count;
 } ui_reading_cover_result_stats_t;
 
+typedef struct
+{
+    bool active;
+    bool dir_open;
+    bool reset_offset;
+    bool had_selection;
+    uint32_t entries_seen;
+    rt_tick_t start_tick;
+    char previous_name[UI_READING_MAX_NAME_LEN];
+    char previous_path[UI_READING_MAX_PATH_LEN];
+    char directory_path[UI_READING_MAX_PATH_LEN];
+    FATFS_DIR dir;
+} ui_reading_scan_job_t;
+
+typedef struct
+{
+    bool active;
+    uint16_t index;
+    uint16_t count;
+    rt_tick_t start_tick;
+    ui_reading_cover_scan_stats_t stats;
+} ui_reading_cover_prompt_scan_job_t;
+
 static ui_reading_cover_scan_stats_t s_reading_cover_prompt_stats;
+static ui_reading_scan_job_t s_reading_scan_job;
+static ui_reading_cover_prompt_scan_job_t s_reading_cover_prompt_scan_job;
+static bool s_reading_cover_load_first_tick = false;
 
 typedef enum
 {
@@ -415,6 +448,28 @@ static void ui_reading_cover_generate_async_cb(void *user_data);
 static bool ui_reading_copy_path(char *buffer, size_t buffer_size, const char *path);
 static void ui_reading_release_card_cover(ui_reading_card_refs_t *refs);
 static void ui_reading_schedule_cover_load(void);
+
+#if UI_READING_PERF_LOG_ENABLE
+static unsigned long ui_reading_elapsed_ms(rt_tick_t start_tick)
+{
+    rt_tick_t elapsed = rt_tick_get() - start_tick;
+
+    return ((unsigned long)elapsed * 1000UL) / (unsigned long)RT_TICK_PER_SECOND;
+}
+
+static void ui_reading_perf_log(const char *stage, rt_tick_t start_tick)
+{
+    rt_kprintf("reading_list: perf %s elapsed=%lu ms\n",
+               stage != NULL ? stage : "?",
+               ui_reading_elapsed_ms(start_tick));
+}
+#else
+static void ui_reading_perf_log(const char *stage, rt_tick_t start_tick)
+{
+    LV_UNUSED(stage);
+    LV_UNUSED(start_tick);
+}
+#endif
 
 static uint16_t ui_reading_page_capacity(uint16_t page_offset)
 {
@@ -1281,6 +1336,47 @@ static bool ui_reading_scan_directory(const char *directory_path)
     return true;
 }
 
+static bool ui_reading_add_file_from_info(const char *directory_path, const FILINFO *info)
+{
+    char full_path[UI_READING_MAX_PATH_LEN];
+    int written;
+
+    if (directory_path == NULL || info == NULL ||
+        (info->fattrib & AM_DIR) != 0U ||
+        !ui_reading_is_listable_file(info->fname) ||
+        s_reading_file_count >= UI_READING_MAX_FILES)
+    {
+        return false;
+    }
+
+    written = rt_snprintf(full_path,
+                          sizeof(full_path),
+                          "%s%s%s",
+                          directory_path,
+                          strcmp(directory_path, "/") == 0 ? "" : "/",
+                          info->fname);
+    if (written < 0 || (size_t)written >= sizeof(full_path))
+    {
+        return false;
+    }
+
+    rt_snprintf(s_reading_files[s_reading_file_count].name,
+                sizeof(s_reading_files[s_reading_file_count].name),
+                "%s",
+                info->fname);
+    if (!ui_reading_copy_path(s_reading_files[s_reading_file_count].path,
+                              sizeof(s_reading_files[s_reading_file_count].path),
+                              full_path))
+    {
+        return false;
+    }
+
+    s_reading_files[s_reading_file_count].size_bytes = (uint32_t)info->fsize;
+    s_reading_files[s_reading_file_count].file_type = ui_reading_detect_file_type(info->fname);
+    ++s_reading_file_count;
+    return true;
+}
+
 static void ui_reading_restore_selection(bool had_selection,
                                          const char *previous_path,
                                          const char *previous_name)
@@ -1476,6 +1572,221 @@ static void ui_reading_refresh_files(bool reset_offset)
     ui_reading_restore_selection(had_selection, previous_path, previous_name);
 }
 
+static void ui_reading_scan_job_cancel(void)
+{
+    if (s_reading_scan_job.dir_open)
+    {
+        (void)f_closedir(&s_reading_scan_job.dir);
+    }
+    memset(&s_reading_scan_job, 0, sizeof(s_reading_scan_job));
+}
+
+static void ui_reading_scan_job_finish(ui_reading_scan_state_t final_state)
+{
+    if (s_reading_scan_job.dir_open)
+    {
+        (void)f_closedir(&s_reading_scan_job.dir);
+        s_reading_scan_job.dir_open = false;
+    }
+
+    if (s_reading_file_count > 1U)
+    {
+        qsort(s_reading_files,
+              s_reading_file_count,
+              sizeof(s_reading_files[0]),
+              ui_reading_file_compare);
+    }
+
+    if (final_state == UI_READING_SCAN_OK)
+    {
+        s_reading_scan_state = s_reading_file_count > 0U ? UI_READING_SCAN_OK : UI_READING_SCAN_NO_FILES;
+    }
+    else
+    {
+        s_reading_scan_state = final_state;
+    }
+
+    if (s_reading_scan_job.reset_offset ||
+        s_reading_page_offset >= s_reading_file_count)
+    {
+        s_reading_page_offset = 0U;
+    }
+
+    ui_reading_restore_selection(s_reading_scan_job.had_selection,
+                                 s_reading_scan_job.previous_path,
+                                 s_reading_scan_job.previous_name);
+
+    rt_kprintf("reading_list: async scan done files=%u entries=%lu state=%d\n",
+               (unsigned int)s_reading_file_count,
+               (unsigned long)s_reading_scan_job.entries_seen,
+               (int)s_reading_scan_state);
+    ui_reading_perf_log("scan_async_total", s_reading_scan_job.start_tick);
+    memset(&s_reading_scan_job, 0, sizeof(s_reading_scan_job));
+
+    ui_reading_list_render();
+    if ((s_reading_scan_state == UI_READING_SCAN_OK ||
+         s_reading_scan_state == UI_READING_SCAN_NO_FILES) &&
+        s_reading_refresh_timer != NULL)
+    {
+        lv_timer_delete(s_reading_refresh_timer);
+        s_reading_refresh_timer = NULL;
+    }
+    if (s_reading_scan_state == UI_READING_SCAN_OK)
+    {
+        ui_reading_cover_request_prompt_deferred();
+    }
+    ui_reading_request_enter_full_refresh_deferred();
+}
+
+static bool ui_reading_scan_job_begin(bool reset_offset)
+{
+    bool had_device = false;
+    FRESULT result;
+    rt_tick_t start_tick = rt_tick_get();
+
+    ui_reading_scan_job_cancel();
+
+    s_reading_scan_job.reset_offset = reset_offset;
+    s_reading_scan_job.had_selection =
+        s_reading_has_selection &&
+        (s_reading_selected_name[0] != '\0' || s_reading_selected_path[0] != '\0');
+    rt_snprintf(s_reading_scan_job.previous_name,
+                sizeof(s_reading_scan_job.previous_name),
+                "%s",
+                s_reading_selected_name);
+    (void)ui_reading_copy_path(s_reading_scan_job.previous_path,
+                               sizeof(s_reading_scan_job.previous_path),
+                               s_reading_selected_path);
+
+    memset(s_reading_files, 0, sizeof(s_reading_files));
+    s_reading_file_count = 0U;
+    if (reset_offset)
+    {
+        s_reading_page_offset = 0U;
+    }
+    s_reading_mount_path[0] = '\0';
+    s_reading_books_path[0] = '\0';
+    s_reading_scan_state = UI_READING_SCAN_LOADING;
+
+    if (s_reading_active_tab != UI_READING_TAB_ALL)
+    {
+        ui_reading_refresh_files(reset_offset);
+        ui_reading_list_render();
+        return false;
+    }
+
+    if (!ui_reading_resolve_storage_root(s_reading_mount_path, sizeof(s_reading_mount_path), &had_device))
+    {
+        s_reading_scan_state = had_device ? UI_READING_SCAN_MOUNT_FAILED : UI_READING_SCAN_NO_CARD;
+        rt_kprintf("reading_list: async resolve root failed card=%u ready=%u state=%d\n",
+                   (unsigned int)app_tf_card_inserted(),
+                   (unsigned int)app_tf_storage_ready(),
+                   (int)s_reading_scan_state);
+        ui_reading_restore_selection(s_reading_scan_job.had_selection,
+                                     s_reading_scan_job.previous_path,
+                                     s_reading_scan_job.previous_name);
+        memset(&s_reading_scan_job, 0, sizeof(s_reading_scan_job));
+        ui_reading_list_render();
+        return false;
+    }
+
+    if (!ui_reading_join_path(s_reading_books_path,
+                              sizeof(s_reading_books_path),
+                              s_reading_mount_path,
+                              UI_READING_BOOKS_DIRECTORY))
+    {
+        s_reading_scan_state = UI_READING_SCAN_DIR_FAILED;
+        ui_reading_restore_selection(s_reading_scan_job.had_selection,
+                                     s_reading_scan_job.previous_path,
+                                     s_reading_scan_job.previous_name);
+        memset(&s_reading_scan_job, 0, sizeof(s_reading_scan_job));
+        ui_reading_list_render();
+        return false;
+    }
+
+    (void)ui_reading_copy_path(s_reading_scan_job.directory_path,
+                               sizeof(s_reading_scan_job.directory_path),
+                               s_reading_books_path);
+    rt_kprintf("reading_list: async scan start card=%u ready=%u root=%s books=%s\n",
+               (unsigned int)app_tf_card_inserted(),
+               (unsigned int)app_tf_storage_ready(),
+               s_reading_mount_path,
+               s_reading_books_path);
+
+    s_reading_scan_job.start_tick = start_tick;
+    memset(&s_reading_scan_job.dir, 0, sizeof(s_reading_scan_job.dir));
+    result = f_opendir(&s_reading_scan_job.dir, s_reading_scan_job.directory_path);
+    if (result == FR_NO_PATH || result == FR_NO_FILE)
+    {
+        result = f_mkdir(s_reading_scan_job.directory_path);
+        if (result == FR_OK || result == FR_EXIST)
+        {
+            result = f_opendir(&s_reading_scan_job.dir, s_reading_scan_job.directory_path);
+        }
+    }
+    if (result != FR_OK)
+    {
+        rt_kprintf("reading_list: async f_opendir failed path=%s result=%d\n",
+                   s_reading_scan_job.directory_path,
+                   (int)result);
+        ui_reading_scan_job_finish(UI_READING_SCAN_DIR_FAILED);
+        return false;
+    }
+
+    s_reading_scan_job.active = true;
+    s_reading_scan_job.dir_open = true;
+    ui_reading_perf_log("scan_async_begin", start_tick);
+    return true;
+}
+
+static bool ui_reading_scan_job_step(void)
+{
+    uint16_t processed = 0U;
+    rt_tick_t slice_tick = rt_tick_get();
+
+    if (!s_reading_scan_job.active || !s_reading_scan_job.dir_open)
+    {
+        return false;
+    }
+
+    while (processed < UI_READING_SCAN_SLICE_MAX_ENTRIES &&
+           s_reading_file_count < UI_READING_MAX_FILES)
+    {
+        FILINFO info;
+        FRESULT result;
+
+        memset(&info, 0, sizeof(info));
+        result = f_readdir(&s_reading_scan_job.dir, &info);
+        if (result != FR_OK)
+        {
+            rt_kprintf("reading_list: async f_readdir failed path=%s result=%d\n",
+                       s_reading_scan_job.directory_path,
+                       (int)result);
+            ui_reading_scan_job_finish(UI_READING_SCAN_DIR_FAILED);
+            return false;
+        }
+        if (info.fname[0] == '\0')
+        {
+            ui_reading_scan_job_finish(UI_READING_SCAN_OK);
+            return false;
+        }
+
+        ++processed;
+        ++s_reading_scan_job.entries_seen;
+        (void)ui_reading_add_file_from_info(s_reading_scan_job.directory_path, &info);
+    }
+
+    if (s_reading_file_count >= UI_READING_MAX_FILES)
+    {
+        ui_reading_scan_job_finish(UI_READING_SCAN_OK);
+        return false;
+    }
+
+    app_watchdog_progress(APP_WDT_MODULE_UI);
+    ui_reading_perf_log("scan_async_slice", slice_tick);
+    return true;
+}
+
 static void ui_reading_refresh_timer_cb(lv_timer_t *timer)
 {
     ui_reading_snapshot_t before;
@@ -1484,6 +1795,10 @@ static void ui_reading_refresh_timer_cb(lv_timer_t *timer)
     LV_UNUSED(timer);
 
     if (ui_Reading_List == NULL)
+    {
+        return;
+    }
+    if (s_reading_scan_job.active)
     {
         return;
     }
@@ -1520,26 +1835,45 @@ static void ui_reading_refresh_timer_cb(lv_timer_t *timer)
 
 static void ui_reading_enter_refresh_timer_cb(lv_timer_t *timer)
 {
-    LV_UNUSED(timer);
+    if (ui_Reading_List == NULL)
+    {
+        if (s_reading_enter_refresh_timer != NULL)
+        {
+            lv_timer_delete(s_reading_enter_refresh_timer);
+        }
+        s_reading_enter_refresh_timer = NULL;
+        return;
+    }
+
+    if (!s_reading_scan_job.active)
+    {
+        if (!ui_reading_scan_job_begin(true))
+        {
+            if (s_reading_enter_refresh_timer != NULL)
+            {
+                lv_timer_delete(s_reading_enter_refresh_timer);
+                s_reading_enter_refresh_timer = NULL;
+            }
+            if (s_reading_scan_state == UI_READING_SCAN_OK)
+            {
+                ui_reading_cover_request_prompt_deferred();
+            }
+            ui_reading_request_enter_full_refresh_deferred();
+            return;
+        }
+        lv_timer_set_period(timer, UI_READING_SCAN_SLICE_INTERVAL_MS);
+    }
+
+    if (ui_reading_scan_job_step())
+    {
+        return;
+    }
 
     if (s_reading_enter_refresh_timer != NULL)
     {
         lv_timer_delete(s_reading_enter_refresh_timer);
         s_reading_enter_refresh_timer = NULL;
     }
-
-    if (ui_Reading_List == NULL)
-    {
-        return;
-    }
-
-    ui_reading_refresh_files(true);
-    ui_reading_list_render();
-    if (s_reading_scan_state == UI_READING_SCAN_OK)
-    {
-        ui_reading_cover_request_prompt_deferred();
-    }
-    ui_reading_request_enter_full_refresh_deferred();
 }
 
 static void ui_reading_open_timer_cb(lv_timer_t *timer)
@@ -1578,6 +1912,7 @@ static uint16_t ui_reading_cover_collect_targets(ui_reading_cover_scan_stats_t *
     uint16_t count = 0U;
     uint16_t i;
     ui_reading_cover_scan_stats_t local_stats;
+    rt_tick_t start_tick = rt_tick_get();
 
     memset(s_reading_cover_missing_indices, 0, sizeof(s_reading_cover_missing_indices));
     memset(&local_stats, 0, sizeof(local_stats));
@@ -1649,6 +1984,7 @@ static uint16_t ui_reading_cover_collect_targets(ui_reading_cover_scan_stats_t *
         *stats = local_stats;
     }
     app_watchdog_progress(APP_WDT_MODULE_UI);
+    ui_reading_perf_log("cover_collect_targets", start_tick);
     return count;
 }
 
@@ -2156,8 +2492,6 @@ static void ui_reading_cover_show_prompt(const ui_reading_cover_scan_stats_t *st
 
 static void ui_reading_cover_maybe_prompt(void)
 {
-    ui_reading_cover_scan_stats_t stats;
-
     if (ui_reading_cover_prompt_shown() ||
         ui_reading_cover_worker_snapshot().running ||
         ui_Reading_List == NULL)
@@ -2165,32 +2499,141 @@ static void ui_reading_cover_maybe_prompt(void)
         return;
     }
 
-    s_reading_cover_missing_count = ui_reading_cover_collect_targets(&stats);
+    s_reading_cover_missing_count = s_reading_cover_prompt_scan_job.count;
     if (s_reading_cover_missing_count == 0U)
     {
         return;
     }
-    if (ui_reading_cover_dismissed_signature_matches(stats.signature))
+    if (ui_reading_cover_dismissed_signature_matches(s_reading_cover_prompt_scan_job.stats.signature))
     {
         return;
     }
 
-    s_reading_cover_prompt_stats = stats;
+    s_reading_cover_prompt_stats = s_reading_cover_prompt_scan_job.stats;
     ui_reading_cover_set_prompt_shown(true);
     ui_reading_cover_show_prompt(&s_reading_cover_prompt_stats);
 }
 
+static void ui_reading_cover_prompt_scan_reset(void)
+{
+    memset(&s_reading_cover_prompt_scan_job, 0, sizeof(s_reading_cover_prompt_scan_job));
+}
+
+static void ui_reading_cover_prompt_scan_begin(void)
+{
+    ui_reading_cover_prompt_scan_reset();
+    memset(s_reading_cover_missing_indices, 0, sizeof(s_reading_cover_missing_indices));
+    s_reading_cover_prompt_scan_job.active = true;
+    s_reading_cover_prompt_scan_job.start_tick = rt_tick_get();
+    s_reading_cover_prompt_scan_job.stats.signature = 2166136261UL;
+    rt_kprintf("reading_list: cover prompt scan start files=%u\n",
+               (unsigned int)s_reading_file_count);
+}
+
+static bool ui_reading_cover_prompt_scan_step(void)
+{
+    uint16_t processed = 0U;
+
+    if (!s_reading_cover_prompt_scan_job.active)
+    {
+        return false;
+    }
+
+    if (s_reading_scan_state != UI_READING_SCAN_OK ||
+        ui_reading_cover_prompt_shown() ||
+        ui_reading_cover_worker_snapshot().running ||
+        ui_Reading_List == NULL)
+    {
+        ui_reading_cover_prompt_scan_reset();
+        return false;
+    }
+
+    while (processed < UI_READING_COVER_PROMPT_SCAN_SLICE_MAX &&
+           s_reading_cover_prompt_scan_job.index < s_reading_file_count &&
+           s_reading_cover_prompt_scan_job.count < UI_READING_MAX_FILES)
+    {
+        uint16_t file_index = s_reading_cover_prompt_scan_job.index++;
+        reading_cover_cache_state_t state;
+
+        ++processed;
+        if (s_reading_files[file_index].file_type != UI_READING_FILE_TYPE_EPUB ||
+            s_reading_files[file_index].path[0] == '\0')
+        {
+            continue;
+        }
+
+        ++s_reading_cover_prompt_scan_job.stats.total_epub;
+        state = reading_cover_cache_get_state(s_reading_files[file_index].path,
+                                              UI_READING_GRID_COVER_WIDTH,
+                                              UI_READING_GRID_COVER_HEIGHT);
+        s_reading_cover_prompt_scan_job.stats.signature =
+            ui_reading_cover_signature_mix(s_reading_cover_prompt_scan_job.stats.signature,
+                                           file_index,
+                                           state);
+
+        if (state == READING_COVER_CACHE_READY)
+        {
+            ++s_reading_cover_prompt_scan_job.stats.ready_count;
+            continue;
+        }
+        if (state == READING_COVER_CACHE_NO_COVER)
+        {
+            ++s_reading_cover_prompt_scan_job.stats.no_cover_count;
+            continue;
+        }
+        if (state == READING_COVER_CACHE_FAILED)
+        {
+            ++s_reading_cover_prompt_scan_job.stats.failed_count;
+        }
+        else
+        {
+            ++s_reading_cover_prompt_scan_job.stats.unknown_count;
+        }
+
+        s_reading_cover_missing_indices[s_reading_cover_prompt_scan_job.count] = file_index;
+        ++s_reading_cover_prompt_scan_job.count;
+    }
+
+    app_watchdog_progress(APP_WDT_MODULE_UI);
+    if (s_reading_cover_prompt_scan_job.index < s_reading_file_count &&
+        s_reading_cover_prompt_scan_job.count < UI_READING_MAX_FILES)
+    {
+        return true;
+    }
+
+    s_reading_cover_prompt_scan_job.stats.target_count = s_reading_cover_prompt_scan_job.count;
+    rt_kprintf("reading_list: cover prompt scan done total=%u ready=%u no_cover=%u failed=%u unknown=%u target=%u\n",
+               (unsigned int)s_reading_cover_prompt_scan_job.stats.total_epub,
+               (unsigned int)s_reading_cover_prompt_scan_job.stats.ready_count,
+               (unsigned int)s_reading_cover_prompt_scan_job.stats.no_cover_count,
+               (unsigned int)s_reading_cover_prompt_scan_job.stats.failed_count,
+               (unsigned int)s_reading_cover_prompt_scan_job.stats.unknown_count,
+               (unsigned int)s_reading_cover_prompt_scan_job.stats.target_count);
+    ui_reading_perf_log("cover_prompt_scan_total", s_reading_cover_prompt_scan_job.start_tick);
+    s_reading_cover_prompt_scan_job.active = false;
+    ui_reading_cover_maybe_prompt();
+    ui_reading_cover_prompt_scan_reset();
+    return false;
+}
+
 static void ui_reading_cover_prompt_timer_cb(lv_timer_t *timer)
 {
-    LV_UNUSED(timer);
+    if (!s_reading_cover_prompt_scan_job.active)
+    {
+        ui_reading_cover_prompt_scan_begin();
+        lv_timer_set_period(timer, UI_READING_COVER_PROMPT_SCAN_INTERVAL_MS);
+    }
+
+    if (ui_reading_cover_prompt_scan_step())
+    {
+        return;
+    }
 
     if (s_reading_cover_prompt_timer != NULL)
     {
         lv_timer_delete(s_reading_cover_prompt_timer);
         s_reading_cover_prompt_timer = NULL;
     }
-
-    ui_reading_cover_maybe_prompt();
 }
 
 static void ui_reading_cover_request_prompt_deferred(void)
@@ -2434,6 +2877,8 @@ static bool ui_reading_load_pending_card_cover(ui_reading_card_refs_t *refs,
                                                int cover_w,
                                                int cover_h)
 {
+    rt_tick_t start_tick;
+
     if (refs == NULL || !refs->has_file || !refs->cover_pending ||
         refs->file_index >= s_reading_file_count || refs->card == NULL ||
         lv_obj_has_flag(refs->card, LV_OBJ_FLAG_HIDDEN))
@@ -2442,9 +2887,11 @@ static bool ui_reading_load_pending_card_cover(ui_reading_card_refs_t *refs,
     }
 
     refs->cover_pending = false;
+    start_tick = rt_tick_get();
     app_watchdog_progress(APP_WDT_MODULE_UI);
     ui_reading_update_cover(refs, refs->file_index, cover_w, cover_h);
     app_watchdog_progress(APP_WDT_MODULE_UI);
+    ui_reading_perf_log("cover_load_one", start_tick);
     if (refs->card != NULL)
     {
         lv_obj_invalidate(refs->card);
@@ -2461,8 +2908,6 @@ static void ui_reading_cover_load_timer_cb(lv_timer_t *timer)
     uint16_t i;
     uint8_t loaded = 0U;
 
-    LV_UNUSED(timer);
-
     if (ui_Reading_List == NULL)
     {
         if (s_reading_cover_load_timer != NULL)
@@ -2471,6 +2916,25 @@ static void ui_reading_cover_load_timer_cb(lv_timer_t *timer)
             s_reading_cover_load_timer = NULL;
         }
         return;
+    }
+
+    if (s_reading_cover_loaded_since_refresh >= UI_READING_COVER_LOAD_MAX_PER_RENDER)
+    {
+        if (s_reading_cover_load_timer != NULL)
+        {
+            lv_timer_delete(s_reading_cover_load_timer);
+            s_reading_cover_load_timer = NULL;
+        }
+        s_reading_cover_load_first_tick = false;
+        ui_reading_list_request_full_refresh("cover_lazy_budget_done");
+        app_watchdog_progress(APP_WDT_MODULE_UI);
+        return;
+    }
+
+    if (s_reading_cover_load_first_tick)
+    {
+        s_reading_cover_load_first_tick = false;
+        lv_timer_set_period(timer, UI_READING_COVER_LOAD_INTERVAL_MS);
     }
 
     if (ui_reading_load_pending_card_cover(&s_reading_continue_card,
@@ -2519,8 +2983,9 @@ static void ui_reading_schedule_cover_load(void)
         return;
     }
 
+    s_reading_cover_load_first_tick = true;
     s_reading_cover_load_timer = lv_timer_create(ui_reading_cover_load_timer_cb,
-                                                 UI_READING_COVER_LOAD_INTERVAL_MS,
+                                                 UI_READING_COVER_LOAD_INITIAL_DELAY_MS,
                                                  NULL);
     s_reading_cover_loaded_since_refresh = 0U;
 }
@@ -3137,6 +3602,7 @@ void ui_Reading_List_screen_destroy(void)
 {
     uint16_t i;
 
+    ui_reading_scan_job_cancel();
     ui_reading_cover_worker_set_cancel(true);
     if (ui_reading_cover_worker_snapshot().running)
     {
@@ -3159,12 +3625,14 @@ void ui_Reading_List_screen_destroy(void)
         lv_timer_delete(s_reading_cover_prompt_timer);
         s_reading_cover_prompt_timer = NULL;
     }
+    ui_reading_cover_prompt_scan_reset();
 
     if (s_reading_cover_load_timer != NULL)
     {
         lv_timer_delete(s_reading_cover_load_timer);
         s_reading_cover_load_timer = NULL;
     }
+    s_reading_cover_load_first_tick = false;
 
     if (s_reading_refresh_timer != NULL)
     {
